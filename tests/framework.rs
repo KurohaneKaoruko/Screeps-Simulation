@@ -1,9 +1,9 @@
 //! 运行框架语义: 全局重置 (isolate 重建、全局变量丢失、Memory 保留) 与场景加载校验。
 
-use nexus_sim::engine::scenario::{build_world, Scenario};
-use nexus_sim::engine::snapshot::{build_snapshot, CpuView, SnapshotOptions};
-use nexus_sim::engine::world::World;
-use nexus_sim::runtime::BotRuntime;
+use screeps_sim::engine::scenario::{build_world, Scenario};
+use screeps_sim::engine::snapshot::{build_snapshot, CpuView, SnapshotOptions};
+use screeps_sim::engine::world::World;
+use screeps_sim::runtime::BotRuntime;
 
 const ROOM: &str = r#"{
 	"name": "t",
@@ -35,7 +35,7 @@ fn snapshot(world: &World) -> String {
 	serde_json::to_string(&snap).unwrap()
 }
 
-fn console_json(r: &nexus_sim::runtime::TickResult) -> serde_json::Value {
+fn console_json(r: &screeps_sim::runtime::TickResult) -> serde_json::Value {
 	serde_json::from_str(r.console.first().map(String::as_str).unwrap_or("{}")).unwrap()
 }
 
@@ -170,13 +170,13 @@ fn same_scenario_rerun_is_deterministic() {
 			let scenario = Scenario::from_json(ROOM).unwrap();
 			let mut world = build_world(&scenario).unwrap();
 			let mut bot = BotRuntime::new(bundle, seed).unwrap();
-			let mut movement = nexus_sim::engine::movement::Movement::default();
+			let mut movement = screeps_sim::engine::movement::Movement::default();
 			let mut memory = String::from("{}");
 			for _ in 0..8 {
 				let snap = snapshot(&world);
 				let r = bot.run_tick(&snap, &memory).unwrap();
-				let intents = nexus_sim::engine::intents::IntentList::parse(&r.intents_json);
-				nexus_sim::engine::tick::run_tick(&mut world, &mut movement, &intents);
+				let intents = screeps_sim::engine::intents::IntentList::parse(&r.intents_json);
+				screeps_sim::engine::tick::run_tick(&mut world, &mut movement, &intents);
 				memory = r.memory;
 			}
 			(

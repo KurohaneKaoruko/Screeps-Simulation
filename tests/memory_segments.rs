@@ -1,10 +1,10 @@
 //! RawMemory 语义: get/set 校验、内存段跨 tick 持久、激活列表按官方规则（不调用
 //! setActiveSegments 即下一 tick 全部停用）以及段写入校验。
 
-use nexus_sim::engine::scenario::{build_world, Scenario};
-use nexus_sim::engine::snapshot::{build_snapshot, CpuView, SnapshotOptions};
-use nexus_sim::engine::world::World;
-use nexus_sim::runtime::BotRuntime;
+use screeps_sim::engine::scenario::{build_world, Scenario};
+use screeps_sim::engine::snapshot::{build_snapshot, CpuView, SnapshotOptions};
+use screeps_sim::engine::world::World;
+use screeps_sim::runtime::BotRuntime;
 
 const ROOM: &str = r#"{
 	"name": "t",

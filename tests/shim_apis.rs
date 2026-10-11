@@ -1,11 +1,11 @@
 //! JS 侧机制测试: 用微型 bundle (非 bot) 直接驱动 V8 + shim, 验证快照/寻路/意图回收链路。
 
-use nexus_sim::engine::movement::Movement;
-use nexus_sim::engine::scenario::{build_world, Scenario};
-use nexus_sim::engine::snapshot::{build_snapshot, CpuView, SnapshotOptions};
-use nexus_sim::engine::tick;
-use nexus_sim::engine::intents::IntentList;
-use nexus_sim::runtime::BotRuntime;
+use screeps_sim::engine::movement::Movement;
+use screeps_sim::engine::scenario::{build_world, Scenario};
+use screeps_sim::engine::snapshot::{build_snapshot, CpuView, SnapshotOptions};
+use screeps_sim::engine::tick;
+use screeps_sim::engine::intents::IntentList;
+use screeps_sim::runtime::BotRuntime;
 
 const TWO_ROOMS: &str = r#"{
 	"name": "t",
@@ -28,7 +28,7 @@ fn in_tokio<F: FnOnce()>(f: F) {
 	rt.block_on(async { f() });
 }
 
-fn run_once(bundle: &str, world: &mut nexus_sim::engine::world::World) -> (Vec<(String, String, serde_json::Value)>, Vec<String>) {
+fn run_once(bundle: &str, world: &mut screeps_sim::engine::world::World) -> (Vec<(String, String, serde_json::Value)>, Vec<String>) {
 	let snapshot = build_snapshot(
 		world,
 		&SnapshotOptions {
@@ -119,8 +119,8 @@ fn moveto_end_to_end_inner() {
 	let mut world = build_world(&scenario).unwrap();
 	let movement = &mut Movement::default();
 	// 注入一只 creep
-	use nexus_sim::engine::objects::{creep_obj, BodyPart};
-	let id = nexus_sim::engine::world::alloc_id(&mut world.next_id);
+	use screeps_sim::engine::objects::{creep_obj, BodyPart};
+	let id = screeps_sim::engine::world::alloc_id(&mut world.next_id);
 	let body: Vec<BodyPart> = ["move", "move", "move"]
 		.iter()
 		.map(|p| BodyPart { part_type: p.to_string(), hits: 100 })
@@ -372,8 +372,8 @@ fn loop_exception_keeps_intents_and_memory() {
 fn loop_exception_keeps_intents_and_memory_inner() {
 	let scenario = Scenario::from_json(TWO_ROOMS).unwrap();
 	let mut world = build_world(&scenario).unwrap();
-	use nexus_sim::engine::objects::{creep_obj, BodyPart};
-	let id = nexus_sim::engine::world::alloc_id(&mut world.next_id);
+	use screeps_sim::engine::objects::{creep_obj, BodyPart};
+	let id = screeps_sim::engine::world::alloc_id(&mut world.next_id);
 	let body: Vec<BodyPart> = ["move"]
 		.iter()
 		.map(|p| BodyPart { part_type: p.to_string(), hits: 100 })

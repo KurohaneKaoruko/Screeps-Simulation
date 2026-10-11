@@ -68,7 +68,7 @@ fn op_sim_get_runtime() -> String {
 }
 
 extension!(
-    nexus_sim,
+    screeps_sim,
     ops = [
         op_sim_now,
         op_sim_get_snapshot,
@@ -151,7 +151,7 @@ impl BotRuntime {
     /// `seed == 0` 表示不播种 (Math.random 保持 V8 原生随机)。
     pub fn new(bundle_code: &str, seed: u64) -> Result<BotRuntime, String> {
         let mut runtime = JsRuntime::new(RuntimeOptions {
-            extensions: vec![nexus_sim::init()],
+            extensions: vec![screeps_sim::init()],
             ..Default::default()
         });
         // 官方 runtime 把完整 lodash 3.10.1 注入为全局 `_` (E/game/game.js:475-477)

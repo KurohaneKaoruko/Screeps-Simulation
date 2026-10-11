@@ -2,11 +2,11 @@
 //! 对齐官方语义: 中断的 tick 整 tick 丢弃 (意图不结算、Memory 改动不落盘), cpuUsed = tickLimit,
 //! 且 isolate 必须被清理干净以便继续跑后续 tick。
 
-use nexus_sim::engine::intents::IntentList;
-use nexus_sim::engine::scenario::{build_world, Scenario};
-use nexus_sim::engine::snapshot::{build_snapshot, CpuView, SnapshotOptions};
-use nexus_sim::engine::world::World;
-use nexus_sim::runtime::BotRuntime;
+use screeps_sim::engine::intents::IntentList;
+use screeps_sim::engine::scenario::{build_world, Scenario};
+use screeps_sim::engine::snapshot::{build_snapshot, CpuView, SnapshotOptions};
+use screeps_sim::engine::world::World;
+use screeps_sim::runtime::BotRuntime;
 
 const ROOM: &str = r#"{
 	"name": "t",

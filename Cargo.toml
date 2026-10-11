@@ -1,12 +1,12 @@
 [package]
-name = "nexus-sim"
+name = "screeps-sim"
 description = "Screeps-Simulation: 本地高速 Screeps 模拟器 (Rust 结算引擎 + V8 JS 宿主)"
 version = "0.1.0"
 edition = "2021"
 license = "ISC"
 
 [[bin]]
-name = "nexus-sim"
+name = "screeps-sim"
 path = "src/main.rs"
 
 [dependencies]
@@ -20,5 +20,5 @@ opt-level = 3
 lto = "thin"
 
 [lib]
-name = "nexus_sim"
+name = "screeps_sim"
 path = "src/lib.rs"

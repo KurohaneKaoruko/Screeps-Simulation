@@ -1,18 +1,21 @@
-//! nexus-sim CLI: 场景驱动的高速 Screeps 模拟器。
+//! screeps-sim CLI: 场景驱动的高速 Screeps 模拟器。
 //!
 //! 用法:
-//!   nexus-sim --scenario <json> [--bundle dist/main.js] [--ticks N]
-//!            [--csv out.csv] [--json-report out.json] [--quiet]
+//!   screeps-sim --scenario <json|-> [--bundle dist/main.js] [--ticks N]
+//!            [--csv out.csv] [--json-report out.json|--> [--quiet]
+//!
+//! `--scenario -` 从 stdin 读场景; `--json-report -` 把 JSON 报告写到 stdout
+//! (此时人类可读报告转 stderr, stdout 保持纯 JSON 供上层工具解析)。
 
-use nexus_sim::runtime::BotRuntime;
-use nexus_sim::engine::cpu::CpuState;
-use nexus_sim::engine::intents::IntentList;
-use nexus_sim::engine::metrics::{evaluate_asserts, MetricsCollector, TickMetrics};
-use nexus_sim::engine::movement::Movement;
-use nexus_sim::engine::scenario::Scenario;
-use nexus_sim::engine::snapshot::{build_snapshot, SnapshotOptions};
-use nexus_sim::engine::tick;
-use nexus_sim::engine::world::World;
+use screeps_sim::runtime::BotRuntime;
+use screeps_sim::engine::cpu::CpuState;
+use screeps_sim::engine::intents::IntentList;
+use screeps_sim::engine::metrics::{evaluate_asserts, MetricsCollector, TickMetrics};
+use screeps_sim::engine::movement::Movement;
+use screeps_sim::engine::scenario::Scenario;
+use screeps_sim::engine::snapshot::{build_snapshot, SnapshotOptions};
+use screeps_sim::engine::tick;
+use screeps_sim::engine::world::World;
 use std::io::Write as _;
 use std::time::Instant;
 
@@ -88,12 +91,36 @@ async fn async_main() {
         }
     }
     if scenario_path.is_empty() {
-        eprintln!("用法: nexus-sim --scenario <scenario.json> [--bundle dist/main.js] [--ticks N] [--csv out.csv] [--json-report out.json] [--quiet]");
+        eprintln!("用法: screeps-sim --scenario <scenario.json|-> [--bundle dist/main.js] [--ticks N] [--csv out.csv] [--json-report out.json|-] [--quiet]");
+        eprintln!("      --scenario -      场景 JSON 从 stdin 读入 (npm runner 的管道协议)");
+        eprintln!("      --json-report -   JSON 报告写 stdout, 人类可读报告转 stderr");
         std::process::exit(2);
     }
 
-    let scenario_text = std::fs::read_to_string(&scenario_path)
-        .unwrap_or_else(|e| panic!("读取场景失败 {scenario_path}: {e}"));
+    // JSON 报告走 stdout 时, 人类可读输出全部转 stderr, 保持 stdout 纯 JSON
+    let json_stdout = report_path.as_deref() == Some("-");
+    if json_stdout {
+        quiet = true;
+    }
+    let say = |line: String| {
+        if json_stdout {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    };
+
+    let scenario_text = if scenario_path == "-" {
+        use std::io::Read;
+        let mut text = String::new();
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .unwrap_or_else(|e| panic!("读取 stdin 场景失败: {e}"));
+        text
+    } else {
+        std::fs::read_to_string(&scenario_path)
+            .unwrap_or_else(|e| panic!("读取场景失败 {scenario_path}: {e}"))
+    };
     let scenario = Scenario::from_json(&scenario_text)
         .unwrap_or_else(|e| panic!("{e}"));
     let total_ticks = ticks_override.or(scenario.ticks).unwrap_or(1000);
@@ -101,7 +128,7 @@ async fn async_main() {
     let bundle = std::fs::read_to_string(&bundle_path)
         .unwrap_or_else(|e| panic!("读取 bundle 失败 {bundle_path}: {e}"));
 
-    let mut world = nexus_sim::engine::scenario::build_world(&scenario)
+    let mut world = screeps_sim::engine::scenario::build_world(&scenario)
         .unwrap_or_else(|e| panic!("{e}"));
 
     // 地形可视化 (场景作者核对生成质量)
@@ -122,8 +149,14 @@ async fn async_main() {
                 }
             }
         }
-        println!("地形 {room_name}: 墙 {}/2500 ({:.1}%), 沼泽 {}/2500 ({:.1}%)", walls, 100.0 * walls as f32 / 2500.0, swamps, 100.0 * swamps as f32 / 2500.0);
-        println!("{}", room.terrain.render());
+        say(format!(
+            "地形 {room_name}: 墙 {}/2500 ({:.1}%), 沼泽 {}/2500 ({:.1}%)",
+            walls,
+            100.0 * walls as f32 / 2500.0,
+            swamps,
+            100.0 * swamps as f32 / 2500.0
+        ));
+        say(room.terrain.render());
     }
     let mut movement = Movement::default();
     let mut metrics = MetricsCollector::default();
@@ -221,7 +254,7 @@ async fn async_main() {
         // 1. 快照 (Game.cpu.bucket 显示 max(0, raw); tickLimit = min(500, bucket + limit))
         let tick_limit = tick_limit_override.unwrap_or_else(|| cpu.tick_limit());
         let snapshot_opts = SnapshotOptions {
-            cpu: nexus_sim::engine::snapshot::CpuView {
+            cpu: screeps_sim::engine::snapshot::CpuView {
                 limit: cpu_limit,
                 tick_limit,
                 bucket: cpu.displayed_bucket(),
@@ -272,7 +305,7 @@ async fn async_main() {
         // 3. 控制台与错误输出
         if verbose {
             for line in &tick_result.console {
-                println!("[t{}] {}", world.tick, line);
+                say(format!("[t{}] {}", world.tick, line));
             }
         } else if !quiet {
             for line in &tick_result.console {
@@ -355,61 +388,90 @@ async fn async_main() {
     let actual_ticks = run;
     let tps = actual_ticks as f64 / elapsed.as_secs_f64().max(1e-9);
 
-    // ── 报告 ──
-    println!("\n══════════ 模拟报告 ══════════");
-    println!("场景: {}  tick: {}/{}  用时: {:.2}s  ({:.0} tick/s)", scenario.name, actual_ticks, total_ticks, elapsed.as_secs_f64(), tps);
-    println!("CPU: 均值 {:.3}ms  P50 {:.3}ms  P95 {:.3}ms  P99 {:.3}ms  超限 tick {}",
-        metrics.cpu_avg(), metrics.cpu_percentile(0.50), metrics.cpu_percentile(0.95),
-        metrics.cpu_percentile(0.99), metrics.cpu_over_limit_ticks);
-    println!("能量: 采集 {} 建造 {} 升级 {} 孵化 {}",
-        world.energy_harvested, world.energy_built, world.energy_control, world.energy_spawned);
-    println!("单位: 生产 {} 死亡 {} 存活 {}",
-        world.creeps_produced,
-        world.creeps_lost,
-        metrics.history.last().map(|m| m.creeps).unwrap_or(0));
-    println!("GCL: {} 级 ({}/{})",
-        world.gcl_level(),
-        world.gcl_level_progress().0,
-        world.gcl_level_progress().1);
-    print!("RCL 时间线: ");
-    for (level, t) in &world.rcl_timeline {
-        print!("L{level}@{t} ");
-    }
-    println!();
-    println!("Memory 峰值: {} 字节", metrics.memory_peak);
-    println!("意图分布: {:?}", intent_histogram);
-    println!("移动执行率: {}/{} = {:.1}%", total_moved, total_moves, 100.0 * total_moved as f64 / total_moves.max(1) as f64);
+    // ── 断言先结算 (结果并入 JSON 报告, 供上层 runner 消费) ──
+    let assert_results = evaluate_asserts(&world, &metrics, &scenario.asserts);
 
-    // ── 落盘输出 (先于断言, 保证失败时也能拿到数据) ──
+    // ── 落盘输出 (先于人类报告; 失败时也能拿到数据) ──
     if let Some(path) = &dump_memory_path {
         let _ = std::fs::write(path, &memory_json);
     }
     if let Some(path) = &report_path {
-        let report = build_json_report(&world, &metrics, &scenario, tps, elapsed.as_secs_f64());
+        let report = build_json_report(
+            &world,
+            &metrics,
+            &scenario,
+            tps,
+            elapsed.as_secs_f64(),
+            &assert_results,
+            fatal_error,
+        );
         if let Ok(text) = serde_json::to_string_pretty(&report) {
-            let _ = std::fs::write(path, text);
+            if path == "-" {
+                println!("{text}");
+            } else {
+                let _ = std::fs::write(path, text);
+            }
         }
     }
 
-    // ── 断言 ──
-    if !scenario.asserts.is_empty() {
-        println!("\n── 场景断言 ──");
-        let results = evaluate_asserts(&world, &metrics, &scenario.asserts);
+    // ── 人类可读报告 (json_stdout 模式下转 stderr) ──
+    say("\n══════════ 模拟报告 ══════════".into());
+    say(format!(
+        "场景: {}  tick: {}/{}  用时: {:.2}s  ({:.0} tick/s)",
+        scenario.name,
+        actual_ticks,
+        total_ticks,
+        elapsed.as_secs_f64(),
+        tps
+    ));
+    say(format!(
+        "CPU: 均值 {:.3}ms  P50 {:.3}ms  P95 {:.3}ms  P99 {:.3}ms  超限 tick {}",
+        metrics.cpu_avg(),
+        metrics.cpu_percentile(0.50),
+        metrics.cpu_percentile(0.95),
+        metrics.cpu_percentile(0.99),
+        metrics.cpu_over_limit_ticks
+    ));
+    say(format!(
+        "能量: 采集 {} 建造 {} 升级 {} 孵化 {}",
+        world.energy_harvested, world.energy_built, world.energy_control, world.energy_spawned
+    ));
+    say(format!(
+        "单位: 生产 {} 死亡 {} 存活 {}",
+        world.creeps_produced,
+        world.creeps_lost,
+        metrics.history.last().map(|m| m.creeps).unwrap_or(0)
+    ));
+    say(format!(
+        "GCL: {} 级 ({}/{})",
+        world.gcl_level(),
+        world.gcl_level_progress().0,
+        world.gcl_level_progress().1
+    ));
+    let mut timeline = String::from("RCL 时间线: ");
+    for (level, t) in &world.rcl_timeline {
+        timeline.push_str(&format!("L{level}@{t} "));
+    }
+    say(timeline);
+    say(format!("Memory 峰值: {} 字节", metrics.memory_peak));
+    say(format!("意图分布: {:?}", intent_histogram));
+    say(format!(
+        "移动执行率: {}/{} = {:.1}%",
+        total_moved,
+        total_moves,
+        100.0 * total_moved as f64 / total_moves.max(1) as f64
+    ));
+
+    // ── 断言报告 ──
+    if !assert_results.is_empty() {
+        say("\n── 场景断言 ──".into());
         let mut all_pass = true;
-        for r in &results {
+        for r in &assert_results {
             let tag = if r.passed { "✓ PASS" } else { "✗ FAIL" };
             if !r.passed {
                 all_pass = false;
             }
-            let label = match &r.spec {
-                nexus_sim::engine::scenario::AssertSpec::RclAtLeast { .. } => "rclAtLeast",
-                nexus_sim::engine::scenario::AssertSpec::RclReachedBy { .. } => "rclReachedBy",
-                nexus_sim::engine::scenario::AssertSpec::CreepCountAtLeast { .. } => "creepCountAtLeast",
-                nexus_sim::engine::scenario::AssertSpec::CpuAvgBelow { .. } => "cpuAvgBelow",
-                nexus_sim::engine::scenario::AssertSpec::CpuP95Below { .. } => "cpuP95Below",
-                nexus_sim::engine::scenario::AssertSpec::NoErrors => "noErrors",
-            };
-            println!("{tag}  {label}  ({})", r.detail);
+            say(format!("{tag}  {}  ({})", assert_kind(&r.spec), r.detail));
         }
         if !all_pass {
             std::process::exit(1);
@@ -420,6 +482,19 @@ async fn async_main() {
     if fatal_error {
         eprintln!("✗ 模拟因致命运行时错误提前终止 (退出码 1)");
         std::process::exit(1);
+    }
+}
+
+/// 断言种类标签 (与场景 JSON 的 `kind` 一致)
+fn assert_kind(spec: &screeps_sim::engine::scenario::AssertSpec) -> &'static str {
+    use screeps_sim::engine::scenario::AssertSpec;
+    match spec {
+        AssertSpec::RclAtLeast { .. } => "rclAtLeast",
+        AssertSpec::RclReachedBy { .. } => "rclReachedBy",
+        AssertSpec::CreepCountAtLeast { .. } => "creepCountAtLeast",
+        AssertSpec::CpuAvgBelow { .. } => "cpuAvgBelow",
+        AssertSpec::CpuP95Below { .. } => "cpuP95Below",
+        AssertSpec::NoErrors => "noErrors",
     }
 }
 
@@ -436,7 +511,7 @@ fn summarize(world: &World) -> (u8, u32, u32, u32, u32, usize, usize) {
             if c.mine {
                 rcl = rcl.max(c.level);
                 progress = c.progress;
-                progress_total = nexus_sim::engine::constants::CONTROLLER_LEVELS
+                progress_total = screeps_sim::engine::constants::CONTROLLER_LEVELS
                     .iter()
                     .find(|(l, _)| *l == c.level)
                     .map(|(_, p)| *p)
@@ -462,6 +537,8 @@ fn build_json_report(
     scenario: &Scenario,
     tps: f64,
     seconds: f64,
+    asserts: &[screeps_sim::engine::metrics::AssertResult],
+    fatal: bool,
 ) -> serde_json::Value {
     use serde_json::json;
     let rcl_timeline: serde_json::Value = world
@@ -501,6 +578,15 @@ fn build_json_report(
         "rclTimeline": rcl_timeline,
         "memoryPeakBytes": metrics.memory_peak,
         "totalErrors": metrics.total_errors,
+        "asserts": asserts
+            .iter()
+            .map(|r| json!({
+                "kind": assert_kind(&r.spec),
+                "passed": r.passed,
+                "detail": r.detail,
+            }))
+            .collect::<Vec<_>>(),
+        "fatalError": fatal,
         "final": metrics.history.last().map(|m| json!({
             "tick": m.tick,
             "rcl": m.rcl,

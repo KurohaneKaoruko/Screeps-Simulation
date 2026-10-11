@@ -1,14 +1,14 @@
 //! 机制回归测试: 用受控意图直接驱动结算引擎, 锁定与官方规则对齐的关键数值。
 //! 不经过 V8 —— 快且完全确定性; JS 侧 (PathFinder 跨房 / moveTo) 另见 shim_apis.rs。
 
-use nexus_sim::engine::constants;
-use nexus_sim::engine::intents::IntentList;
-use nexus_sim::engine::movement::Movement;
-use nexus_sim::engine::objects;
-use nexus_sim::engine::scenario::{build_world, Scenario};
-use nexus_sim::engine::tick;
-use nexus_sim::engine::world::alloc_id;
-use nexus_sim::engine::world::World;
+use screeps_sim::engine::constants;
+use screeps_sim::engine::intents::IntentList;
+use screeps_sim::engine::movement::Movement;
+use screeps_sim::engine::objects;
+use screeps_sim::engine::scenario::{build_world, Scenario};
+use screeps_sim::engine::tick;
+use screeps_sim::engine::world::alloc_id;
+use screeps_sim::engine::world::World;
 
 const TWO_ROOMS: &str = r#"{
 	"name": "t",
@@ -40,7 +40,7 @@ fn find_creep(world: &World, name: &str) -> (u64, u8, u8) {
 }
 
 fn add_creep(world: &mut World, name: &str, x: u8, y: u8, body: &[&str]) -> u64 {
-	use nexus_sim::engine::objects::{creep_obj, BodyPart};
+	use screeps_sim::engine::objects::{creep_obj, BodyPart};
 	let id = alloc_id(&mut world.next_id);
 	let body: Vec<BodyPart> = body
 		.iter()
@@ -66,7 +66,7 @@ fn add_creep(world: &mut World, name: &str, x: u8, y: u8, body: &[&str]) -> u64 
 fn dropped_energy_decay() {
 	let (mut world, mut movement) = setup(TWO_ROOMS);
 	let id = alloc_id(&mut world.next_id);
-	let pile = nexus_sim::engine::objects::dropped_energy(id, 20, 20, 1000);
+	let pile = screeps_sim::engine::objects::dropped_energy(id, 20, 20, 1000);
 	world.rooms.get_mut("W5N8").unwrap().objects.insert(id, pile);
 	let empty = IntentList { entries: vec![] };
 	for _ in 0..1100 {
@@ -475,7 +475,7 @@ const RCL3_ROOM: &str = r#"{
 }"#;
 
 fn add_creep_in(world: &mut World, room: &str, name: &str, x: u8, y: u8, body: &[&str]) -> u64 {
-	use nexus_sim::engine::objects::{creep_obj, BodyPart};
+	use screeps_sim::engine::objects::{creep_obj, BodyPart};
 	let id = alloc_id(&mut world.next_id);
 	let body: Vec<BodyPart> = body
 		.iter()

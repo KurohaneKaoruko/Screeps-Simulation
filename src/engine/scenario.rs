@@ -89,7 +89,8 @@ fn default_mineral_amount() -> u32 {
 #[derive(Deserialize, Debug, Clone)]
 pub struct MineralSpec {
     pub pos: [u8; 2],
-    #[serde(default = "default_mineral_type")]
+    /// alias 兼容历史场景 JSON 的 `mineralType` 写法
+    #[serde(default = "default_mineral_type", alias = "mineralType")]
     pub mineral_type: String,
     #[serde(default = "default_mineral_amount")]
     pub amount: u32,
