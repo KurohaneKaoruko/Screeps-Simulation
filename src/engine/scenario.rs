@@ -72,6 +72,9 @@ pub struct ControllerSpec {
     pub level: u8,
     pub pos: Option<[u8; 2]>,
     pub progress: Option<u32>,
+    /// 是否归属我方 (默认 true)。false 时构造中立控制器 (level 强制 0), 供 claim/reserve 验证。
+    #[serde(default = "default_true")]
+    pub mine: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -81,6 +84,9 @@ pub struct StructureSpec {
     pub pos: [u8; 2],
     pub energy: Option<u32>,
     pub hits: Option<u32>,
+    /// 敌方结构 (mine=false, enemy=true)
+    #[serde(default)]
+    pub enemy: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -91,6 +97,9 @@ pub struct CreepSpec {
     pub ttl: Option<u64>,
     #[serde(default)]
     pub store: BTreeMap<String, u32>,
+    /// 敌方单位 (mine=false, enemy=true): rangedMassAttack / FIND_HOSTILE_CREEPS 的目标
+    #[serde(default)]
+    pub enemy: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -342,7 +351,11 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
             let pos = ctrl.pos.unwrap_or([25, 25]);
             let id = world.alloc_id();
             let mut obj = objects::controller(id, pos[0], pos[1], ctrl.level);
-            obj.mine = true;
+            obj.mine = ctrl.mine;
+            if !ctrl.mine {
+                // 中立控制器: 无等级 (供 claim / reserve)
+                obj.level = 0;
+            }
             obj.progress = ctrl.progress.unwrap_or(0);
             room.objects.insert(id, obj);
         }
@@ -398,6 +411,10 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
             if let Some(h) = st.hits {
                 obj.hits = h;
             }
+            if st.enemy {
+                obj.mine = false;
+                obj.enemy = true;
+            }
             match st.structure_type.as_str() {
                 "spawn" => {
                     obj.energy_capacity = constants::SPAWN_ENERGY_CAPACITY;
@@ -424,6 +441,10 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
                 .collect();
             let mut obj = objects::creep_obj(id, &cr.name, cr.pos[0], cr.pos[1], body);
             obj.store = cr.store.clone();
+            if cr.enemy {
+                obj.mine = false;
+                obj.enemy = true;
+            }
             if let Some(ttl) = cr.ttl {
                 obj.age_time = Some(world.tick + ttl);
             }

@@ -201,6 +201,39 @@ fn tick_creeps(
 
         // 疲劳恢复
         movement::recover_fatigue(obj);
+
+        // 伤害/治疗统一应用 (官方 processor/intents/creeps/tick.js: 在 creep tick 末尾)
+        let old_hits = obj.hits;
+        if obj.damage_to_apply > 0 {
+            obj.hits = obj.hits.saturating_sub(obj.damage_to_apply);
+            obj.damage_to_apply = 0;
+        }
+        if obj.heal_to_apply > 0 {
+            obj.hits = (obj.hits + obj.heal_to_apply).min(obj.hits_max);
+            obj.heal_to_apply = 0;
+        }
+        if obj.hits == 0 {
+            // 战斗死亡: 与自然死亡同样掉落 (官方 _die)
+            let name = obj.name.clone().unwrap_or_default();
+            let dead = world
+                .rooms
+                .get_mut(room_name)
+                .unwrap()
+                .objects
+                .remove(&id)
+                .unwrap();
+            world.creeps_lost += 1;
+            deaths.push(name);
+            intents::bury_creep(world, room_name, dead, constants::CREEP_CORPSE_RATE);
+            continue;
+        }
+        if obj.hits != old_hits {
+            // 官方 _recalc-body: 由总 hits 反推部件; 容量缩小则掉落超容资源
+            obj.recalc_body();
+            if obj.hits < old_hits {
+                intents::drop_resources_without_space(world, room_name, id);
+            }
+        }
     }
     // 孵化中的 creep: 若对应 spawn 消失则一并移除
     let spawning_creeps: Vec<(u64, String)> = world.rooms[room_name]

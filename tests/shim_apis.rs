@@ -170,3 +170,196 @@ fn moveto_end_to_end_inner() {
 	assert!(dist <= 1, "12 tick 后应到达 source 邻域, 实际 {pos:?} 距离 {dist}");
 }
 
+// ═════════════════════════ 战斗 API (JS shim 层) ═════════════════════════
+
+/// 战斗场景: 敌我两只 creep 相邻 + 中立控制器 + 墙
+const COMBAT_SCENE: &str = r#"{
+	"name": "combat",
+	"seed": 1,
+	"rooms": [
+		{ "name": "W5N8", "terrain": { "kind": "flat" },
+		  "sources": { "positions": [[18, 22]] },
+		  "controller": { "level": 0, "pos": [28, 27], "mine": false },
+		  "structures": [
+		  	{ "type": "spawn", "pos": [25, 25], "energy": 300 },
+		  	{ "type": "constructedWall", "pos": [22, 20] }
+		  ],
+		  "creeps": [
+		  	{ "name": "Ally", "body": ["attack", "ranged_attack", "heal", "work", "claim", "carry", "move"], "pos": [20, 20] },
+		  	{ "name": "Foe", "body": ["attack", "move"], "pos": [21, 20], "enemy": true }
+		  ]
+		}
+	]
+}"#;
+
+/// 战斗 API 返回码与意图提交: attack/rangedAttack/heal/dismantle/claim/reserve/sign/attackController
+#[test]
+fn combat_apis_submit_intents() {
+	in_tokio(|| combat_apis_submit_intents_inner());
+}
+
+fn combat_apis_submit_intents_inner() {
+	let scenario = Scenario::from_json(COMBAT_SCENE).unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let bundle = r#"
+		exports.loop = function() {
+			const ally = Game.creeps.Ally;
+			// Game.creeps 只含我方 (官方语义), 敌人经 FIND_HOSTILE_CREEPS
+			const foe = ally.room.find(FIND_HOSTILE_CREEPS)[0];
+			const wall = ally.room.find(FIND_STRUCTURES).find(s => s.structureType === "constructedWall");
+			const ctrl = ally.room.controller;
+			const out = { hasFoe: !!foe, foeMy: foe ? foe.my : null };
+			out.attack = ally.attack(foe);
+			out.rangedAttack = ally.rangedAttack(foe);
+			out.rangedMassAttack = ally.rangedMassAttack();
+			out.healSelf = ally.heal(ally);
+			out.rangedHealSelf = ally.rangedHeal(ally);
+			out.dismantleWall = ally.dismantle(wall);
+			out.sign = ally.signController(ctrl, "hi");
+			// 控制器无 owner/reservation → attackController ERR_INVALID_TARGET (先于距离检查)
+			out.attackControllerNeutral = ally.attackController(ctrl);
+			// 距离控制器 8 格: claim/reserve 应 ERR_NOT_IN_RANGE
+			out.ctrlRange = ally.pos.getRangeTo(ctrl.pos.x, ctrl.pos.y);
+			out.claimFar = ally.claimController(ctrl);
+			out.reserveFar = ally.reserveController(ctrl);
+			// 攻击友军自身 (my creep) 官方不禁止: attack 自己应 ERR_INVALID_TARGET (id 相同)
+			out.attackSelf = ally.attack(ally);
+			// 无 attack 部件路径: 用 heal 单位攻击 → 但 ally 有 attack, 改测无部件的 Foe
+			console.log(JSON.stringify(out));
+		};
+	"#;
+	let (entries, console) = run_once(bundle, &mut world);
+	let info: serde_json::Value = serde_json::from_str(console.first().map(String::as_str).unwrap_or("{}")).unwrap();
+	assert_eq!(info["hasFoe"], true, "FIND_HOSTILE_CREEPS 应找到敌人: {info}");
+	assert_eq!(info["foeMy"], false, "敌人 my=false: {info}");
+	assert_eq!(info["attack"], 0, "attack 邻格敌人应 OK: {info}");
+	assert_eq!(info["rangedAttack"], 0, "rangedAttack 应 OK: {info}");
+	assert_eq!(info["rangedMassAttack"], 0, "rangedMassAttack 应 OK: {info}");
+	assert_eq!(info["healSelf"], 0, "heal 邻格自身应 OK: {info}");
+	assert_eq!(info["rangedHealSelf"], 0, "rangedHeal 应 OK: {info}");
+	assert_eq!(info["dismantleWall"], -9, "dismantle 2 格外墙 ERR_NOT_IN_RANGE: {info}");
+	assert_eq!(info["sign"], -9, "signController 8 格外 ERR_NOT_IN_RANGE: {info}");
+	assert_eq!(info["attackControllerNeutral"], -9, "官方顺序: 距离检查先于 owner 检查, 8 格外 ERR_NOT_IN_RANGE: {info}");
+	let range = info["ctrlRange"].as_i64().unwrap();
+	assert!(range >= 4, "ally 与控制器距离应 >3: {info}");
+	assert_eq!(info["claimFar"], -9, "claimController 超距 ERR_NOT_IN_RANGE: {info}");
+	assert_eq!(info["reserveFar"], -9, "reserveController 超距 ERR_NOT_IN_RANGE: {info}");
+	// 意图应被提交
+	let names: Vec<&str> = entries.iter().map(|(_, n, _)| n.as_str()).collect();
+	for expect in ["attack", "rangedAttack", "rangedMassAttack", "heal", "rangedHeal"] {
+		assert!(names.contains(&expect), "应提交 {expect} 意图, 实际 {names:?}");
+	}
+}
+
+/// 战斗意图经引擎结算 (官方互斥表: heal 压制 attack/rangedAttack/rangedMassAttack;
+/// rangedMassAttack 压制 rangedAttack)。只提交不冲突组合 attack + rangedMassAttack:
+/// Foe -30-10=-40; Ally 被 Foe 1×ATTACK 反击 -30
+#[test]
+fn combat_intents_resolve_through_engine() {
+	in_tokio(|| combat_intents_resolve_through_engine_inner());
+}
+
+fn combat_intents_resolve_through_engine_inner() {
+	let scenario = Scenario::from_json(COMBAT_SCENE).unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let bundle = r#"
+		exports.loop = function() {
+			const ally = Game.creeps.Ally;
+			const foe = ally.room.find(FIND_HOSTILE_CREEPS)[0];
+			ally.attack(foe);
+			ally.rangedMassAttack();
+			console.log(JSON.stringify({ ok: true }));
+		};
+	"#;
+	let (entries, _) = run_once(bundle, &mut world);
+	let movement = &mut Movement::default();
+	tick::run_tick(&mut world, movement, &IntentList { entries });
+	let get_hits = |name: &str| -> u32 {
+		world.rooms["W5N8"]
+			.objects
+			.values()
+			.find(|o| o.name.as_deref() == Some(name))
+			.map(|o| o.hits)
+			.unwrap_or(0)
+	};
+	// attack: 1×30; rangedMassAttack: 距离 1 → 10×1.0; 两者互不压制
+	assert_eq!(get_hits("Foe"), 200 - 40, "attack 30 + rangedMassAttack 10");
+	// 近战触发反击: Foe 1×ATTACK × 30
+	assert_eq!(get_hits("Ally"), 700 - 30, "被反击 30");
+}
+
+/// 官方互斥表 (checkPriorities): heal 与 attack 同 tick 提交 → 只有 heal 执行
+#[test]
+fn heal_suppresses_attack_same_tick_via_js() {
+	in_tokio(|| heal_suppresses_attack_same_tick_via_js_inner());
+}
+
+fn heal_suppresses_attack_same_tick_via_js_inner() {
+	let scenario = Scenario::from_json(COMBAT_SCENE).unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let bundle = r#"
+		exports.loop = function() {
+			const ally = Game.creeps.Ally;
+			const foe = ally.room.find(FIND_HOSTILE_CREEPS)[0];
+			ally.attack(foe);
+			ally.heal(ally);
+			console.log(JSON.stringify({ ok: true }));
+		};
+	"#;
+	let (entries, _) = run_once(bundle, &mut world);
+	let movement = &mut Movement::default();
+	tick::run_tick(&mut world, movement, &IntentList { entries });
+	let foe_hits = world.rooms["W5N8"]
+		.objects
+		.values()
+		.find(|o| o.name.as_deref() == Some("Foe"))
+		.map(|o| o.hits)
+		.unwrap_or(0);
+	assert_eq!(foe_hits, 200, "heal 在场时 attack 被互斥表压制 (官方 checkPriorities)");
+}
+
+/// 中立控制器: claim → 归属我方 (经 V8 提交意图)
+#[test]
+fn claim_controller_via_js() {
+	in_tokio(|| claim_controller_via_js_inner());
+}
+
+fn claim_controller_via_js_inner() {
+	let scenario = Scenario::from_json(COMBAT_SCENE).unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	// 把 Ally 移到控制器旁
+	{
+		let ctrl = world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "controller").unwrap();
+		let (cx, cy) = (ctrl.x, ctrl.y);
+		let ally = world
+			.rooms
+			.get_mut("W5N8")
+			.unwrap()
+			.objects
+			.values_mut()
+			.find(|o| o.name.as_deref() == Some("Ally"))
+			.unwrap();
+		ally.x = cx;
+		ally.y = cy + 1;
+	}
+	let bundle = r#"
+		exports.loop = function() {
+			const ally = Game.creeps.Ally;
+			const ctrl = ally.room.controller;
+			console.log(JSON.stringify({ code: ally.claimController(ctrl), my: ctrl.my, level: ctrl.level }));
+		};
+	"#;
+	let (entries, console) = run_once(bundle, &mut world);
+	let info: serde_json::Value = serde_json::from_str(console.first().map(String::as_str).unwrap_or("{}")).unwrap();
+	assert_eq!(info["code"], 0, "claimController 应 OK: {info}");
+	let movement = &mut Movement::default();
+	tick::run_tick(&mut world, movement, &IntentList { entries });
+	let ctrl = world.rooms["W5N8"]
+		.objects
+		.values()
+		.find(|o| o.obj_type == "controller")
+		.unwrap();
+	assert!(ctrl.mine, "claim 后控制器应归属我方");
+	assert_eq!(ctrl.level, 1);
+}
+

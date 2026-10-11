@@ -213,10 +213,26 @@ fn object_json(obj: &Obj, world: &World) -> Value {
             );
             extra.insert("safeModeAvailable".into(), json!(0));
             extra.insert("safeMode".into(), Value::Null);
-            extra.insert("upgradeBlocked".into(), json!(0));
+            extra.insert(
+                "upgradeBlocked".into(),
+                json!(obj.upgrade_blocked.saturating_sub(world.tick)),
+            );
             extra.insert(
                 "reservation".into(),
-                Value::Null,
+                match obj.reservation_end_time {
+                    Some(end) => json!({
+                        "username": "Nexus",
+                        "ticksToEndTime": end.saturating_sub(world.tick),
+                    }),
+                    None => Value::Null,
+                },
+            );
+            extra.insert(
+                "sign".into(),
+                match &obj.sign {
+                    Some(text) => json!({ "username": "Nexus", "text": text, "time": 0, "datetime": 0 }),
+                    None => Value::Null,
+                },
             );
             base(extra)
         }

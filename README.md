@@ -25,8 +25,16 @@
   Source 再生（低于容量起 300t 计时）、RCL 升降级、道路/容器/rampart 衰减、掉落能量 `⌈n/1000⌉` 衰减、
   墓碑、GCL、出口格即时越房、spawn 自动回能（<300 时 +1/t）、`renewCreep`/`recycleCreep`、
   `tower` 攻击/治疗/维修（按距离衰减功率）与 `link` 传输（3% 损耗 + 1t 冷却）。
+  **战斗链路**：近战（`ATTACK_POWER=30`/部件 + 目标 hit-back 反击）、远程（`RANGED_ATTACK_POWER=10`/部件、
+  3 格）、群体攻击（距离衰减 `{1,2,3} = {1.0, 0.4, 0.1}`）、治疗（近战 12 / 远程 4）、
+  拆除（`DISMANTLE_POWER=50`、返还 `⌊damage×0.005⌋`）、控制器操作（`claim` / `reserve`（上限 5000）/
+  `sign` / `attackController`（降级计时提前 300 + 升级封锁 1000t））；
+  rampart 重定向、伤害累积至 tick 末统一应用、`_recalc-body` 从身体头部开始损坏（尾部先满血）、
+  容量缩小自动掉落超容资源。
   同 tick 的多个意图按官方 `creepActions` 顺序结算（drop → transfer → withdraw → pickup →
-  harvest → move → repair → build → upgradeController），并套用官方 `checkPriorities` 互斥表；
+  heal → rangedHeal → dismantle → attack → harvest → move → repair → build → rangedMassAttack →
+  rangedAttack → say → suicide → claimController → upgradeController → reserveController →
+  attackController → signController），并套用官方 `checkPriorities` 互斥表；
   掉落资源先装入同格 `hits > 0` 的容器，装不下的部分才落地；单位死亡按 `dropRate × 剩余寿命比例`
   回收身体资源（回收为 100%）、携带资源全额，先入容器再进墓碑；超出 RCL 上限的
   spawn/extension 被标记为 `off` 并排除出能量统计。
@@ -55,9 +63,10 @@
 |---|---|
 | PathFinder 跨房计价 | 出口格与对侧入口格按两步计价（官方为同节点），宏观行为一致 |
 | 有限世界 | 场景未定义相邻房间时，出口格上的 creep 停留原地（官方无限世界必穿越） |
-| 战斗/矿物/市场/Power | 未实现（经济阶段不需要），相关 API 为安全桩：`attack`/`heal`/`dismantle`/`claimController` 等会抛出明确的"未实现"错误，而不是静默失败或 `TypeError` |
+| 矿物/市场/Power/实验室 | 未实现（经济阶段不需要），相关 API 为安全桩：抛出明确的"未实现"错误，而不是静默失败或 `TypeError` |
+| 战斗（近似完成） | 近战/远程/群体攻击、治疗、拆除、claim/reserve/sign/attackController 已对齐官方语义（含 hit-back、rampart 重定向、部件从头损坏、伤害 tick 末统一应用、意图互斥表）；未覆盖：Power 效果（`PWR_FORTIFY` 等护盾）、safeMode 拦截、nuker |
 | 地形生成 | `generated` 为噪声近似，不复刻官方地形算法；可用 `rows`/`raw` 显式给定真实地形 |
-| 事件日志结构 | 已实现 `EVENT_HARVEST/BUILD/REPAIR/UPGRADE_CONTROLLER/TRANSFER/OBJECT_DESTROYED/EXIT`；`objectId` 取发起动作的对象，目标 id 放在 `data.targetId`/`data.sourceId` |
+| 事件日志结构 | 已实现 `EVENT_HARVEST/BUILD/REPAIR/UPGRADE_CONTROLLER/TRANSFER/OBJECT_DESTROYED/EXIT/ATTACK/HEAL/ATTACK_CONTROLLER/RESERVE_CONTROLLER`；`objectId` 取发起动作的对象，目标 id 放在 `data.targetId`/`data.sourceId` |
 | CPU 墙钟耗时 | `usedTime` 只计 `loop()` 墙钟 + 意图计价，不含 Memory 解析/序列化；跨机器不可复现（P95 断言请留足余量） |
 | CPU 中断的意图 | 看门狗中断后该 tick 的意图全部丢弃（官方 runtime 的 `intentsList` 只在 `game.run()` 正常返回后回传），仅保留中断前已刷出的 `console` 输出便于排查 |
 | 全局重置触发条件 | 官方按 isolate 堆占用触发；这里用场景的 `globalResetEvery` 固定周期模拟（语义一致：全局变量丢失、Memory 保留） |

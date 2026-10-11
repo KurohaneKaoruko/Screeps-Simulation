@@ -25,6 +25,9 @@ pub struct Obj {
     pub y: u8,
     /// 结构/工地/控制器归属 (模拟器单玩家; source 等中立对象为 false)
     pub mine: bool,
+    /// 敌方对象 (带 user 但非我方): rangedMassAttack / FIND_HOSTILE_* 的目标。
+    /// 单玩家模拟器里只有场景可显式放置敌方对象。
+    pub enemy: bool,
     /// 通用资源仓储
     pub store: Store,
     /// energy 通道容量 (extension 按房间 RCL 动态刷新, 其余建对象时定)
@@ -57,6 +60,18 @@ pub struct Obj {
     pub off: bool,
     /// link 传输冷却 (官方 cooldown, 每 tick 减 1)
     pub cooldown: u32,
+    // ── 战斗 (官方 creep `_damageToApply` / `_healToApply`, 在 tick 阶段统一应用) ──
+    /// 本 tick 累积待结算伤害 (仅 creep 走累积路径; 结构即时扣血)
+    pub damage_to_apply: u32,
+    /// 本 tick 累积待结算治疗量
+    pub heal_to_apply: u32,
+    // ── 控制器保留 / 签名 / 攻击封锁 ──
+    /// 保留到期 tick (None = 未被保留)
+    pub reservation_end_time: Option<u64>,
+    /// 控制器签名文本
+    pub sign: Option<String>,
+    /// 攻击封锁升级的到期 tick (官方 upgradeBlocked)
+    pub upgrade_blocked: u64,
 }
 
 /// 孵化任务: name=目标单位名, need_time=总时长, spawn_time=完成 tick
@@ -98,10 +113,8 @@ impl Obj {
 
     pub fn store_capacity(&self) -> u32 {
         match self.obj_type.as_str() {
-            "creep" => {
-                self.body.iter().filter(|p| p.part_type == "carry").count() as u32
-                    * constants::CARRY_CAPACITY
-            }
+            // 官方 storeCapacity = 存活 CARRY 部件 × 50 (受损部件不计入, 见 _recalc-body)
+            "creep" => self.live_parts("carry") as u32 * constants::CARRY_CAPACITY,
             "tombstone" | "energy" => u32::MAX / 4,
             "link" => constants::LINK_CAPACITY,
             "container" => constants::CONTAINER_CAPACITY,
@@ -124,6 +137,26 @@ impl Obj {
     pub fn is_active(&self) -> bool {
         !self.off
     }
+
+    /// 官方 `utils.calcBodyEffectiveness` (无 boost): 存活部件数 × 基础功率。
+    /// 官方还会把 `_oldHits > 0` 的部件计入, 但伤害在 tick 末尾才应用, 意图阶段读到的
+    /// 始终是 tick 开始的身体, 因此本模拟器用 `hits > 0` 即等价 (见 README 已知近似)。
+    pub fn calc_body_effectiveness(&self, part: &str, base_power: u32) -> u32 {
+        self.live_parts(part) as u32 * base_power
+    }
+
+    /// 官方 `processor/intents/creeps/_recalc-body.js`: 由总 hits 反推各部件 hits。
+    /// 从身体**末尾倒序**填充 (每件最多 100), 即伤害先摧毁列表尾部的部件。
+    pub fn recalc_body(&mut self) {
+        let mut hits = self.hits as i64;
+        for part in self.body.iter_mut().rev() {
+            part.hits = if hits > 100 { 100 } else { hits.max(0) as u32 };
+            hits -= 100;
+            if hits < 0 {
+                hits = 0;
+            }
+        }
+    }
 }
 
 // ── 工厂 ──
@@ -136,6 +169,7 @@ pub fn structure(id: u64, structure_type: &str, x: u8, y: u8, mine: bool) -> Obj
         x,
         y,
         mine,
+        enemy: false,
         store: Store::default(),
         energy_capacity: 0,
         name: None,
@@ -157,6 +191,11 @@ pub fn structure(id: u64, structure_type: &str, x: u8, y: u8, mine: bool) -> Obj
         spawn_job: None,
         off: false,
         cooldown: 0,
+        damage_to_apply: 0,
+        heal_to_apply: 0,
+        reservation_end_time: None,
+        sign: None,
+        upgrade_blocked: 0,
     }
 }
 
@@ -185,6 +224,7 @@ pub fn creep_obj(id: u64, name: &str, x: u8, y: u8, body: Vec<BodyPart>) -> Obj 
         x,
         y,
         mine: true,
+        enemy: false,
         store: Store::default(),
         energy_capacity: 0,
         name: Some(name.to_string()),
@@ -206,6 +246,11 @@ pub fn creep_obj(id: u64, name: &str, x: u8, y: u8, body: Vec<BodyPart>) -> Obj 
         spawn_job: None,
         off: false,
         cooldown: 0,
+        damage_to_apply: 0,
+        heal_to_apply: 0,
+        reservation_end_time: None,
+        sign: None,
+        upgrade_blocked: 0,
     }
 }
 

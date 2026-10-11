@@ -57,6 +57,89 @@ pub fn is_known_structure_type(t: &str) -> bool {
 
 pub const MAX_CREEP_SIZE: usize = 50;
 
+/// 官方 RESOURCES_ALL 顺序 (common/lib/constants.js)。
+/// 用于 `_drop-resources-without-space` 等需要固定资源枚举顺序的结算。
+pub const RESOURCES_ALL: &[&str] = &[
+    "energy",
+    "power",
+    "H",
+    "O",
+    "U",
+    "L",
+    "K",
+    "Z",
+    "X",
+    "G",
+    "OH",
+    "ZK",
+    "UL",
+    "UH",
+    "UO",
+    "KH",
+    "KO",
+    "LH",
+    "LO",
+    "ZH",
+    "ZO",
+    "GH",
+    "GO",
+    "UH2O",
+    "UHO2",
+    "KH2O",
+    "KHO2",
+    "LH2O",
+    "LHO2",
+    "ZH2O",
+    "ZHO2",
+    "GH2O",
+    "GHO2",
+    "XUH2O",
+    "XUHO2",
+    "XKH2O",
+    "XKHO2",
+    "XLH2O",
+    "XLHO2",
+    "XZH2O",
+    "XZHO2",
+    "XGH2O",
+    "XGHO2",
+    "ops",
+    "silicon",
+    "metal",
+    "biomass",
+    "mist",
+    "utrium_bar",
+    "lemergium_bar",
+    "zynthium_bar",
+    "keanium_bar",
+    "ghodium_melt",
+    "utrium_oxide",
+    "lemergium_oxide",
+    "zynthium_oxide",
+    "keanium_oxide",
+    "ghodium_oxide",
+    "utrium_acid",
+    "lemergium_acid",
+    "zynthium_acid",
+    "keanium_acid",
+    "ghodium_acid",
+    "utrium_alkalide",
+    "lemergium_alkalide",
+    "zynthium_alkalide",
+    "keanium_alkalide",
+    "ghodium_alkalide",
+    "catalyzed_utrium_acid",
+    "catalyzed_lemergium_acid",
+    "catalyzed_zynthium_acid",
+    "catalyzed_keanium_acid",
+    "catalyzed_ghodium_acid",
+    "catalyzed_utrium_alkalide",
+    "catalyzed_lemergium_alkalide",
+    "catalyzed_zynthium_alkalide",
+    "catalyzed_keanium_alkalide",
+    "catalyzed_ghodium_alkalide",
+];
+
 /// 生命周期与功率
 pub const CREEP_LIFE_TIME: u64 = 1500;
 pub const CREEP_CLAIM_LIFE_TIME: u64 = 600;
@@ -89,6 +172,33 @@ pub const TOWER_FALLOFF: f64 = 0.75;
 
 /// Link (官方 LINK_*)
 pub const LINK_COOLDOWN: u32 = 1;
+
+/// ── 战斗 (官方 constants.js 逐条对齐) ──
+/// 每件部件的基础功率 (无 boost 加成)
+pub const ATTACK_POWER: u32 = 30;
+pub const RANGED_ATTACK_POWER: u32 = 10;
+pub const HEAL_POWER: u32 = 12;
+pub const RANGED_HEAL_POWER: u32 = 4;
+pub const DISMANTLE_POWER: u32 = 50;
+/// 拆除收益系数 (每 1 点拆除伤害回收 floor(amount × DISMANTLE_COST) 能量)
+pub const DISMANTLE_COST: f64 = 0.005;
+/// rangedMassAttack 的距离衰减 (官方 processor/intents/creeps/rangedMassAttack.js: distanceRate)
+pub const RANGED_MASS_ATTACK_DISTANCE_RATE: &[(i32, f64)] = &[(0, 1.0), (1, 1.0), (2, 0.4), (3, 0.1)];
+
+/// 控制器保留 / 攻击相关 (官方 CONTROLLER_*)
+pub const CONTROLLER_RESERVE: u64 = 1;
+pub const CONTROLLER_RESERVE_MAX: u64 = 5000;
+pub const CONTROLLER_CLAIM_DOWNGRADE: u64 = 300;
+pub const CONTROLLER_ATTACK_BLOCKED_UPGRADE: u64 = 1000;
+
+/// 官方 EVENT_ATTACK_TYPE_* / EVENT_HEAL_TYPE_*
+pub const EVENT_ATTACK_TYPE_MELEE: u32 = 1;
+pub const EVENT_ATTACK_TYPE_RANGED: u32 = 2;
+pub const EVENT_ATTACK_TYPE_RANGED_MASS: u32 = 3;
+pub const EVENT_ATTACK_TYPE_DISMANTLE: u32 = 4;
+pub const EVENT_ATTACK_TYPE_HIT_BACK: u32 = 5;
+pub const EVENT_HEAL_TYPE_MELEE: u32 = 1;
+pub const EVENT_HEAL_TYPE_RANGED: u32 = 2;
 
 /// Source / 掉落能量
 pub const SOURCE_ENERGY_CAPACITY: u32 = 3000;

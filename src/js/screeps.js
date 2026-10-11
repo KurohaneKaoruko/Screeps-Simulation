@@ -847,17 +847,107 @@ class Creep extends RoomObject {
 		intent(this.id, "say", { message: message.substr(0, 10), isPublic: !!toPublic });
 		return C.OK;
 	}
-	// ── 未实现的战斗/claim 方法: 明确抛错而不是 TypeError (issue #1 第四节) ──
-	attack() { throw unimplemented("Creep.attack"); }
-	rangedAttack() { throw unimplemented("Creep.rangedAttack"); }
-	rangedMassAttack() { throw unimplemented("Creep.rangedMassAttack"); }
-	heal() { throw unimplemented("Creep.heal"); }
-	rangedHeal() { throw unimplemented("Creep.rangedHeal"); }
-	dismantle() { throw unimplemented("Creep.dismantle"); }
-	attackController() { throw unimplemented("Creep.attackController"); }
-	claimController() { throw unimplemented("Creep.claimController"); }
-	reserveController() { throw unimplemented("Creep.reserveController"); }
-	signController() { throw unimplemented("Creep.signController"); }
+	// ── 战斗 (官方 E/game/creeps.js:593-732) ──
+	/** 官方 attack: ATTACK 部件, 近战 1 格 */
+	attack(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!this.getActiveBodyparts("attack")) return C.ERR_NO_BODYPART;
+		if (!target || !target.id || !(target instanceof Creep) && !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
+		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "attack", { id: target.id, x: target.pos.x, y: target.pos.y });
+		return C.OK;
+	}
+	/** 官方 rangedAttack: RANGED_ATTACK 部件, 3 格 */
+	rangedAttack(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!this.getActiveBodyparts("ranged_attack")) return C.ERR_NO_BODYPART;
+		if (!target || !target.id || !(target instanceof Creep) && !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
+		if (!this.pos.inRangeTo(target, 3)) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "rangedAttack", { id: target.id });
+		return C.OK;
+	}
+	/** 官方 rangedMassAttack: RANGED_ATTACK 部件, 无参群体攻击 */
+	rangedMassAttack() {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!this.getActiveBodyparts("ranged_attack")) return C.ERR_NO_BODYPART;
+		intent(this.id, "rangedMassAttack", {});
+		return C.OK;
+	}
+	/** 官方 heal: HEAL 部件, 近战 1 格 */
+	heal(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!this.getActiveBodyparts("heal")) return C.ERR_NO_BODYPART;
+		if (!target || !target.id || !(target instanceof Creep)) return C.ERR_INVALID_TARGET;
+		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "heal", { id: target.id, x: target.pos.x, y: target.pos.y });
+		return C.OK;
+	}
+	/** 官方 rangedHeal: HEAL 部件, 3 格 */
+	rangedHeal(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!this.getActiveBodyparts("heal")) return C.ERR_NO_BODYPART;
+		if (!target || !target.id || !(target instanceof Creep)) return C.ERR_INVALID_TARGET;
+		if (!this.pos.inRangeTo(target, 3)) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "rangedHeal", { id: target.id });
+		return C.OK;
+	}
+	/** 官方 dismantle: WORK 部件, 目标必须是可建造结构 (有建造成本) */
+	dismantle(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!this.getActiveBodyparts("work")) return C.ERR_NO_BODYPART;
+		if (!target || !target.id || !(target instanceof Structure) || !C.CONSTRUCTION_COST[target.structureType]) return C.ERR_INVALID_TARGET;
+		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "dismantle", { id: target.id });
+		return C.OK;
+	}
+	/** 官方 attackController: CLAIM 部件, 目标须有 owner 或 reservation */
+	attackController(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!target || !target.id || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
+		if (!this.getActiveBodyparts("claim")) return C.ERR_NO_BODYPART;
+		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		if (!target.my && !target.reservation) return C.ERR_INVALID_TARGET;
+		if (target.upgradeBlocked > 0) return C.ERR_TIRED;
+		intent(this.id, "attackController", { id: target.id });
+		return C.OK;
+	}
+	/** 官方 claimController: CLAIM 部件, GCL 检查 (官方按已占领房间数) */
+	claimController(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!target || !target.id || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
+		if (!this.getActiveBodyparts("claim")) return C.ERR_NO_BODYPART;
+		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "claimController", { id: target.id });
+		return C.OK;
+	}
+	/** 官方 reserveController: CLAIM 部件, 目标须无主且无他人预约 */
+	reserveController(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!target || !target.id || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
+		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		if (target.my) return C.ERR_INVALID_TARGET;
+		if (target.reservation && !target.my) return C.ERR_INVALID_TARGET;
+		if (!this.getActiveBodyparts("claim")) return C.ERR_NO_BODYPART;
+		intent(this.id, "reserveController", { id: target.id });
+		return C.OK;
+	}
+	/** 官方 signController: 任意 creep 均可签名 (官方无部件/归属检查) */
+	signController(target, sign) {
+		if (this.spawning) return C.ERR_BUSY;
+		if (!target || !target.id || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
+		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "signController", { id: target.id, sign: "" + sign });
+		return C.OK;
+	}
 	pull() { throw unimplemented("Creep.pull"); }
 	suicide() {
 		if (!this.my) return C.ERR_NOT_OWNER;
@@ -1055,7 +1145,7 @@ class StructureController extends OwnedStructure {
 		this.safeModeCooldown = null;
 		this.upgradeBlocked = raw.upgradeBlocked || 0;
 		this.reservation = raw.reservation || null;
-		this.sign = null;
+		this.sign = raw.sign || null;
 		this.isPowerEnabled = false;
 	}
 	activateSafeMode() { return C.ERR_INVALID_ARGS; }

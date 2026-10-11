@@ -10,13 +10,81 @@ use std::collections::BTreeMap;
 /// 官方 EVENT_* 常量 (common/lib/constants.js)
 pub const EVENT_ATTACK: u32 = 1;
 pub const EVENT_OBJECT_DESTROYED: u32 = 2;
+pub const EVENT_ATTACK_CONTROLLER: u32 = 3;
 pub const EVENT_BUILD: u32 = 4;
 pub const EVENT_HARVEST: u32 = 5;
 pub const EVENT_HEAL: u32 = 6;
 pub const EVENT_REPAIR: u32 = 7;
+pub const EVENT_RESERVE_CONTROLLER: u32 = 8;
 pub const EVENT_UPGRADE_CONTROLLER: u32 = 9;
 pub const EVENT_EXIT: u32 = 10;
 pub const EVENT_TRANSFER: u32 = 11;
+
+/// 官方 `processor/intents/creeps/intents.js` 的 creepActions 执行顺序
+const CREEP_ACTIONS: &[&str] = &[
+    "drop",
+    "transfer",
+    "withdraw",
+    "pickup",
+    "heal",
+    "rangedHeal",
+    "dismantle",
+    "attack",
+    "harvest",
+    "move",
+    "repair",
+    "build",
+    "rangedMassAttack",
+    "rangedAttack",
+    "say",
+    "suicide",
+    "claimController",
+    "upgradeController",
+    "reserveController",
+    "attackController",
+    "generateSafeMode",
+    "signController",
+    "pull",
+];
+
+/// 官方 `checkPriorities` 互斥表: 出现表中任一意图时, 该意图不执行。
+fn suppressed_by(name: &str) -> &'static [&'static str] {
+    match name {
+        "rangedHeal" => &["heal"],
+        "attackController" => &["rangedHeal", "heal"],
+        "dismantle" => &["attackController", "rangedHeal", "heal"],
+        "repair" => &["dismantle", "attackController", "rangedHeal", "heal"],
+        "build" => &["repair", "dismantle", "attackController", "rangedHeal", "heal"],
+        "attack" => &["build", "repair", "dismantle", "attackController", "rangedHeal", "heal"],
+        "harvest" => &[
+            "attack",
+            "build",
+            "repair",
+            "dismantle",
+            "attackController",
+            "rangedHeal",
+            "heal",
+        ],
+        "rangedMassAttack" => &["build", "repair", "rangedHeal"],
+        "rangedAttack" => &["rangedMassAttack", "build", "repair", "rangedHeal"],
+        _ => &[],
+    }
+}
+
+/// 意图执行序: creep 动作按官方 creepActions, 其余 (spawn/tower/link) 排在后面。
+fn intent_rank(name: &str) -> usize {
+    if let Some(pos) = CREEP_ACTIONS.iter().position(|n| *n == name) {
+        return pos;
+    }
+    match name {
+        "spawnCreep" => 100,
+        "setDirections" => 101,
+        "renewCreep" => 102,
+        "recycleCreep" => 103,
+        "transferEnergy" => 110,
+        _ => 200,
+    }
+}
 
 pub struct IntentList {
     /// (对象 id, 意图名, 数据) — 已按对象分组前保持提交序
@@ -74,35 +142,6 @@ pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
     object_intents.sort_by(|a, b| a.0.cmp(&b.0));
 
     // 同对象意图排序: 照搬官方 processor/intents/creeps/intents.js 的 creepActions 顺序
-    fn intent_rank(name: &str) -> u8 {
-        match name {
-            "drop" => 0,
-            "transfer" => 1,
-            "withdraw" => 2,
-            "pickup" => 3,
-            "harvest" => 4,
-            "move" => 5,
-            "repair" => 6,
-            "build" => 7,
-            "upgradeController" => 8,
-            "say" => 9,
-            "suicide" => 10,
-            "spawnCreep" => 11,
-            "setDirections" => 12,
-            _ => 50,
-        }
-    }
-    // 官方 checkPriorities 互斥表: 同 tick 有 repair 时 build 不执行;
-    // 有 build 或 repair 时 harvest 不执行。
-    fn drop_priority_conflicts(group: &mut Vec<(String, Value)>) {
-        let has = |g: &Vec<(String, Value)>, n: &str| g.iter().any(|(x, _)| x == n);
-        if has(group, "repair") && has(group, "build") {
-            group.retain(|(n, _)| n != "build");
-        }
-        if has(group, "build") || has(group, "repair") {
-            group.retain(|(n, _)| n != "harvest");
-        }
-    }
     let mut i = 0;
     while i < object_intents.len() {
         let id = object_intents[i].0;
@@ -110,19 +149,15 @@ pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
         while j < object_intents.len() && object_intents[j].0 == id {
             j += 1;
         }
-        let mut group: Vec<(String, Value)> =
-            object_intents[i..j].iter().map(|(_, n, d)| (n.clone(), d.clone())).collect();
-        group.sort_by_key(|(n, _)| intent_rank(n));
         // 同名意图后者覆盖前者 (官方 intents.set)
         let mut deduped: Vec<(String, Value)> = Vec::new();
-        for (n, d) in group {
-            if let Some(slot) = deduped.iter_mut().find(|(en, _)| *en == n) {
-                slot.1 = d;
+        for (_, n, d) in object_intents[i..j].iter() {
+            if let Some(slot) = deduped.iter_mut().find(|(en, _)| en == n) {
+                slot.1 = d.clone();
             } else {
-                deduped.push((n, d));
+                deduped.push((n.clone(), d.clone()));
             }
         }
-        drop_priority_conflicts(&mut deduped);
         apply_object_intents(world, id, &deduped, &mut effects);
         i = j;
     }
@@ -144,7 +179,15 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
         return;
     };
     let obj_type = world.rooms[&room_name].objects[&id].obj_type.clone();
-    for (name, data) in intents {
+    let names: Vec<&str> = intents.iter().map(|(n, _)| n.as_str()).collect();
+    // 官方按 creepActions 顺序执行; 非 creep 意图排在之后
+    let mut ordered: Vec<&(String, Value)> = intents.iter().collect();
+    ordered.sort_by_key(|(n, _)| intent_rank(n));
+    for (name, data) in ordered {
+        // 官方 checkPriorities: 被互斥表压制的意图不执行
+        if suppressed_by(name).iter().any(|p| names.contains(p)) {
+            continue;
+        }
         let room = world.rooms.get_mut(&room_name).unwrap();
         match (obj_type.as_str(), name.as_str()) {
             ("creep", "move") => {
@@ -488,6 +531,336 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
             ("creep", "suicide") => {
                 effects.deaths.push((room_name.clone(), id));
             }
+            // ── 战斗 (官方 processor/intents/creeps/{attack,rangedAttack,...}.js) ──
+            ("creep", "attack") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let (ox, oy, power) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => (
+                        o.x,
+                        o.y,
+                        o.calc_body_effectiveness("attack", constants::ATTACK_POWER),
+                    ),
+                    _ => continue,
+                };
+                if power == 0 {
+                    continue;
+                }
+                let (tx, ty) = match room.objects.get(&target_id) {
+                    Some(t)
+                        if t.id != id
+                            && t.hits > 0
+                            && t.obj_type != "controller"
+                            && !(t.obj_type == "creep" && t.spawning) =>
+                    {
+                        (t.x, t.y)
+                    }
+                    _ => continue,
+                };
+                if (tx as i32 - ox as i32).abs() > 1 || (ty as i32 - oy as i32).abs() > 1 {
+                    continue;
+                }
+                let target_id = rampart_at(room, tx, ty).unwrap_or(target_id);
+                apply_damage(world, &room_name, id, target_id, power, constants::EVENT_ATTACK_TYPE_MELEE);
+            }
+            ("creep", "rangedAttack") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let (ox, oy, power) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => (
+                        o.x,
+                        o.y,
+                        o.calc_body_effectiveness("ranged_attack", constants::RANGED_ATTACK_POWER),
+                    ),
+                    _ => continue,
+                };
+                if power == 0 {
+                    continue;
+                }
+                let (tx, ty) = match room.objects.get(&target_id) {
+                    Some(t)
+                        if t.id != id
+                            && t.hits > 0
+                            && t.obj_type != "controller"
+                            && !(t.obj_type == "creep" && t.spawning) =>
+                    {
+                        (t.x, t.y)
+                    }
+                    _ => continue,
+                };
+                if (tx as i32 - ox as i32).abs() > 3 || (ty as i32 - oy as i32).abs() > 3 {
+                    continue;
+                }
+                let target_id = rampart_at(room, tx, ty).unwrap_or(target_id);
+                apply_damage(world, &room_name, id, target_id, power, constants::EVENT_ATTACK_TYPE_RANGED);
+            }
+            ("creep", "rangedMassAttack") => {
+                let (ox, oy, power) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => (
+                        o.x,
+                        o.y,
+                        o.calc_body_effectiveness("ranged_attack", constants::RANGED_ATTACK_POWER),
+                    ),
+                    _ => continue,
+                };
+                if power == 0 {
+                    continue;
+                }
+                // 目标: 带 user 且非我方 (enemy) 的对象; 目标格有 rampart 时被挡住 (官方 rangedMassAttack.js)
+                let targets: Vec<(u64, u8, u8)> = room
+                    .objects
+                    .values()
+                    .filter(|o| {
+                        o.enemy
+                            && o.hits > 0
+                            && !(o.obj_type == "creep" && o.spawning)
+                            && (o.x as i32 - ox as i32).abs() <= 3
+                            && (o.y as i32 - oy as i32).abs() <= 3
+                            && (o.obj_type == "rampart"
+                                || !room
+                                    .objects
+                                    .values()
+                                    .any(|r| r.obj_type == "rampart" && r.x == o.x && r.y == o.y))
+                    })
+                    .map(|o| (o.id, o.x, o.y))
+                    .collect();
+                for (tid, tx, ty) in targets {
+                    let dist = (ox as i32 - tx as i32).abs().max((oy as i32 - ty as i32).abs());
+                    let rate = constants::RANGED_MASS_ATTACK_DISTANCE_RATE
+                        .iter()
+                        .find(|(d, _)| *d == dist)
+                        .map(|(_, r)| *r)
+                        .unwrap_or(0.0);
+                    let dmg = (power as f64 * rate).round() as u32;
+                    if dmg == 0 {
+                        continue;
+                    }
+                    apply_damage(world, &room_name, id, tid, dmg, constants::EVENT_ATTACK_TYPE_RANGED_MASS);
+                }
+            }
+            ("creep", "heal") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let (ox, oy, power) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => (
+                        o.x,
+                        o.y,
+                        o.calc_body_effectiveness("heal", constants::HEAL_POWER),
+                    ),
+                    _ => continue,
+                };
+                if power == 0 {
+                    continue;
+                }
+                let (tx, ty) = match room.objects.get(&target_id) {
+                    Some(t) if t.obj_type == "creep" && !t.spawning => (t.x, t.y),
+                    _ => continue,
+                };
+                if (tx as i32 - ox as i32).abs() > 1 || (ty as i32 - oy as i32).abs() > 1 {
+                    continue;
+                }
+                apply_heal(world, &room_name, id, target_id, power, constants::EVENT_HEAL_TYPE_MELEE);
+            }
+            ("creep", "rangedHeal") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let (ox, oy, power) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => (
+                        o.x,
+                        o.y,
+                        o.calc_body_effectiveness("heal", constants::RANGED_HEAL_POWER),
+                    ),
+                    _ => continue,
+                };
+                if power == 0 {
+                    continue;
+                }
+                let (tx, ty) = match room.objects.get(&target_id) {
+                    Some(t) if t.obj_type == "creep" && !t.spawning => (t.x, t.y),
+                    _ => continue,
+                };
+                if (tx as i32 - ox as i32).abs() > 3 || (ty as i32 - oy as i32).abs() > 3 {
+                    continue;
+                }
+                apply_heal(world, &room_name, id, target_id, power, constants::EVENT_HEAL_TYPE_RANGED);
+            }
+            ("creep", "dismantle") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let (ox, oy, power) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => (
+                        o.x,
+                        o.y,
+                        o.calc_body_effectiveness("work", constants::DISMANTLE_POWER),
+                    ),
+                    _ => continue,
+                };
+                // 目标必须是带建造成本的结构 (官方 dismantle.js: C.CONSTRUCTION_COST[target.type])
+                let (tx, ty) = match room.objects.get(&target_id) {
+                    Some(t) if constants::construction_cost(&t.obj_type).is_some() => (t.x, t.y),
+                    _ => continue,
+                };
+                if (tx as i32 - ox as i32).abs() > 1 || (ty as i32 - oy as i32).abs() > 1 {
+                    continue;
+                }
+                // 先重定向到 rampart (官方在计算 amount 之前重定向)
+                let target_id = rampart_at(room, tx, ty).unwrap_or(target_id);
+                let hits = match room.objects.get(&target_id) {
+                    Some(t) => t.hits,
+                    None => continue,
+                };
+                let amount = power.min(hits);
+                if amount == 0 {
+                    continue;
+                }
+                let gain = (amount as f64 * constants::DISMANTLE_COST).floor() as u32;
+                if gain > 0 {
+                    if let Some(o) = room.objects.get_mut(&id) {
+                        let e = o.store.get("energy").copied().unwrap_or(0) + gain;
+                        o.store.insert("energy".into(), e);
+                    }
+                    drop_overflow(world, &room_name, id);
+                }
+                apply_damage(world, &room_name, id, target_id, amount, constants::EVENT_ATTACK_TYPE_DISMANTLE);
+            }
+            ("creep", "attackController") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let now = world.tick;
+                let (ox, oy, claim_parts) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => (o.x, o.y, o.live_parts("claim") as u64),
+                    _ => continue,
+                };
+                let (tx, ty, has_user, has_res, upgrade_blocked) = match room.objects.get(&target_id) {
+                    Some(c) if c.obj_type == "controller" => (
+                        c.x,
+                        c.y,
+                        c.mine,
+                        c.reservation_end_time.is_some(),
+                        c.upgrade_blocked,
+                    ),
+                    _ => continue,
+                };
+                if !has_user && !has_res {
+                    continue;
+                }
+                if (tx as i32 - ox as i32).abs() > 1 || (ty as i32 - oy as i32).abs() > 1 {
+                    continue;
+                }
+                if upgrade_blocked > now {
+                    continue;
+                }
+                if has_res {
+                    let effect = claim_parts * constants::CONTROLLER_RESERVE;
+                    if effect == 0 {
+                        continue;
+                    }
+                    if let Some(c) = room.objects.get_mut(&target_id) {
+                        let end = c.reservation_end_time.unwrap_or(0).saturating_sub(effect);
+                        c.reservation_end_time = Some(end);
+                    }
+                }
+                if has_user {
+                    let effect = claim_parts * constants::CONTROLLER_CLAIM_DOWNGRADE;
+                    if effect == 0 {
+                        continue;
+                    }
+                    if let Some(c) = room.objects.get_mut(&target_id) {
+                        let dt = c.downgrade_time.unwrap_or(now).saturating_sub(effect);
+                        c.downgrade_time = Some(dt);
+                        c.upgrade_blocked = now + constants::CONTROLLER_ATTACK_BLOCKED_UPGRADE;
+                    }
+                }
+                room.push_event(EVENT_ATTACK_CONTROLLER, id, json!({}));
+            }
+            ("creep", "reserveController") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let now = world.tick;
+                let (ox, oy, claim_parts) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => (o.x, o.y, o.live_parts("claim") as u64),
+                    _ => continue,
+                };
+                let (tx, ty, owned) = match room.objects.get(&target_id) {
+                    Some(c) if c.obj_type == "controller" => (c.x, c.y, c.mine),
+                    _ => continue,
+                };
+                if owned {
+                    continue;
+                }
+                if (tx as i32 - ox as i32).abs() > 1 || (ty as i32 - oy as i32).abs() > 1 {
+                    continue;
+                }
+                let effect = claim_parts * constants::CONTROLLER_RESERVE;
+                if effect == 0 {
+                    continue;
+                }
+                let c = room.objects.get_mut(&target_id).unwrap();
+                let end = c.reservation_end_time.unwrap_or(now + 1);
+                if end + effect > now + constants::CONTROLLER_RESERVE_MAX {
+                    continue;
+                }
+                c.reservation_end_time = Some(end + effect);
+                room.push_event(EVENT_RESERVE_CONTROLLER, id, json!({ "amount": effect }));
+            }
+            ("creep", "claimController") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let now = world.tick;
+                let (ox, oy, has_claim) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => (o.x, o.y, o.live_parts("claim") > 0),
+                    _ => continue,
+                };
+                if !has_claim {
+                    continue;
+                }
+                let (tx, ty, level) = match room.objects.get(&target_id) {
+                    Some(c) if c.obj_type == "controller" => (c.x, c.y, c.level),
+                    _ => continue,
+                };
+                if level > 0 {
+                    continue;
+                }
+                if (tx as i32 - ox as i32).abs() > 1 || (ty as i32 - oy as i32).abs() > 1 {
+                    continue;
+                }
+                // GCL 检查: 官方 calcNeededGcl(已占领房间数 + 1) = MULTIPLY × 已占领数^GCL_POW
+                let claimed = world
+                    .rooms
+                    .values()
+                    .filter(|r| r.controller().map(|c| c.mine && c.level > 0).unwrap_or(false))
+                    .count() as f64;
+                let needed =
+                    (constants::GCL_MULTIPLY as f64 * claimed.powf(constants::GCL_POW)) as u64;
+                if world.gcl_progress < needed {
+                    continue;
+                }
+                if let Some(c) = world
+                    .rooms
+                    .get_mut(&room_name)
+                    .unwrap()
+                    .objects
+                    .get_mut(&target_id)
+                {
+                    c.mine = true;
+                    c.level = 1;
+                    c.progress = 0;
+                    c.downgrade_time = None;
+                    c.reservation_end_time = None;
+                    c.upgrade_blocked = 0;
+                }
+                world.rcl_timeline.entry(1).or_insert(now);
+            }
+            ("creep", "signController") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let (ox, oy) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => (o.x, o.y),
+                    _ => continue,
+                };
+                let (tx, ty) = match room.objects.get(&target_id) {
+                    Some(c) if c.obj_type == "controller" => (c.x, c.y),
+                    _ => continue,
+                };
+                if (tx as i32 - ox as i32).abs() > 1 || (ty as i32 - oy as i32).abs() > 1 {
+                    continue;
+                }
+                let sign = data.get("sign").and_then(Value::as_str).unwrap_or("").to_string();
+                if let Some(c) = room.objects.get_mut(&target_id) {
+                    c.sign = if sign.is_empty() { None } else { Some(sign) };
+                }
+            }
             ("spawn", "spawnCreep") => {
                 let body_spec: Vec<String> = data
                     .get("body")
@@ -689,18 +1062,16 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 if amount == 0 {
                     continue;
                 }
-                {
-                    let c = room.objects.get_mut(&target_id).unwrap();
-                    c.hits = (c.hits + amount).min(c.hits_max);
-                }
-                let tower = room.objects.get_mut(&id).unwrap();
-                let e = tower.store.get("energy").copied().unwrap_or(0) - constants::TOWER_ENERGY_COST;
+                // 官方 towers/heal.js: 累积 _healToApply (tick 阶段统一应用)
+                apply_heal(world, &room_name, id, target_id, amount, constants::EVENT_HEAL_TYPE_RANGED);
+                let tower = world.rooms.get_mut(&room_name).unwrap().objects.get_mut(&id).unwrap();
+                let e = tower
+                    .store
+                    .get("energy")
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(constants::TOWER_ENERGY_COST);
                 tower.store.insert("energy".into(), e);
-                room.push_event(
-                    EVENT_HEAL,
-                    id,
-                    json!({ "targetId": World::id_string(target_id), "amount": amount }),
-                );
             }
             ("tower", "attack") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
@@ -713,42 +1084,25 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     }
                     _ => continue,
                 };
-                let (tx, ty, hits) = match room.objects.get(&target_id) {
-                    Some(o) if o.id != id && o.hits > 0 && o.obj_type != "controller" => (o.x, o.y, o.hits),
+                let (tx, ty) = match room.objects.get(&target_id) {
+                    Some(o) if o.id != id && o.hits > 0 && o.obj_type != "controller" => (o.x, o.y),
                     _ => continue,
                 };
                 let amount = tower_power(constants::TOWER_POWER_ATTACK, ox, oy, tx, ty);
                 if amount == 0 {
                     continue;
                 }
-                let new_hits = hits.saturating_sub(amount);
-                {
-                    let t = room.objects.get_mut(&target_id).unwrap();
-                    t.hits = new_hits;
-                }
-                let tower = room.objects.get_mut(&id).unwrap();
-                let e = tower.store.get("energy").copied().unwrap_or(0) - constants::TOWER_ENERGY_COST;
+                let target_id = rampart_at(room, tx, ty).unwrap_or(target_id);
+                // 官方 towers/attack.js: 走统一 _damage (creep 累积伤害, 结构即时扣血), 随后扣 10 能
+                apply_damage(world, &room_name, id, target_id, amount, constants::EVENT_ATTACK_TYPE_RANGED);
+                let tower = world.rooms.get_mut(&room_name).unwrap().objects.get_mut(&id).unwrap();
+                let e = tower
+                    .store
+                    .get("energy")
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(constants::TOWER_ENERGY_COST);
                 tower.store.insert("energy".into(), e);
-                room.push_event(
-                    EVENT_ATTACK,
-                    id,
-                    json!({ "targetId": World::id_string(target_id), "amount": amount, "attackType": 2 }),
-                );
-                if new_hits == 0 {
-                    let removed = room.objects.remove(&target_id).unwrap();
-                    let type_name = removed.obj_type.clone();
-                    room.push_event(EVENT_OBJECT_DESTROYED, target_id, json!({ "type": type_name }));
-                    if removed.obj_type == "creep" {
-                        world.creeps_lost += 1;
-                        bury_creep(world, &room_name, removed, constants::CREEP_CORPSE_RATE);
-                    } else {
-                        for (resource, amt) in removed.store {
-                            if amt > 0 {
-                                create_dropped(world, &room_name, tx, ty, &resource, amt);
-                            }
-                        }
-                    }
-                }
             }
             ("link", "transferEnergy") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
@@ -1045,6 +1399,171 @@ fn tower_power(base: f64, ox: u8, oy: u8, tx: u8, ty: u8) -> u32 {
             / (constants::TOWER_FALLOFF_RANGE - constants::TOWER_OPTIMAL_RANGE);
     }
     amount.floor().max(0.0) as u32
+}
+
+/// 目标格上的 rampart id (官方各攻击意图的 rampart 重定向规则)
+fn rampart_at(room: &Room, x: u8, y: u8) -> Option<u64> {
+    room.objects
+        .values()
+        .find(|o| o.obj_type == "rampart" && o.x == x && o.y == y)
+        .map(|o| o.id)
+}
+
+/// 官方 `processor/intents/_damage.js`:
+/// - creep / powerCreep: 伤害累积到 `_damageToApply`, 在 tick 阶段统一应用 (整 tick 的攻击先全部登记再结算)
+/// - 结构 / 墙: 即时扣血, 归零即销毁并掉落仓储
+/// - 近战攻击会触发目标反击 (hit-back): 攻击者所在格无 rampart 时, 按目标 ATTACK 部件功率反伤攻击者
+fn apply_damage(
+    world: &mut World,
+    room_name: &str,
+    attacker_id: u64,
+    target_id: u64,
+    amount: u32,
+    attack_type: u32,
+) {
+    if amount == 0 {
+        return;
+    }
+    let (target_is_creep, attack_back) = {
+        let room = &world.rooms[room_name];
+        let Some(target) = room.objects.get(&target_id) else { return };
+        if target.hits == 0 {
+            return;
+        }
+        let is_creep = target.obj_type == "creep";
+        let mut attack_back = 0u32;
+        if is_creep && attack_type == constants::EVENT_ATTACK_TYPE_MELEE {
+            let shielded = room
+                .objects
+                .get(&attacker_id)
+                .map(|a| rampart_at(room, a.x, a.y).is_some())
+                .unwrap_or(false);
+            if !shielded {
+                attack_back = target.calc_body_effectiveness("attack", constants::ATTACK_POWER);
+            }
+        }
+        (is_creep, attack_back)
+    };
+
+    if target_is_creep {
+        let room = world.rooms.get_mut(room_name).unwrap();
+        if let Some(t) = room.objects.get_mut(&target_id) {
+            t.damage_to_apply += amount;
+        }
+    } else {
+        let destroyed = {
+            let room = world.rooms.get_mut(room_name).unwrap();
+            let Some(t) = room.objects.get_mut(&target_id) else { return };
+            t.hits = t.hits.saturating_sub(amount);
+            t.hits == 0
+        };
+        if destroyed {
+            let room = world.rooms.get_mut(room_name).unwrap();
+            if let Some(removed) = room.objects.remove(&target_id) {
+                let type_name = removed.obj_type.clone();
+                let (x, y) = (removed.x, removed.y);
+                room.push_event(EVENT_OBJECT_DESTROYED, target_id, json!({ "type": type_name }));
+                for (resource, amt) in removed.store {
+                    if amt > 0 {
+                        create_dropped(world, room_name, x, y, &resource, amt);
+                    }
+                }
+            }
+        }
+    }
+
+    if attack_back > 0 {
+        let room = world.rooms.get_mut(room_name).unwrap();
+        if let Some(a) = room.objects.get_mut(&attacker_id) {
+            a.damage_to_apply += attack_back;
+        }
+        room.push_event(
+            EVENT_ATTACK,
+            target_id,
+            json!({
+                "targetId": World::id_string(attacker_id),
+                "damage": attack_back,
+                "attackType": constants::EVENT_ATTACK_TYPE_HIT_BACK,
+            }),
+        );
+    }
+
+    let room = world.rooms.get_mut(room_name).unwrap();
+    room.push_event(
+        EVENT_ATTACK,
+        attacker_id,
+        json!({
+            "targetId": World::id_string(target_id),
+            "damage": amount,
+            "attackType": attack_type,
+        }),
+    );
+}
+
+/// 官方 heal / rangedHeal / towers.heal: 治疗量累积到 `_healToApply` (tick 阶段统一应用)
+fn apply_heal(
+    world: &mut World,
+    room_name: &str,
+    healer_id: u64,
+    target_id: u64,
+    amount: u32,
+    heal_type: u32,
+) {
+    if amount == 0 {
+        return;
+    }
+    let room = world.rooms.get_mut(room_name).unwrap();
+    if let Some(t) = room.objects.get_mut(&target_id) {
+        t.heal_to_apply += amount;
+    }
+    room.push_event(
+        EVENT_HEAL,
+        healer_id,
+        json!({
+            "targetId": World::id_string(target_id),
+            "amount": amount,
+            "healType": heal_type,
+        }),
+    );
+}
+
+/// 官方 `_drop-resources-without-space.js`: 容量缩小 (CARRY 部件受损) 后按 RESOURCES_ALL
+/// 顺序掉落超容资源。
+pub fn drop_resources_without_space(world: &mut World, room_name: &str, id: u64) {
+    loop {
+        let (over, resource, x, y) = {
+            let room = &world.rooms[room_name];
+            let Some(obj) = room.objects.get(&id) else { return };
+            let cap = obj.store_capacity();
+            let total = objects::store_sum(&obj.store);
+            if total <= cap {
+                return;
+            }
+            let Some(res) = constants::RESOURCES_ALL
+                .iter()
+                .find(|r| obj.store.get(**r).copied().unwrap_or(0) > 0)
+            else {
+                return;
+            };
+            (total - cap, res.to_string(), obj.x, obj.y)
+        };
+        let drop_amt = {
+            let room = &world.rooms[room_name];
+            let have = room.objects[&id].store.get(&resource).copied().unwrap_or(0);
+            have.min(over)
+        };
+        {
+            let room = world.rooms.get_mut(room_name).unwrap();
+            let o = room.objects.get_mut(&id).unwrap();
+            let left = o.store.get(&resource).copied().unwrap_or(0) - drop_amt;
+            if left > 0 {
+                o.store.insert(resource.clone(), left);
+            } else {
+                o.store.remove(&resource);
+            }
+        }
+        create_dropped(world, room_name, x, y, &resource, drop_amt);
+    }
 }
 
 /// 单位死亡/回收: 身体资源按剩余寿命比例回收 (官方 _die.js:39-91), 携带资源全额;

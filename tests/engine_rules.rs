@@ -709,3 +709,403 @@ fn link_transfer_energy_with_loss_and_cooldown() {
 	assert_eq!(store_of(&world, b), 194, "目标 link 收 200 - ceil(200*0.03)=194");
 	assert_eq!(room.objects[&a].cooldown, 1, "冷却 = 1×距离2 再经当 tick 减 1");
 }
+
+// ═════════════════════════ 战斗链路 (官方 processor/intents/creeps/*) ═════════════════════════
+
+/// 把 (W5N8 房内) 对象标记为敌方: mine=false + enemy=true
+fn mark_enemy(world: &mut World, id: u64) {
+	let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&id).unwrap();
+	o.mine = false;
+	o.enemy = true;
+}
+
+fn hits_of(world: &World, id: u64) -> u32 {
+	world.rooms["W5N8"].objects[&id].hits
+}
+
+/// 近战攻击: 3 ATTACK × 30 = 90 伤害, tick 末统一扣血; 目标反击 (hit-back) 30
+#[test]
+fn melee_attack_and_hit_back() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let a = add_creep(&mut world, "MA", 20, 20, &["attack", "attack", "attack", "move"]);
+	let b = add_creep(&mut world, "MB", 21, 20, &["attack", "move"]);
+	let before_b = hits_of(&world, b);
+	let before_a = hits_of(&world, a);
+	let json = format!(r#"[{{"o":"{:024x}","n":"attack","d":{{"id":"{:024x}"}}}}]"#, a, b);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(
+		hits_of(&world, b),
+		before_b - 90,
+		"3 ATTACK × ATTACK_POWER(30) = 90, tick 末应用"
+	);
+	assert_eq!(
+		hits_of(&world, a),
+		before_a - 30,
+		"被 1×ATTACK 目标反击 30 (hit-back)"
+	);
+}
+
+/// 无 ATTACK 部件的目标不反击
+#[test]
+fn melee_attack_no_hit_back_without_attack_parts() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let a = add_creep(&mut world, "NA", 20, 20, &["attack", "move"]);
+	let b = add_creep(&mut world, "NB", 21, 20, &["carry", "move"]);
+	let before_a = hits_of(&world, a);
+	let json = format!(r#"[{{"o":"{:024x}","n":"attack","d":{{"id":"{:024x}"}}}}]"#, a, b);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(hits_of(&world, a), before_a, "无 ATTACK 部件目标不反击");
+}
+
+/// 近战攻击 rampart 保护下的目标: 伤害重定向到 rampart
+#[test]
+fn melee_attack_redirects_to_rampart() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let a = add_creep(&mut world, "RA", 20, 20, &["attack", "attack", "move"]);
+	let b = add_creep(&mut world, "RB", 21, 20, &["attack", "move"]);
+	let rampart = add_structure(&mut world, "W5N8", "rampart", 21, 20);
+	{
+		let r = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&rampart).unwrap();
+		r.hits = 3000;
+		r.hits_max = 3000;
+		r.next_decay_time = Some(world.tick + 100); // 避开当 tick 衰减
+	}
+	let before_b = hits_of(&world, b);
+	let json = format!(r#"[{{"o":"{:024x}","n":"attack","d":{{"id":"{:024x}"}}}}]"#, a, b);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(hits_of(&world, b), before_b, "rampart 下的目标不掉血");
+	assert_eq!(hits_of(&world, rampart), 3000 - 60, "伤害 60 重定向到 rampart");
+}
+
+/// 远程攻击: 3 格内全额 RANGED_ATTACK_POWER(10)/部件; 4 格外意图不生效
+#[test]
+fn ranged_attack_range_limit() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let a = add_creep(&mut world, "RRA", 20, 20, &["ranged_attack", "ranged_attack", "move"]);
+	let b = add_creep(&mut world, "RRB", 23, 20, &["move"]);
+	let before = hits_of(&world, b);
+	let json = format!(r#"[{{"o":"{:024x}","n":"rangedAttack","d":{{"id":"{:024x}"}}}}]"#, a, b);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(hits_of(&world, b), before - 20, "3 格内 2 部件 × 10 = 20");
+	// 移到 4 格外
+	{
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&b).unwrap();
+		o.x = 24;
+	}
+	let json = format!(r#"[{{"o":"{:024x}","n":"rangedAttack","d":{{"id":"{:024x}"}}}}]"#, a, b);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(hits_of(&world, b), before - 20, "4 格外不应造成伤害");
+}
+
+/// rangedMassAttack 距离衰减: 官方 {0:1, 1:1, 2:0.4, 3:0.1}
+#[test]
+fn ranged_mass_attack_distance_falloff() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let a = add_creep(&mut world, "RMA", 20, 20, &["ranged_attack", "ranged_attack", "move"]);
+	// 2 部件 × 10 × 1.0 = 20 基准功率
+	let d1 = add_creep(&mut world, "D1", 21, 20, &["move"]);
+	let d2 = add_creep(&mut world, "D2", 22, 20, &["move"]);
+	let d3 = add_creep(&mut world, "D3", 23, 20, &["move"]);
+	mark_enemy(&mut world, d1);
+	mark_enemy(&mut world, d2);
+	mark_enemy(&mut world, d3);
+	let (b1, b2, b3) = (hits_of(&world, d1), hits_of(&world, d2), hits_of(&world, d3));
+	let json = format!(r#"[{{"o":"{:024x}","n":"rangedMassAttack","d":{{}}}}]"#, a);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(hits_of(&world, d1), b1 - 20, "距离 1: 20 × 1.0");
+	assert_eq!(hits_of(&world, d2), b2 - 8, "距离 2: 20 × 0.4 = 8");
+	assert_eq!(hits_of(&world, d3), b3 - 2, "距离 3: 20 × 0.1 = 2");
+}
+
+/// 治疗: 近战 12/部件; rangedHeal 4/部件且可超过当前血量上限裁剪
+#[test]
+fn heal_creep_restores_hits() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let h = add_creep(&mut world, "H", 20, 20, &["heal", "heal", "move"]);
+	let t = add_creep(&mut world, "T", 21, 20, &["move"]);
+	let max = hits_of(&world, t);
+	// 目标先受伤
+	{
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&t).unwrap();
+		o.hits = max - 30;
+	}
+	let json = format!(r#"[{{"o":"{:024x}","n":"heal","d":{{"id":"{:024x}"}}}}]"#, h, t);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(hits_of(&world, t), max - 30 + 24, "2 HEAL × 12 = 24");
+	// rangedHeal (距离 1 也算 in-range): 2 × 4 = 8, 但只差 6 → 回满
+	let json = format!(r#"[{{"o":"{:024x}","n":"rangedHeal","d":{{"id":"{:024x}"}}}}]"#, h, t);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(hits_of(&world, t), max, "rangedHeal 溢出部分被裁剪");
+}
+
+/// 部件从头部开始损坏 (官方 _recalc-body: 血量从身体末尾倒序分配,
+/// 因此 TOUGH 放最前面才是肉盾)
+#[test]
+fn damage_recalc_body_from_tail() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	// 身体: tough, attack, attack, move, move (hits_max = 500)
+	let a = add_creep(&mut world, "BA", 20, 20, &["tough", "attack", "attack", "move", "move"]);
+	let enemy_body: Vec<&str> = ["attack"; 9].iter().copied().chain(["move"]).collect();
+	let enemy = add_creep(&mut world, "BE", 21, 20, &enemy_body);
+	mark_enemy(&mut world, enemy);
+	let json = format!(r#"[{{"o":"{:024x}","n":"attack","d":{{"id":"{:024x}"}}}}]"#, enemy, a);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let obj = &world.rooms["W5N8"].objects[&a];
+	assert_eq!(obj.hits, 230, "500 - 9×30 = 230 (tough/move 无 ATTACK 不反击)");
+	assert_eq!(obj.body[0].hits, 0, "头部 tough 最先死");
+	assert_eq!(obj.body[1].hits, 0, "第 2 个 attack 也死");
+	assert_eq!(obj.body[2].hits, 30, "第 3 个 attack 剩 30");
+	assert_eq!(obj.body[3].hits, 100, "尾部部件满血");
+	assert_eq!(obj.body[4].hits, 100, "尾部部件满血");
+}
+
+/// dismantle: WORK 部件 50/个, 返还 floor(amount × 0.005) 能量 (官方 DISMANTLE_COST)
+#[test]
+fn dismantle_structure_refunds_half_energy() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let w = add_creep(&mut world, "DW", 20, 20, &["work", "work", "work", "work", "carry", "move"]);
+	let wall = add_structure(&mut world, "W5N8", "constructedWall", 21, 20);
+	{
+		let s = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&wall).unwrap();
+		s.hits = 1000;
+		s.hits_max = constants::WALL_HITS_MAX;
+	}
+	let json = format!(r#"[{{"o":"{:024x}","n":"dismantle","d":{{"id":"{:024x}"}}}}]"#, w, wall);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(hits_of(&world, wall), 1000 - 200, "4 WORK × DISMANTLE_POWER(50) = 200");
+	assert_eq!(store_of(&world, w), 1, "返还 floor(200 × DISMANTLE_COST 0.005) = 1 能量");
+}
+
+/// 塔攻击 creep: 伤害累积到 tick 末应用; 塔能量扣 10
+#[test]
+fn tower_attack_creep_damage_and_cost() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let tower = add_structure(&mut world, "W5N8", "tower", 20, 20);
+	set_store(&mut world, tower, 100);
+	// 10 个部件 (hits 1000): 600 伤害不足以致死
+	let target_body: Vec<&str> = ["tough"; 9].iter().copied().chain(["move"]).collect();
+	let target = add_creep(&mut world, "TT", 22, 20, &target_body);
+	mark_enemy(&mut world, target);
+	let before = hits_of(&world, target);
+	let json = format!(r#"[{{"o":"{:024x}","n":"attack","d":{{"id":"{:024x}"}}}}]"#, tower, target);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(store_of(&world, tower), 90, "塔每次消耗 10 能量");
+	assert_eq!(
+		hits_of(&world, target),
+		before - 600,
+		"range 2 无衰减 TOWER_POWER_ATTACK=600"
+	);
+}
+
+/// 塔攻击结构: 即时扣血; 血量归零销毁并掉落仓储 (掉落当 tick 衰减 ⌈200/1000⌉=1)
+#[test]
+fn tower_attack_destroys_structure_and_drops_store() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let tower = add_structure(&mut world, "W5N8", "tower", 20, 20);
+	set_store(&mut world, tower, 100);
+	let ext = add_structure(&mut world, "W5N8", "extension", 22, 20);
+	mark_enemy(&mut world, ext);
+	{
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&ext).unwrap();
+		o.hits = 500;
+		o.store.insert("energy".into(), 200);
+	}
+	let json = format!(r#"[{{"o":"{:024x}","n":"attack","d":{{"id":"{:024x}"}}}}]"#, tower, ext);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let room = &world.rooms["W5N8"];
+	assert!(!room.objects.contains_key(&ext), "600 > 500 应销毁");
+	let dropped: u32 = room
+		.objects
+		.values()
+		.filter(|o| o.obj_type == "energy")
+		.map(|o| o.store.get("energy").copied().unwrap_or(0))
+		.sum();
+	assert_eq!(dropped, 199, "掉落 200 后当 tick 衰减 1");
+}
+
+/// claimController: 中立控制器 → 归属我方 level 1
+#[test]
+fn claim_controller_takes_ownership() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let claimer = add_creep(&mut world, "CL", 27, 26, &["claim", "move"]);
+	let ctrl = world.rooms["W5N8"]
+		.objects
+		.values()
+		.find(|o| o.obj_type == "controller")
+		.unwrap()
+		.id;
+	{
+		let c = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&ctrl).unwrap();
+		c.mine = false;
+		c.level = 0;
+	}
+	let json = format!(r#"[{{"o":"{:024x}","n":"claimController","d":{{"id":"{:024x}"}}}}]"#, claimer, ctrl);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let c = &world.rooms["W5N8"].objects[&ctrl];
+	assert!(c.mine, "claim 后归属我方");
+	assert_eq!(c.level, 1, "claim 后 level 1");
+}
+
+/// reserveController: 官方 CONTROLLER_RESERVE=1 (每 CLAIM 部件每 tick +1), 上限 5000
+#[test]
+fn reserve_controller_caps_at_max() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let claimer = add_creep(&mut world, "RS", 27, 26, &["claim", "move"]);
+	let ctrl = world.rooms["W5N8"]
+		.objects
+		.values()
+		.find(|o| o.obj_type == "controller")
+		.unwrap()
+		.id;
+	{
+		let c = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&ctrl).unwrap();
+		c.mine = false;
+		c.level = 0;
+		c.reservation_end_time = Some(world.tick + 4999); // 只差 1
+	}
+	let json = format!(r#"[{{"o":"{:024x}","n":"reserveController","d":{{"id":"{:024x}"}}}}]"#, claimer, ctrl);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let c = &world.rooms["W5N8"].objects[&ctrl];
+	assert_eq!(
+		c.reservation_end_time,
+		Some(4999 + 1),
+		"1 CLAIM × CONTROLLER_RESERVE(1) = +1"
+	);
+	// 已达上限 (endTime + 1 > now + 5000): 不再增长
+	let capped_at = world.tick + constants::CONTROLLER_RESERVE_MAX;
+	{
+		let c = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&ctrl).unwrap();
+		c.reservation_end_time = Some(capped_at);
+	}
+	let json = format!(r#"[{{"o":"{:024x}","n":"reserveController","d":{{"id":"{:024x}"}}}}]"#, claimer, ctrl);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(
+		world.rooms["W5N8"].objects[&ctrl].reservation_end_time,
+		Some(capped_at),
+		"endTime + effect > now + CONTROLLER_RESERVE_MAX(5000) 时不生效"
+	);
+}
+
+/// attackController: 有归属的控制器被攻击 → upgradeBlocked + 降级计时提前
+#[test]
+fn attack_controller_blocks_upgrade() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let claimer = add_creep(&mut world, "AC", 27, 26, &["claim", "move"]);
+	let ctrl = world.rooms["W5N8"]
+		.objects
+		.values()
+		.find(|o| o.obj_type == "controller")
+		.unwrap()
+		.id;
+	let before_downgrade = world.rooms["W5N8"].objects[&ctrl].downgrade_time;
+	let json = format!(
+		r#"[{{"o":"{:024x}","n":"attackController","d":{{"id":"{:024x}"}}}}]"#,
+		claimer, ctrl
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let c = &world.rooms["W5N8"].objects[&ctrl];
+	assert_eq!(
+		c.upgrade_blocked,
+		world.tick - 1 + constants::CONTROLLER_ATTACK_BLOCKED_UPGRADE,
+		"被攻击后 1000t 内无法升级 (基于意图执行时的 tick)"
+	);
+	let dt = c.downgrade_time.unwrap();
+	assert_eq!(
+		dt,
+		before_downgrade.unwrap().saturating_sub(constants::CONTROLLER_CLAIM_DOWNGRADE),
+		"降级计时提前 CONTROLLER_CLAIM_DOWNGRADE"
+	);
+}
+
+/// signController: 签名写入控制器并可清除
+#[test]
+fn sign_controller_writes_and_clears() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let s = add_creep(&mut world, "SG", 27, 26, &["move"]);
+	let ctrl = world.rooms["W5N8"]
+		.objects
+		.values()
+		.find(|o| o.obj_type == "controller")
+		.unwrap()
+		.id;
+	let json = format!(
+		r#"[{{"o":"{:024x}","n":"signController","d":{{"id":"{:024x}","sign":"hello"}}}}]"#,
+		s, ctrl
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(
+		world.rooms["W5N8"].objects[&ctrl].sign.as_deref(),
+		Some("hello")
+	);
+	let json = format!(
+		r#"[{{"o":"{:024x}","n":"signController","d":{{"id":"{:024x}","sign":""}}}}]"#,
+		s, ctrl
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(world.rooms["W5N8"].objects[&ctrl].sign, None, "空签名清除");
+}
+
+/// 官方 checkPriorities 互斥: attack 与 harvest 同 tick 提交 → harvest 被压制
+#[test]
+fn attack_suppresses_harvest_same_tick() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let a = add_creep(&mut world, "PR", 20, 20, &["attack", "work", "move"]);
+	let enemy = add_creep(&mut world, "PE", 21, 20, &["move"]);
+	mark_enemy(&mut world, enemy);
+	let source = first_source(&world);
+	let sx = world.rooms["W5N8"].objects[&source].x;
+	let sy = world.rooms["W5N8"].objects[&source].y;
+	{
+		// 把攻击者移到 source 旁边
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&a).unwrap();
+		o.x = sx;
+		o.y = sy + 1;
+		// 敌人也得在旁边
+		let e = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&enemy).unwrap();
+		e.x = sx;
+		e.y = sy;
+	}
+	let before = hits_of(&world, enemy);
+	let source_before = world.rooms["W5N8"].objects[&source]
+		.store
+		.get("energy")
+		.copied()
+		.unwrap_or(0);
+	let json = format!(
+		r#"[{{"o":"{:024x}","n":"harvest","d":{{"id":"{:024x}"}}}},{{"o":"{:024x}","n":"attack","d":{{"id":"{:024x}"}}}}]"#,
+		a, source, a, enemy
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(hits_of(&world, enemy), before - 30, "attack 正常执行");
+	assert_eq!(
+		world.rooms["W5N8"].objects[&source]
+			.store
+			.get("energy")
+			.copied()
+			.unwrap_or(0),
+		source_before,
+		"同 tick 的 harvest 被互斥表压制"
+	);
+}
+
+/// 战斗死亡: creep 血量归零 → 移除 + 墓碑 + creeps_lost 统计
+#[test]
+fn combat_death_creates_tombstone() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let victim = add_creep(&mut world, "VD", 21, 20, &["tough", "move"]);
+	let killer_body: Vec<&str> = ["attack"; 9].iter().copied().chain(["move"]).collect();
+	let killer = add_creep(&mut world, "VK", 20, 20, &killer_body);
+	let before_lost = world.creeps_lost;
+	let json = format!(
+		r#"[{{"o":"{:024x}","n":"attack","d":{{"id":"{:024x}"}}}}]"#,
+		killer, victim
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let room = &world.rooms["W5N8"];
+	assert!(!room.objects.contains_key(&victim), "270 > tough+move 200 应击杀");
+	assert_eq!(world.creeps_lost, before_lost + 1, "击杀计数 +1");
+	assert!(
+		room.objects.values().any(|o| o.obj_type == "tombstone"),
+		"战斗死亡留墓碑"
+	);
+}
