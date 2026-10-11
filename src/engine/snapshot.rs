@@ -196,6 +196,15 @@ fn object_json(obj: &Obj, world: &World) -> Value {
             );
             base(extra)
         }
+        "mineral" => {
+            let mut extra = Map::new();
+            extra.insert(
+                "mineralType".into(),
+                json!(obj.mineral_type.clone().unwrap_or_else(|| "H".into())),
+            );
+            extra.insert("mineralAmount".into(), json!(obj.mineral_amount.unwrap_or(0)));
+            base(extra)
+        }
         "controller" => {
             let mut extra = Map::new();
             extra.insert("my".into(), json!(obj.mine));

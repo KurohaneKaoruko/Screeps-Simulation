@@ -72,6 +72,9 @@ pub struct Obj {
     pub sign: Option<String>,
     /// 攻击封锁升级的到期 tick (官方 upgradeBlocked)
     pub upgrade_blocked: u64,
+    // ── mineral ──
+    pub mineral_type: Option<String>,
+    pub mineral_amount: Option<u32>,
 }
 
 /// 孵化任务: name=目标单位名, need_time=总时长, spawn_time=完成 tick
@@ -199,6 +202,8 @@ pub fn structure(id: u64, structure_type: &str, x: u8, y: u8, mine: bool) -> Obj
         reservation_end_time: None,
         sign: None,
         upgrade_blocked: 0,
+        mineral_type: None,
+        mineral_amount: None,
     }
 }
 
@@ -216,6 +221,13 @@ pub fn controller(id: u64, x: u8, y: u8, level: u8) -> Obj {
     o.level = level;
     o.hits = 1;
     o.hits_max = 1;
+    o
+}
+
+pub fn mineral(id: u64, x: u8, y: u8, mineral_type: &str, amount: u32) -> Obj {
+    let mut o = structure(id, "mineral", x, y, false);
+    o.mineral_type = Some(mineral_type.to_string());
+    o.mineral_amount = Some(amount);
     o
 }
 
@@ -254,6 +266,8 @@ pub fn creep_obj(id: u64, name: &str, x: u8, y: u8, body: Vec<BodyPart>) -> Obj 
         reservation_end_time: None,
         sign: None,
         upgrade_blocked: 0,
+        mineral_type: None,
+        mineral_amount: None,
     }
 }
 

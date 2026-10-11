@@ -77,6 +77,24 @@ pub struct ControllerSpec {
     pub mine: bool,
 }
 
+fn default_mineral_type() -> String {
+    "H".into()
+}
+
+fn default_mineral_amount() -> u32 {
+    30000
+}
+
+/// 矿物定义 (真实房间必有矿物; 布局规划等系统依赖 FIND_MINERALS)
+#[derive(Deserialize, Debug, Clone)]
+pub struct MineralSpec {
+    pub pos: [u8; 2],
+    #[serde(default = "default_mineral_type")]
+    pub mineral_type: String,
+    #[serde(default = "default_mineral_amount")]
+    pub amount: u32,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct StructureSpec {
     #[serde(rename = "type")]
@@ -109,6 +127,8 @@ pub struct RoomSpec {
     pub terrain: Option<TerrainSpec>,
     #[serde(default)]
     pub sources: Option<SourcesSpec>,
+    #[serde(default)]
+    pub mineral: Option<MineralSpec>,
     #[serde(default)]
     pub controller: Option<ControllerSpec>,
     #[serde(default)]
@@ -232,6 +252,9 @@ impl Scenario {
                 for pos in positions {
                     check_pos(&room.name, "source", *pos)?;
                 }
+            }
+            if let Some(m) = &room.mineral {
+                check_pos(&room.name, "mineral", m.pos)?;
             }
             let mut creeps = std::collections::BTreeSet::new();
             for cr in &room.creeps {
@@ -397,6 +420,14 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
                     clear_walls_around(&mut room, pos[0], pos[1]);
                 }
             }
+        }
+
+        // Mineral
+        if let Some(m) = &spec.mineral {
+            let id = world.alloc_id();
+            room.objects
+                .insert(id, objects::mineral(id, m.pos[0], m.pos[1], &m.mineral_type, m.amount));
+            clear_walls_around(&mut room, m.pos[0], m.pos[1]);
         }
 
         // 结构

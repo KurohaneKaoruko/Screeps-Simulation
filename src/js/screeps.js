@@ -125,6 +125,98 @@ const C = {
 	RESOURCE_ENERGY: "energy",
 	RESOURCE_POWER: "power",
 	RESOURCE_OPS: "ops",
+	// ── 基础矿物 ──
+	RESOURCE_HYDROGEN: "H",
+	RESOURCE_OXYGEN: "O",
+	RESOURCE_UTRIUM: "U",
+	RESOURCE_LEMERGIUM: "L",
+	RESOURCE_KEANIUM: "K",
+	RESOURCE_ZYNTHIUM: "Z",
+	RESOURCE_CATALYST: "X",
+	RESOURCE_GHODIUM: "G",
+	// ── 化合物 ──
+	RESOURCE_HYDROXIDE: "OH",
+	RESOURCE_ZYNTHIUM_KEANIUM: "ZK",
+	RESOURCE_UTRIUM_LEMERGIUM: "UL",
+	RESOURCE_UTRIUM_HYDRIDE: "UH",
+	RESOURCE_UTRIUM_OXIDE: "UO",
+	RESOURCE_KEANIUM_HYDRIDE: "KH",
+	RESOURCE_KEANIUM_OXIDE: "KO",
+	RESOURCE_LEMERGIUM_HYDRIDE: "LH",
+	RESOURCE_LEMERGIUM_OXIDE: "LO",
+	RESOURCE_ZYNTHIUM_HYDRIDE: "ZH",
+	RESOURCE_ZYNTHIUM_OXIDE: "ZO",
+	RESOURCE_GHODIUM_HYDRIDE: "GH",
+	RESOURCE_GHODIUM_OXIDE: "GO",
+	// ── Boost ──
+	RESOURCE_UTRIUM_ACID: "UH2O",
+	RESOURCE_UTRIUM_ALKALIDE: "UHO2",
+	RESOURCE_KEANIUM_ACID: "KH2O",
+	RESOURCE_KEANIUM_ALKALIDE: "KHO2",
+	RESOURCE_LEMERGIUM_ACID: "LH2O",
+	RESOURCE_LEMERGIUM_ALKALIDE: "LHO2",
+	RESOURCE_ZYNTHIUM_ACID: "ZH2O",
+	RESOURCE_ZYNTHIUM_ALKALIDE: "ZHO2",
+	RESOURCE_GHODIUM_ACID: "GH2O",
+	RESOURCE_GHODIUM_ALKALIDE: "GHO2",
+	RESOURCE_CATALYZED_UTRIUM_ACID: "XUH2O",
+	RESOURCE_CATALYZED_UTRIUM_ALKALIDE: "XUHO2",
+	RESOURCE_CATALYZED_KEANIUM_ACID: "XKH2O",
+	RESOURCE_CATALYZED_KEANIUM_ALKALIDE: "XKHO2",
+	RESOURCE_CATALYZED_LEMERGIUM_ACID: "XLH2O",
+	RESOURCE_CATALYZED_LEMERGIUM_ALKALIDE: "XLHO2",
+	RESOURCE_CATALYZED_ZYNTHIUM_ACID: "XZH2O",
+	RESOURCE_CATALYZED_ZYNTHIUM_ALKALIDE: "XZHO2",
+	RESOURCE_CATALYZED_GHODIUM_ACID: "XGH2O",
+	RESOURCE_CATALYZED_GHODIUM_ALKALIDE: "XGHO2",
+	// ── 商品 tier0 ──
+	RESOURCE_SILICON: "silicon",
+	RESOURCE_METAL: "metal",
+	RESOURCE_BIOMASS: "biomass",
+	RESOURCE_MIST: "mist",
+	// ── 商品 tier1 ──
+	RESOURCE_UTRIUM_BAR: "utrium_bar",
+	RESOURCE_LEMERGIUM_BAR: "lergium_bar",
+	RESOURCE_KEANIUM_BAR: "keanium_bar",
+	RESOURCE_ZYNTHIUM_BAR: "zynthium_bar",
+	RESOURCE_GHODIUM_MELT: "ghodium_melt",
+	RESOURCE_OXIDANT: "oxidant",
+	RESOURCE_REDUCTANT: "reductant",
+	RESOURCE_PURIFIER: "purifier",
+	RESOURCE_BATTERY: "battery",
+	RESOURCE_WIRE: "wire",
+	RESOURCE_SWITCH: "switch",
+	RESOURCE_TRANSISTOR: "transistor",
+	RESOURCE_MICROCHIP: "microchip",
+	RESOURCE_CIRCUIT: "circuit",
+	RESOURCE_DEVICE: "device",
+	RESOURCE_CELL: "cell",
+	RESOURCE_PHLEGM: "phlegm",
+	RESOURCE_TISSUE: "tissue",
+	RESOURCE_MUSCLE: "muscle",
+	RESOURCE_ORGANOID: "organoid",
+	RESOURCE_ALLOY: "alloy",
+	RESOURCE_FIXTURE: "fixture",
+	RESOURCE_FIXTURES: "fixtures",
+	RESOURCE_FRAME: "frame",
+	RESOURCE_HYDRAULICS: "hydraulics",
+	RESOURCE_MACHINE: "machine",
+	RESOURCE_CONDENSATE: "condensate",
+	RESOURCE_CONCENTRATE: "concentrate",
+	RESOURCE_EXTRACT: "extract",
+	RESOURCE_SPIRIT: "spirit",
+	RESOURCE_EMANATION: "emanation",
+	RESOURCE_ESSENCE: "essence",
+	RESOURCE_CRYSTAL: "crystal",
+	// ── season 资源 ──
+	RESOURCE_COMPOSITE: "composite",
+	RESOURCE_LIQUID: "liquid",
+	RESOURCE_ORGANISM: "organism",
+	RESOURCE_PRODUCTION: "production",
+	RESOURCE_TUBE: "tube",
+	// ── 历史别名 (引擎仍保留) ──
+	RESOURCE_ZYNTHIUM_KEANITE: "ZK",
+	RESOURCE_UTRIUM_LEMERGITE: "UL",
 
 	STRUCTURE_SPAWN: "spawn",
 	STRUCTURE_EXTENSION: "extension",
@@ -333,6 +425,95 @@ const C = {
 	DIRECTION_BOTTOM_LEFT: 6,
 	DIRECTION_LEFT: 7,
 	DIRECTION_TOP_LEFT: 8,
+	// ── 官方常量对齐 (@screeps/common constants) ──
+	COLOR_PURPLE: 2,
+	COLOR_BLUE: 3,
+	COLOR_CYAN: 4,
+	COLOR_GREEN: 5,
+	COLOR_ORANGE: 7,
+	COLOR_BROWN: 8,
+	COLOR_GREY: 9,
+	COLOR_WHITE: 10,
+	WORLD_HEIGHT: 202,
+	LINK_HITS_MAX: 1000,
+	SAFE_MODE_DURATION: 20000,
+	SAFE_MODE_COOLDOWN: 50000,
+	SAFE_MODE_COST: 1000,
+	OBSERVER_RANGE: 10,
+	POWER_BANK_HITS: 2000000,
+	POWER_BANK_CAPACITY_MAX: 5000,
+	POWER_BANK_CAPACITY_MIN: 500,
+	POWER_BANK_CAPACITY_CRIT: 0.3,
+	POWER_BANK_DECAY: 5000,
+	POWER_BANK_HIT_BACK: 0.5,
+	LAB_UNBOOST_ENERGY: 0,
+	LAB_UNBOOST_MINERAL: 15,
+	GCL_NOVICE: 3,
+	MODE_SIMULATION: null,
+	MODE_WORLD: null,
+	DENSITY_LOW: 1,
+	DENSITY_MODERATE: 2,
+	DENSITY_HIGH: 3,
+	DENSITY_ULTRA: 4,
+	TERMINAL_COOLDOWN: 10,
+	NUKE_DAMAGE: { 0: 10000000, 2: 5000000 },
+	TOMBSTONE_DECAY_POWER_CREEP: 500,
+	RUIN_DECAY: 500,
+	RUIN_DECAY_STRUCTURES: { 'powerBank': 10 },
+	PORTAL_DECAY: 30000,
+	MARKET_FEE: 0.05,
+	FLAGS_LIMIT: 10000,
+	SUBSCRIPTION_TOKEN: "token",
+	CPU_UNLOCK: "cpuUnlock",
+	PIXEL: "pixel",
+	ACCESS_KEY: "accessKey",
+	REACTIONS: { H: { O: "OH", L: "LH", K: "KH", U: "UH", Z: "ZH", G: "GH" }, O: { H: "OH", L: "LO", K: "KO", U: "UO", Z: "ZO", G: "GO" }, Z: { K: "ZK", H: "ZH", O: "ZO" }, L: { U: "UL", H: "LH", O: "LO" }, K: { Z: "ZK", H: "KH", O: "KO" }, G: { H: "GH", O: "GO" }, U: { L: "UL", H: "UH", O: "UO" }, OH: { UH: "UH2O", UO: "UHO2", ZH: "ZH2O", ZO: "ZHO2", KH: "KH2O", KO: "KHO2", LH: "LH2O", LO: "LHO2", GH: "GH2O", GO: "GHO2" }, X: { UH2O: "XUH2O", UHO2: "XUHO2", LH2O: "XLH2O", LHO2: "XLHO2", KH2O: "XKH2O", KHO2: "XKHO2", ZH2O: "XZH2O", ZHO2: "XZHO2", GH2O: "XGH2O", GHO2: "XGHO2" }, ZK: { UL: "G" }, UL: { ZK: "G" }, LH: { OH: "LH2O" }, ZH: { OH: "ZH2O" }, GH: { OH: "GH2O" }, KH: { OH: "KH2O" }, UH: { OH: "UH2O" }, LO: { OH: "LHO2" }, ZO: { OH: "ZHO2" }, KO: { OH: "KHO2" }, UO: { OH: "UHO2" }, GO: { OH: "GHO2" }, LH2O: { X: "XLH2O" }, KH2O: { X: "XKH2O" }, ZH2O: { X: "XZH2O" }, UH2O: { X: "XUH2O" }, GH2O: { X: "XGH2O" }, LHO2: { X: "XLHO2" }, UHO2: { X: "XUHO2" }, KHO2: { X: "XKHO2" }, ZHO2: { X: "XZHO2" }, GHO2: { X: "XGHO2" } },
+	BOOSTS: { work: { UO: { harvest: 3 }, UHO2: { harvest: 5 }, XUHO2: { harvest: 7 }, LH: { build: 1.5, repair: 1.5 }, LH2O: { build: 1.8, repair: 1.8 }, XLH2O: { build: 2, repair: 2 }, ZH: { dismantle: 2 }, ZH2O: { dismantle: 3 }, XZH2O: { dismantle: 4 }, GH: { upgradeController: 1.5 }, GH2O: { upgradeController: 1.8 }, XGH2O: { upgradeController: 2 } }, attack: { UH: { attack: 2 }, UH2O: { attack: 3 }, XUH2O: { attack: 4 } }, ranged_attack: { KO: { rangedAttack: 2, rangedMassAttack: 2 }, KHO2: { rangedAttack: 3, rangedMassAttack: 3 }, XKHO2: { rangedAttack: 4, rangedMassAttack: 4 } }, heal: { LO: { heal: 2, rangedHeal: 2 }, LHO2: { heal: 3, rangedHeal: 3 }, XLHO2: { heal: 4, rangedHeal: 4 } }, carry: { KH: { capacity: 2 }, KH2O: { capacity: 3 }, XKH2O: { capacity: 4 } }, move: { ZO: { fatigue: 2 }, ZHO2: { fatigue: 3 }, XZHO2: { fatigue: 4 } }, tough: { GO: { damage: .7 }, GHO2: { damage: .5 }, XGHO2: { damage: .3 } } },
+	REACTION_TIME: { OH: 20, ZK: 5, UL: 5, G: 5, UH: 10, UH2O: 5, XUH2O: 60, UO: 10, UHO2: 5, XUHO2: 60, KH: 10, KH2O: 5, XKH2O: 60, KO: 10, KHO2: 5, XKHO2: 60, LH: 15, LH2O: 10, XLH2O: 65, LO: 10, LHO2: 5, XLHO2: 60, ZH: 20, ZH2O: 40, XZH2O: 160, ZO: 10, ZHO2: 5, XZHO2: 60, GH: 10, GH2O: 15, XGH2O: 80, GO: 10, GHO2: 30, XGHO2: 150, },
+	PORTAL_UNSTABLE: 10*24*3600*1000,
+	PORTAL_MIN_TIMEOUT: 12*24*3600*1000,
+	PORTAL_MAX_TIMEOUT: 22*24*3600*1000,
+	POWER_BANK_RESPAWN_TIME: 50000,
+	INVADERS_ENERGY_GOAL: 100000,
+	SYSTEM_USERNAME: 'Screeps',
+	SIGN_RESPAWN_AREA: 'A new Novice or Respawn Area is being planned somewhere in this sector. Please make sure all important rooms are reserved.',
+	SIGN_PLANNED_AREA: 'A new Novice or Respawn Area is being planned somewhere in this sector. Please make sure all important rooms are reserved.',
+	EVENT_POWER: 11,
+	POWER_LEVEL_MULTIPLY: 1000,
+	POWER_LEVEL_POW: 2,
+	POWER_CREEP_SPAWN_COOLDOWN: 8*3600*1000,
+	POWER_CREEP_DELETE_COOLDOWN: 24*3600*1000,
+	POWER_CREEP_MAX_LEVEL: 25,
+	POWER_CREEP_LIFE_TIME: 5000,
+	POWER_CLASS: { OPERATOR: 'operator' },
+	PWR_GENERATE_OPS: 1,
+	PWR_OPERATE_SPAWN: 2,
+	PWR_OPERATE_TOWER: 3,
+	PWR_OPERATE_STORAGE: 4,
+	PWR_OPERATE_LAB: 5,
+	PWR_OPERATE_EXTENSION: 6,
+	PWR_OPERATE_OBSERVER: 7,
+	PWR_OPERATE_TERMINAL: 8,
+	PWR_DISRUPT_SPAWN: 9,
+	PWR_DISRUPT_TOWER: 10,
+	PWR_DISRUPT_SOURCE: 11,
+	PWR_SHIELD: 12,
+	PWR_REGEN_SOURCE: 13,
+	PWR_REGEN_MINERAL: 14,
+	PWR_DISRUPT_TERMINAL: 15,
+	PWR_OPERATE_POWER: 16,
+	PWR_FORTIFY: 17,
+	PWR_OPERATE_CONTROLLER: 18,
+	PWR_OPERATE_FACTORY: 19,
+	EFFECT_INVULNERABILITY: 1001,
+	EFFECT_COLLAPSE_TIMER: 1002,
+	INVADER_CORE_HITS: 100000,
+	INVADER_CORE_CREEP_SPAWN_TIME: { 0: 0, 1: 0, 2: 6, 3: 3, 4: 2, 5: 1 },
+	INVADER_CORE_EXPAND_TIME: { 1: 4000, 2: 3500, 3: 3000, 4: 2500, 5: 2000 },
+	INVADER_CORE_CONTROLLER_POWER: 2,
+	INVADER_CORE_CONTROLLER_DOWNGRADE: 5000,
+	STRONGHOLD_RAMPART_HITS: { 0: 0, 1: 100000, 2: 200000, 3: 500000, 4: 1000000, 5: 2000000 },
+	STRONGHOLD_DECAY_TICKS: 75000,
 };
 for (const k of Object.keys(C)) {
 	globalThis[k] = C[k];
@@ -656,6 +837,11 @@ class Creep extends RoomObject {
 			if (this.body[i].type === type) n++;
 		}
 		return n;
+	}
+	notifyWhenAttacked(enabled) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (typeof enabled !== "boolean") return C.ERR_INVALID_ARGS;
+		return C.OK;
 	}
 	move(direction) {
 		if (!this.my) return C.ERR_NOT_OWNER;
@@ -1337,7 +1523,7 @@ class Room {
 		this.visual = new RoomVisual(name);
 		// 分类索引
 		this.__objects = [];
-		this.__byType = { creep: [], source: [], energy: [], constructionSite: [], tombstone: [], flag: [], powerCreep: [] };
+		this.__byType = { creep: [], source: [], mineral: [], energy: [], constructionSite: [], tombstone: [], flag: [], powerCreep: [] };
 		for (const st of Object.keys(STRUCTURE_CLASSES)) this.__byType[st] = [];
 		this.__occupied = new Map(); // "x,y" → objects[]
 		for (const rawObj of raw.objects) {
@@ -1554,6 +1740,7 @@ function collectFind(roomName, type, opts) {
 		case C.FIND_MY_CREEPS: return pick(room.__byType.creep.filter((c) => c.my));
 		case C.FIND_HOSTILE_CREEPS: return pick(room.__byType.creep.filter((c) => !c.my));
 		case C.FIND_SOURCES: return pick(room.__byType.source);
+		case C.FIND_MINERALS: return pick(room.__byType.mineral || []);
 		case C.FIND_SOURCES_ACTIVE: return pick(room.__byType.source.filter((s) => s.energy > 0));
 		case C.FIND_DROPPED_RESOURCES: return pick(room.__byType.energy);
 		case C.FIND_STRUCTURES: return pick(room.__objects.filter((o) => o instanceof Structure));
@@ -2301,11 +2488,10 @@ const RawMemory = {
 		rawMemoryData = value;
 		// 官方 Memory 是 rawMemory 的惰性解析视图: set 之后立即反映新内容
 		try {
-			Memory = value ? JSON.parse(value) : {};
+			globalThis.Memory = value ? JSON.parse(value) : {};
 		} catch {
-			Memory = {};
+			globalThis.Memory = {};
 		}
-		globalThis.Memory = Memory;
 	},
 	segments: {},
 	foreignSegment: null,
@@ -2472,9 +2658,9 @@ function __runTick() {
 		buildGame();
 		rawMemoryData = __ops.op_sim_get_memory();
 		try {
-			Memory = rawMemoryData ? JSON.parse(rawMemoryData) : {};
+			globalThis.Memory = rawMemoryData ? JSON.parse(rawMemoryData) : {};
 		} catch {
-			Memory = {};
+			globalThis.Memory = {};
 		}
 		// 内存段: 宿主注入本 tick 激活的段 (官方 driver 的 data.memorySegments)
 		__nextActiveSegments = null;
@@ -2492,7 +2678,6 @@ function __runTick() {
 			__activeSegments = [];
 		}
 		globalThis.Game = Game;
-		globalThis.Memory = Memory;
 
 		const loop = __botModule && __botModule.exports && __botModule.exports.loop;
 		if (typeof loop === "function") {
