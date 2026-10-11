@@ -61,18 +61,34 @@ pub struct BotRuntime {
 }
 
 impl BotRuntime {
-    /// 创建 V8 运行时: 先装 shim, 再以 CJS 方式装载 bundle; seed 用于复现 Math.random
+    /// 创建 V8 运行时: 先注入 lodash, 再装 shim, 最后以 CJS 方式装载 bundle。
+    /// `seed == 0` 表示不播种 (Math.random 保持 V8 原生随机)。
     pub fn new(bundle_code: &str, seed: u64) -> Result<BotRuntime, String> {
         let mut runtime = JsRuntime::new(RuntimeOptions {
             extensions: vec![nexus_sim::init()],
             ..Default::default()
         });
+        // 官方 runtime 把完整 lodash 3.10.1 注入为全局 `_` (E/game/game.js:475-477)
+        let lodash = include_str!("js/lodash.js");
+        let mut lodash_boot = String::with_capacity(lodash.len() + 160);
+        lodash_boot.push_str("(function() { var module = { exports: {} }; var exports = module.exports;\n");
+        lodash_boot.push_str(lodash);
+        lodash_boot.push_str("\nglobalThis._ = module.exports; })()");
+        runtime
+            .execute_script("lodash.js", lodash_boot)
+            .map_err(|e| format!("lodash 装载失败: {e}"))?;
         let shim = include_str!("js/screeps.js");
         runtime
             .execute_script("screeps.js", shim)
             .map_err(|e| format!("shim 装载失败: {e}"))?;
+        // 播种必须在 bundle 之前: 模块顶层的 Math.random 也要确定性 (官方先建沙箱再跑 bundle)
+        let seed_call = if seed == 0 {
+            String::new()
+        } else {
+            format!("__seedRandom({seed});")
+        };
         let bootstrap = format!(
-            "(function() {{ var err = __bootstrapBundle({}); if (err) throw new Error(err); __seedRandom({seed}); }})()",
+            "(function() {{ {seed_call} var err = __bootstrapBundle({}); if (err) throw new Error(err); }})()",
             json_string(bundle_code)
         );
         runtime

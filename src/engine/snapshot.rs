@@ -43,6 +43,17 @@ pub fn build_snapshot(world: &World, opts: &SnapshotOptions) -> Value {
         for obj in room.objects.values() {
             objects.push(object_json(obj, world));
         }
+        let events: Vec<Value> = room
+            .events
+            .iter()
+            .map(|e| {
+                json!({
+                    "event": e.event,
+                    "objectId": World::id_string(e.object_id),
+                    "data": e.data,
+                })
+            })
+            .collect();
         rooms.insert(
             name.clone(),
             json!({
@@ -51,6 +62,7 @@ pub fn build_snapshot(world: &World, opts: &SnapshotOptions) -> Value {
                 "controller": controller_id,
                 "storage": storage_id,
                 "objects": objects,
+                "events": events,
             }),
         );
     }
@@ -120,6 +132,11 @@ fn object_json(obj: &Obj, world: &World) -> Value {
         "spawn" => {
             let mut extra = structure_common(obj);
             extra.insert("name".into(), json!(obj.name.clone().unwrap_or_default()));
+            extra.insert(
+                "energy".into(),
+                json!(obj.store.get("energy").copied().unwrap_or(0)),
+            );
+            extra.insert("energyCapacity".into(), json!(obj.energy_capacity));
             match &obj.spawn_job {
                 Some(job) => {
                     extra.insert(
@@ -243,6 +260,8 @@ fn structure_common(obj: &Obj) -> Map<String, Value> {
     extra.insert("hitsMax".into(), json!(obj.hits_max));
     extra.insert("my".into(), json!(obj.mine));
     extra.insert("store".into(), store_json(&obj.store));
+    // 超出 RCL 上限被停用的 spawn/extension (官方 isActive() 为 false)
+    extra.insert("off".into(), json!(obj.off));
     extra.insert(
         "storeCapacity".into(),
         json!(if obj.obj_type == "extension" || obj.obj_type == "spawn" {
@@ -254,15 +273,11 @@ fn structure_common(obj: &Obj) -> Map<String, Value> {
     extra
 }
 
+/// 官方 Store 只包含非零资源; 缺失键由 shim 的 Proxy 按 RESOURCES_ALL 返回 0
 fn store_json(store: &Store) -> Value {
     let mut map = Map::new();
-    // energy 键必须恒存在 (含 0), 官方 Store 语义如此; 缺失会让 bot 侧算出 NaN
-    map.insert(
-        "energy".into(),
-        json!(store.get("energy").copied().unwrap_or(0)),
-    );
     for (k, v) in store {
-        if *v > 0 && k != "energy" {
+        if *v > 0 {
             map.insert(k.clone(), json!(v));
         }
     }

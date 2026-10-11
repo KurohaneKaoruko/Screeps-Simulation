@@ -277,6 +277,7 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
                 "container" => obj.energy_capacity = constants::CONTAINER_CAPACITY,
                 "tower" => obj.energy_capacity = constants::TOWER_CAPACITY,
                 "terminal" => obj.energy_capacity = constants::TERMINAL_CAPACITY,
+                "link" => obj.energy_capacity = constants::LINK_CAPACITY,
                 _ => {}
             }
             room.objects.insert(id, obj);

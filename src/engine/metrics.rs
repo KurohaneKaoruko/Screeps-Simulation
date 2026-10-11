@@ -1,4 +1,4 @@
-//! 指标采集与场景断言: 对应 docs/13 §13.3 回归基准。
+//! 指标采集与场景断言 (CPU 均值/P95/P99、RCL 时间线、单位数、Memory 峰值)。
 
 use crate::engine::scenario::AssertSpec;
 use crate::engine::world::World;

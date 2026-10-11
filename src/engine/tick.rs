@@ -8,6 +8,7 @@ use crate::engine::movement::{self, Movement};
 use crate::engine::objects;
 use crate::engine::terrain::ROOM_SIZE;
 use crate::engine::world::{alloc_id, World};
+use serde_json::json;
 
 pub struct TickOutcome {
     pub creep_deaths: Vec<String>,
@@ -18,9 +19,11 @@ pub struct TickOutcome {
 pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList) -> TickOutcome {
     let tick = world.tick;
 
-    // 每 tick 重置
+    // 每 tick 重置: 控制器升级计数 / extension 容量 / 事件日志 / spawn 停用标记
     for room in world.rooms.values_mut() {
         room.refresh_extension_capacity();
+        room.refresh_spawn_off();
+        room.events.clear();
         for o in room.objects.values_mut() {
             if o.obj_type == "controller" {
                 o.upgraded_this_tick = 0;
@@ -73,18 +76,42 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
 
 fn apply_suicides(world: &mut World, effects: &TickEffects) {
     for (room_name, id) in &effects.deaths {
-        let room = world.rooms.get_mut(room_name).unwrap();
-        if let Some(obj) = room.objects.remove(id) {
-            {
-                world.creeps_lost += 1;
-                let tomb_id = alloc_id(&mut world.next_id);
-                let decay = world.tick + obj.body.len() as u64 * constants::TOMBSTONE_DECAY_PER_PART;
-                let mut tomb = objects::tombstone(tomb_id, obj.x, obj.y, obj.name.as_deref().unwrap_or(""), decay);
-                tomb.store = obj.store.clone();
-                room.objects.insert(tomb_id, tomb);
-            }
+        let removed = world
+            .rooms
+            .get_mut(room_name)
+            .and_then(|r| r.objects.remove(id));
+        if let Some(obj) = removed {
+            world.creeps_lost += 1;
+            bury_creep(world, room_name, obj);
         }
     }
+}
+
+/// 单位死亡: 携带资源先装入同格容器, 装不下的部分进入墓碑 (官方 _die.js:37-91)。
+/// 自杀与自然死亡共用。
+fn bury_creep(world: &mut World, room_name: &str, obj: objects::Obj) {
+    let room = world.rooms.get_mut(room_name).unwrap();
+    let mut remain = objects::Store::new();
+    for (resource, amount) in &obj.store {
+        if *amount == 0 {
+            continue;
+        }
+        let left = intents::fill_container(room, obj.x, obj.y, resource, *amount);
+        if left > 0 {
+            remain.insert(resource.clone(), left);
+        }
+    }
+    let tomb_id = alloc_id(&mut world.next_id);
+    let decay = world.tick + obj.body.len() as u64 * constants::TOMBSTONE_DECAY_PER_PART;
+    let mut tomb = objects::tombstone(
+        tomb_id,
+        obj.x,
+        obj.y,
+        obj.name.as_deref().unwrap_or(""),
+        decay,
+    );
+    tomb.store = remain;
+    room.objects.insert(tomb_id, tomb);
 }
 
 /// 掉落能量: 每 tick ceil(amount / 1000) 衰减
@@ -185,28 +212,16 @@ fn tick_creeps(
         }
         if tick >= obj.age_time.unwrap_or(u64::MAX).saturating_sub(1) {
             let name = obj.name.clone().unwrap_or_default();
-            let (x, y) = (obj.x, obj.y);
-            let store = obj.store.clone();
-            let body_len = obj.body.len();
-            let age_time = obj.age_time.unwrap_or(tick);
-            let life = if body_len > 0 && obj.body.iter().any(|p| p.part_type == "claim") {
-                constants::CREEP_CLAIM_LIFE_TIME
-            } else {
-                constants::CREEP_LIFE_TIME
-            };
-            let room = world.rooms.get_mut(room_name).unwrap();
-            room.objects.remove(&id);
+            let dead = world
+                .rooms
+                .get_mut(room_name)
+                .unwrap()
+                .objects
+                .remove(&id)
+                .unwrap();
             world.creeps_lost += 1;
-            deaths.push(name.clone());
-            // 墓碑: 携带资源 + 尸体部件返还 (corpse_rate × 剩余寿命比, 自然死亡≈0)
-            let tomb_id = alloc_id(&mut world.next_id);
-            let decay = tick + body_len as u64 * constants::TOMBSTONE_DECAY_PER_PART;
-            let mut tomb = objects::tombstone(tomb_id, x, y, &name, decay);
-            tomb.store = store;
-            let ttl_left = age_time.saturating_sub(tick + 1) as f64;
-            let life_rate = constants::CREEP_CORPSE_RATE * ttl_left / life as f64;
-            let _ = life_rate; // 部件返还: 经济场景中自然死亡返还≈0, 暂不计入
-            room.objects.insert(tomb_id, tomb);
+            deaths.push(name);
+            bury_creep(world, room_name, dead);
             continue;
         }
 
@@ -248,7 +263,7 @@ fn tick_spawns(world: &mut World, room_name: &str, movement: &mut Movement) {
                 let birth = {
                     let room = &world.rooms[room_name];
                     let spawn = &room.objects[&spawn_id];
-                    movement::find_birth_tile(room, spawn, movement)
+                    movement::find_birth_tile(room, spawn, movement, job.directions.as_deref())
                 };
                 let room = world.rooms.get_mut(room_name).unwrap();
                 if let Some((x, y)) = birth {
@@ -280,11 +295,12 @@ fn tick_spawns(world: &mut World, room_name: &str, movement: &mut Movement) {
                 }
             }
         }
-        // 自动能量回复
+        // 自动能量回复 (被停用的 spawn 不回能, 官方 spawns/tick.js:35-42)
         let room = world.rooms.get_mut(room_name).unwrap();
         let energy_available = room.energy_available();
         let spawn = room.objects.get_mut(&spawn_id).unwrap();
         if spawn.mine
+            && !spawn.off
             && energy_available < constants::SPAWN_ENERGY_CAPACITY
             && spawn.store.get("energy").copied().unwrap_or(0) < constants::SPAWN_ENERGY_CAPACITY
         {
@@ -390,14 +406,14 @@ fn tick_decay_structures(world: &mut World, room_name: &str) {
         if obj.hits == 0 {
             let store = obj.store.clone();
             let (x, y) = (obj.x, obj.y);
-            let obj_type = obj.obj_type.clone();
+            let type_name = obj.obj_type.clone();
             room.objects.remove(&id);
+            room.push_event(intents::EVENT_OBJECT_DESTROYED, id, json!({ "type": type_name }));
             for (resource, amount) in store {
                 if amount > 0 {
                     intents::create_dropped(world, room_name, x, y, &resource, amount);
                 }
             }
-            let _ = obj_type;
         } else {
             let interval = if obj.obj_type == "road" {
                 constants::ROAD_DECAY_TIME
@@ -471,6 +487,12 @@ fn apply_crossings(world: &mut World, crossings: &mut Vec<(String, u64)>) {
         let mut obj = world.rooms.get_mut(&room_name).unwrap().objects.remove(&id).unwrap();
         obj.x = nx;
         obj.y = ny;
+        // 官方 EVENT_EXIT: 记录在离开的房间, data.room = 进入的房间
+        world
+            .rooms
+            .get_mut(&room_name)
+            .unwrap()
+            .push_event(intents::EVENT_EXIT, id, json!({ "room": target_name }));
         let target = world.rooms.get_mut(&target_name).unwrap();
         target.objects.insert(id, obj);
     }

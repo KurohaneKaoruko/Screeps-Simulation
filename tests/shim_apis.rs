@@ -38,7 +38,6 @@ fn run_once(bundle: &str, world: &mut nexus_sim::engine::world::World) -> (Vec<(
 	);
 	let mut bot = BotRuntime::new(bundle, 1).unwrap();
 	let result = bot.run_tick(&serde_json::to_string(&snapshot).unwrap(), "{}").unwrap();
-	let intents = IntentList::parse(&result.intents_json);
 	(IntentList::parse(&result.intents_json).entries, result.console)
 }
 
@@ -133,11 +132,15 @@ fn moveto_end_to_end_inner() {
 		exports.loop = function() {
 			const creep = Object.values(Game.creeps)[0];
 			if (!creep) { console.log("no-creep"); return; }
+			if (Memory.started === undefined) Memory.started = Game.time;
 			const source = creep.room.find(FIND_SOURCES)[0];
-			const code = creep.moveTo(source);
-			console.log(JSON.stringify({ code, x: creep.pos.x, y: creep.pos.y }));
+			const code = creep.moveTo(source, { reusePath: 5 });
+			console.log(JSON.stringify({ code, started: Memory.started, x: creep.pos.x, y: creep.pos.y }));
 		};
 	"#;
+	// 单个 BotRuntime 贯穿整个场景: 覆盖 Memory 往返、跨 tick 全局持久化与 _move 复用缓存
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let mut memory = String::from("{}");
 	let mut pos = (25u8, 25u8);
 	for _ in 0..12 {
 		let snapshot = build_snapshot(
@@ -147,18 +150,21 @@ fn moveto_end_to_end_inner() {
 				always_visible: false,
 			},
 		);
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
 		let result = bot
-			.run_tick(&serde_json::to_string(&snapshot).unwrap(), "{}")
+			.run_tick(&serde_json::to_string(&snapshot).unwrap(), &memory)
 			.unwrap();
+		memory = result.memory.clone();
 		let info: serde_json::Value =
 			serde_json::from_str(result.console.first().map(String::as_str).unwrap_or("{}")).unwrap();
 		assert_eq!(info["code"], 0, "moveTo 应返回 OK: {info}");
+		// Memory 首 tick 写入后应跨 tick 保留 (此前每 tick 都新建 runtime 且传 "{}", 测不到)
+		assert_eq!(info["started"], 0, "Memory 应跨 tick 往返: {info}");
 
 		let intents = IntentList::parse(&result.intents_json);
 		tick::run_tick(&mut world, movement, &intents);
 		pos = (world.rooms["W5N8"].objects[&id].x, world.rooms["W5N8"].objects[&id].y);
 	}
+	assert!(memory.contains("\"started\""), "Memory 应被序列化回传: {memory}");
 	// 12 tick × 3 MOVE 无负重 → 直线距离 6 格内必到达 source (18,22) 邻域
 	let dist = (pos.0 as i32 - 18).abs().max((pos.1 as i32 - 22).abs());
 	assert!(dist <= 1, "12 tick 后应到达 source 邻域, 实际 {pos:?} 距离 {dist}");

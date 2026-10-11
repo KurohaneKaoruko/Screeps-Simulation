@@ -127,7 +127,8 @@ async fn async_main() {
     let mut movement = Movement::default();
     let mut metrics = MetricsCollector::default();
 
-    let seed = if seed_random || scenario.deterministic_random {
+    // seed == 0 → 不播种。--no-seed-random 现在真的会关闭播种 (此前被 deterministic_random 短路)。
+    let seed = if seed_random && scenario.deterministic_random {
         scenario.seed.unwrap_or(1)
     } else {
         0

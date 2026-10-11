@@ -24,7 +24,7 @@ const C = {
 	ERR_INVALID_ARGS: -10,
 	ERR_TIRED: -11,
 	ERR_NO_BODYPART: -12,
-	ERR_NOT_ENOUGH_EXTENSIONS: -13,
+	ERR_NOT_ENOUGH_EXTENSIONS: -6,
 	ERR_RCL_NOT_ENOUGH: -14,
 	ERR_GCL_NOT_ENOUGH: -15,
 
@@ -103,7 +103,23 @@ const C = {
 	BODYPART_COST: { move: 50, work: 100, carry: 50, attack: 80, ranged_attack: 150, tough: 10, heal: 250, claim: 600 },
 
 	BODYPARTS_ALL: ["move", "work", "carry", "attack", "ranged_attack", "tough", "heal", "claim"],
-	RESOURCES_ALL: ["energy", ...["H", "O", "U", "K", "L", "Z", "X", "G"].flatMap((b) => [b, `${b}O`, `${b}H`, `${b}L`, `${b}K`, `${b}Z`, `${b}U`].slice(0, 4))],
+	// 官方 RESOURCES_ALL (common/lib/constants.js)。此前是拼装出的错误列表 (含 HH/OO)。
+	RESOURCES_ALL: [
+		"energy", "power",
+		"H", "O", "U", "L", "K", "Z", "X", "G",
+		"OH", "ZK", "UL",
+		"UH", "UO", "KH", "KO", "LH", "LO", "ZH", "ZO", "GH", "GO",
+		"UH2O", "UHO2", "KH2O", "KHO2", "LH2O", "LHO2", "ZH2O", "ZHO2", "GH2O", "GHO2",
+		"XUH2O", "XUHO2", "XKH2O", "XKHO2", "XLH2O", "XLHO2", "XZH2O", "XZHO2", "XGH2O", "XGHO2",
+		"ops", "silicon", "metal", "biomass", "mist",
+		"utrium_bar", "lemergium_bar", "zynthium_bar", "keanium_bar", "ghodium_melt",
+		"utrium_oxide", "lemergium_oxide", "zynthium_oxide", "keanium_oxide", "ghodium_oxide",
+		"utrium_acid", "lemergium_acid", "zynthium_acid", "keanium_acid", "ghodium_acid",
+		"utrium_alkalide", "lemergium_alkalide", "zynthium_alkalide", "keanium_alkalide", "ghodium_alkalide",
+		"catalyzed_utrium_acid", "catalyzed_lemergium_acid", "catalyzed_zynthium_acid", "catalyzed_keanium_acid", "catalyzed_ghodium_acid",
+		"catalyzed_utrium_alkalide", "catalyzed_lemergium_alkalide", "catalyzed_zynthium_alkalide", "catalyzed_keanium_alkalide", "catalyzed_ghodium_alkalide",
+	],
+	INTERSHARD_RESOURCES: ["token"],
 
 	RESOURCE_ENERGY: "energy",
 	RESOURCE_POWER: "power",
@@ -162,56 +178,174 @@ const C = {
 		"constructedWall", "extension", "link", "storage", "tower", "observer",
 		"powerSpawn", "powerBank", "lab", "terminal", "nuker", "factory", "invaderCore",
 	],
+
+	// ── 经济常量 (官方 constants.js 逐条对齐) ──
+	CARRY_CAPACITY: 50,
+	HARVEST_POWER: 2,
+	HARVEST_MINERAL_POWER: 1,
+	HARVEST_DEPOSIT_POWER: 1,
+	BUILD_POWER: 5,
+	REPAIR_POWER: 100,
+	DISMANTLE_POWER: 50,
+	UPGRADE_CONTROLLER_POWER: 1,
+	ATTACK_POWER: 30,
+	RANGED_ATTACK_POWER: 10,
+	HEAL_POWER: 12,
+	RANGED_HEAL_POWER: 4,
+	REPAIR_COST: 0.01,
+	DISMANTLE_COST: 0.005,
+	CREEP_PART_MAX_ENERGY: 125,
+	TOMBSTONE_DECAY_PER_PART: 5,
+	ENERGY_DECAY: 1000,
+	ENERGY_REGEN_TIME: 300,
+	SOURCE_ENERGY_CAPACITY: 3000,
+	SOURCE_ENERGY_NEUTRAL_CAPACITY: 1500,
+	SOURCE_ENERGY_KEEPER_CAPACITY: 4000,
+	SPAWN_HITS: 5000,
+	SPAWN_ENERGY_START: 300,
+	SPAWN_ENERGY_CAPACITY: 300,
+	EXTENSION_HITS: 1000,
+	EXTENSION_ENERGY_CAPACITY: { 0: 50, 1: 50, 2: 50, 3: 50, 4: 50, 5: 50, 6: 50, 7: 100, 8: 200 },
+	LINK_HITS: 1000,
+	LINK_CAPACITY: 800,
+	LINK_COOLDOWN: 1,
+	LINK_LOSS_RATIO: 0.03,
+	STORAGE_HITS: 10000,
+	STORAGE_CAPACITY: 1000000,
+	CONTAINER_HITS: 250000,
+	CONTAINER_CAPACITY: 2000,
+	CONTAINER_DECAY: 5000,
+	CONTAINER_DECAY_TIME: 100,
+	CONTAINER_DECAY_TIME_OWNED: 500,
+	TOWER_HITS: 3000,
+	TOWER_CAPACITY: 1000,
+	TOWER_ENERGY_COST: 10,
+	TOWER_POWER_ATTACK: 600,
+	TOWER_POWER_HEAL: 400,
+	TOWER_POWER_REPAIR: 800,
+	TOWER_OPTIMAL_RANGE: 5,
+	TOWER_FALLOFF_RANGE: 20,
+	TOWER_FALLOFF: 0.75,
+	ROAD_HITS: 5000,
+	ROAD_DECAY_AMOUNT: 100,
+	ROAD_DECAY_TIME: 1000,
+	ROAD_WEAROUT: 1,
+	ROAD_WEAROUT_POWER_CREEP: 100,
+	WALL_HITS: 1,
+	WALL_HITS_MAX: 300000000,
+	RAMPART_HITS: 1,
+	RAMPART_HITS_MAX: { 2: 300000, 3: 1000000, 4: 3000000, 5: 10000000, 6: 30000000, 7: 100000000, 8: 300000000 },
+	RAMPART_DECAY_AMOUNT: 300,
+	RAMPART_DECAY_TIME: 100,
+	TERMINAL_HITS: 3000,
+	TERMINAL_CAPACITY: 300000,
+	TERMINAL_SEND_COST: 0.1,
+	TERMINAL_MIN_SEND: 100,
+	OBSERVER_HITS: 500,
+	POWER_SPAWN_HITS: 5000,
+	POWER_SPAWN_ENERGY_CAPACITY: 5000,
+	POWER_SPAWN_POWER_CAPACITY: 100,
+	POWER_SPAWN_ENERGY_RATIO: 50,
+	EXTRACTOR_HITS: 500,
+	EXTRACTOR_COOLDOWN: 5,
+	LAB_HITS: 500,
+	LAB_MINERAL_CAPACITY: 3000,
+	LAB_ENERGY_CAPACITY: 2000,
+	LAB_BOOST_ENERGY: 20,
+	LAB_BOOST_MINERAL: 30,
+	LAB_COOLDOWN: 10,
+	LAB_REACTION_AMOUNT: 5,
+	NUKER_HITS: 1000,
+	NUKER_COOLDOWN: 100000,
+	NUKER_ENERGY_CAPACITY: 300000,
+	NUKER_GHODIUM_CAPACITY: 5000,
+	NUKE_LAND_TIME: 50000,
+	NUKE_RANGE: 10,
+	FACTORY_HITS: 1000,
+	FACTORY_CAPACITY: 50000,
+	MINERAL_REGEN_TIME: 50000,
+	MINERAL_MIN_AMOUNT: { H: 35000, O: 35000, L: 35000, K: 35000, Z: 35000, U: 35000, X: 35000 },
+	MINERAL_RANDOM_FACTOR: 2,
+	MINERAL_DENSITY: { 1: 15000, 2: 35000, 3: 70000, 4: 100000 },
+	MINERAL_DENSITY_PROBABILITY: { 1: 0.1, 2: 0.5, 3: 0.9, 4: 1.0 },
+	MINERAL_DENSITY_CHANGE: 0.05,
+	DEPOSIT_EXHAUST_MULTIPLY: 0.001,
+	DEPOSIT_EXHAUST_POW: 1.6,
+	DEPOSIT_DECAY_TIME: 50000,
+	CONTROLLER_STRUCTURES: {
+		spawn: { 0: 0, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 2, 8: 3 },
+		extension: { 0: 0, 1: 0, 2: 5, 3: 10, 4: 20, 5: 30, 6: 40, 7: 50, 8: 60 },
+		road: { 0: 2500, 1: 2500, 2: 2500, 3: 2500, 4: 2500, 5: 2500, 6: 2500, 7: 2500, 8: 2500 },
+		constructedWall: { 0: 0, 1: 0, 2: 2500, 3: 2500, 4: 2500, 5: 2500, 6: 2500, 7: 2500, 8: 2500 },
+		rampart: { 0: 0, 1: 0, 2: 2500, 3: 2500, 4: 2500, 5: 2500, 6: 2500, 7: 2500, 8: 2500 },
+		link: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 2, 6: 3, 7: 4, 8: 6 },
+		storage: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1 },
+		tower: { 0: 0, 1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2, 7: 3, 8: 6 },
+		observer: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 1 },
+		powerSpawn: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 1 },
+		extractor: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 1, 7: 1, 8: 1 },
+		lab: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 3, 7: 6, 8: 10 },
+		terminal: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 1, 7: 1, 8: 1 },
+		container: { 0: 5, 1: 5, 2: 5, 3: 5, 4: 5, 5: 5, 6: 5, 7: 5, 8: 5 },
+		nuker: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 1 },
+		factory: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 1, 8: 1 },
+	},
+
+	// ── 事件 (官方 EVENT_*) ──
+	EVENT_ATTACK: 1,
+	EVENT_OBJECT_DESTROYED: 2,
+	EVENT_ATTACK_CONTROLLER: 3,
+	EVENT_BUILD: 4,
+	EVENT_HARVEST: 5,
+	EVENT_HEAL: 6,
+	EVENT_REPAIR: 7,
+	EVENT_RESERVE_CONTROLLER: 8,
+	EVENT_UPGRADE_CONTROLLER: 9,
+	EVENT_EXIT: 10,
+	EVENT_TRANSFER: 11,
+	EVENT_ATTACK_TYPE_MELEE: 1,
+	EVENT_ATTACK_TYPE_RANGED: 2,
+	EVENT_ATTACK_TYPE_RANGED_MASS: 3,
+	EVENT_ATTACK_TYPE_DISMANTLE: 4,
+	EVENT_ATTACK_TYPE_HIT_BACK: 5,
+	EVENT_ATTACK_TYPE_NUKE: 6,
+	EVENT_HEAL_TYPE_MELEE: 1,
+	EVENT_HEAL_TYPE_RANGED: 2,
+
+	// ── 世界 / 其他 ──
+	PIXEL_CPU_COST: 10000,
+	PIXEL_BUY_PRICE: 1,
+	PIXEL_SELL_PRICE: 1,
+	MARKET_MAX_ORDERS: 300,
+	MARKET_ORDER_LIFE_TIME: 10000,
+	MAX_CONSTRUCTION_SITES_PER_TICK: 1,
+	ORDER_SELL: "sell",
+	ORDER_BUY: "buy",
+	TERRAIN_MASK_WALL: 1,
+	TERRAIN_MASK_SWAMP: 2,
+	TERRAIN_MASK_LAVA: 4,
+	DIRECTION_TOP: 1,
+	DIRECTION_TOP_RIGHT: 2,
+	DIRECTION_RIGHT: 3,
+	DIRECTION_BOTTOM_RIGHT: 4,
+	DIRECTION_BOTTOM: 5,
+	DIRECTION_BOTTOM_LEFT: 6,
+	DIRECTION_LEFT: 7,
+	DIRECTION_TOP_LEFT: 8,
 };
 for (const k of Object.keys(C)) {
 	globalThis[k] = C[k];
 }
 globalThis.RESOURCES_ALL = C.RESOURCES_ALL;
 
-// ═══════════════════════════ 最小 lodash 兼容 ═══════════════════════════
-// 部分服务器提供全局 _; bot 的移动模块 (RosmarinBot 血统) 使用了少量方法。
-
-var _ = {
-	any(arr, pred) { return Array.isArray(arr) ? arr.some(pred) : false; },
-	all(arr, pred) { return Array.isArray(arr) ? arr.every(pred) : true; },
-	find(arr, pred) { return Array.isArray(arr) ? arr.find(pred) : undefined; },
-	filter(arr, pred) {
-		if (!Array.isArray(arr)) return [];
-		if (typeof pred === "function") return arr.filter(pred);
-		if (pred && typeof pred === "object") return arr.filter((o) => Object.keys(pred).every((k) => o && o[k] === pred[k]));
-		return arr.filter(Boolean);
-	},
-	map(arr, fn) { return Array.isArray(arr) ? arr.map(fn) : []; },
-	forEach(arr, fn) { if (Array.isArray(arr)) arr.forEach(fn); },
-	sum(arr, key) {
-		if (!Array.isArray(arr)) return 0;
-		return arr.reduce((acc, i) => acc + (key ? (i ? i[key] : 0) : i), 0);
-	},
-	isNumber(v) { return typeof v === "number"; },
-	isUndefined(v) { return v === undefined; },
-	isString(v) { return typeof v === "string"; },
-	isObject(v) { return v !== null && typeof v === "object"; },
-	isArray(v) { return Array.isArray(v); },
-	contains(arr, v) { return Array.isArray(arr) && arr.includes(v); },
-	uniq(arr) { return Array.isArray(arr) ? [...new Set(arr)] : []; },
-	clone(obj) { return obj == null ? obj : (Array.isArray(obj) ? obj.slice() : { ...obj }); },
-	cloneDeep(obj) { return obj == null ? obj : JSON.parse(JSON.stringify(obj)); },
-	defaults(obj, ...srcs) {
-		for (const src of srcs) {
-			for (const k of Object.keys(src || {})) if (obj[k] === undefined) obj[k] = src[k];
-		}
-		return obj;
-	},
-	extend(obj, ...srcs) { return Object.assign(obj, ...srcs); },
-	take(arr, n) { return Array.isArray(arr) ? arr.slice(0, n) : []; },
-	sortBy(arr, key) {
-		return Array.isArray(arr) ? [...arr].sort((a, b) => (a[key] > b[key] ? 1 : a[key] < b[key] ? -1 : 0)) : [];
-	},
-	indexOf(arr, v) { return Array.isArray(arr) ? arr.indexOf(v) : -1; },
-	last(arr) { return Array.isArray(arr) && arr.length ? arr[arr.length - 1] : undefined; },
-	size(v) { return v == null ? 0 : (Array.isArray(v) || typeof v === "string" ? v.length : Object.keys(v).length); },
-};
-globalThis._ = _;
+// ═══════════════════════════ lodash ═══════════════════════════
+// 官方 runtime 把完整 lodash 3.10.1 注入为全局 `_` (E/game/game.js:475-477)。
+// 宿主 (runtime.rs) 会在装载本 shim 之前先执行 src/js/lodash.js, 因此这里不再自带桩实现。
+if (typeof globalThis._ === "undefined" || typeof globalThis._.chain !== "function") {
+	throw new Error("screeps.js shim 需要宿主先注入 lodash 3.10.1 为全局 `_`");
+}
+// 官方沙箱提供 `global` 别名 (D/runtime/user-vm.js:59); bundle 常写 global.xxx
+globalThis.global = globalThis;
 
 // ═══════════════════════════ tick 间状态 ═══════════════════════════
 
@@ -235,6 +369,8 @@ let __W = null;
 let __intents = [];
 /** 控制台缓冲 */
 let __consoleLines = [];
+/** 本 tick 已创建的 creep 名 (官方 createdCreepNames), 每 tick 重建 */
+let __createdCreepNames = new Set();
 
 function intent(objId, name, data) {
 	__intents.push({ o: typeof objId === "string" ? objId : String(objId), n: name, d: data });
@@ -283,27 +419,36 @@ class RoomPosition {
 		this.y = y;
 		this.roomName = roomName;
 	}
-	getRangeTo(target) {
-		const pos = target && target.pos ? target.pos : target;
-		if (!pos || !this.roomName || pos.roomName !== this.roomName) {
-			if (!pos) return NaN;
-			return Math.abs(this.x - pos.x) > 25 ? Infinity : Math.max(Math.abs(this.x - pos.x), Math.abs(this.y - pos.y));
-		}
+	/** 官方 E/game/rooms.js:1586-1592: 跨房恒为 Infinity; 支持 (x, y) 重载 */
+	getRangeTo(target, y) {
+		const pos = arguments.length >= 2
+			? { x: target, y, roomName: this.roomName }
+			: (target && target.pos ? target.pos : target);
+		if (!pos || pos.x === undefined) return NaN;
+		if (pos.roomName && pos.roomName !== this.roomName) return Infinity;
 		return Math.max(Math.abs(this.x - pos.x), Math.abs(this.y - pos.y));
 	}
-	inRangeTo(target, range) {
-		return this.getRangeTo(target) <= range;
+	inRangeTo(target, y, range) {
+		if (arguments.length >= 3) return this.getRangeTo(target, y) <= range;
+		return this.getRangeTo(target) <= y;
 	}
 	isEqualTo(target, y) {
 		const pos = typeof y === "number" ? { x: target, y, roomName: this.roomName } : (target && target.pos ? target.pos : target);
-		return this.x === pos.x && this.y === pos.y && this.roomName === pos.roomName;
+		if (!pos) return false;
+		return this.x === pos.x && this.y === pos.y && (!pos.roomName || this.roomName === pos.roomName);
 	}
+	/** 官方 E/game/rooms.js:1378-1381: `<= 1` (站在目标格上也算 near) */
 	isNearTo(target) {
-		return this.getRangeTo(target) === 1;
+		return this.getRangeTo(target) <= 1;
 	}
-	getDirectionTo(target) {
-		const pos = target && target.pos ? target.pos : target;
-		return getDirection(pos.x - this.x, pos.y - this.y);
+	/** 官方 E/game/rooms.js:1383-1394: 用世界坐标判定方向 (跨房也正确) */
+	getDirectionTo(target, y) {
+		const pos = arguments.length >= 2
+			? { x: target, y, roomName: this.roomName }
+			: (target && target.pos ? target.pos : target);
+		const [ax, ay] = roomNameToXY(this.roomName);
+		const [bx, by] = roomNameToXY(pos.roomName || this.roomName);
+		return getDirection(bx * 50 + pos.x - (ax * 50 + this.x), by * 50 + pos.y - (ay * 50 + this.y));
 	}
 	lookFor(type) {
 		const room = Game.rooms[this.roomName];
@@ -347,35 +492,78 @@ class RoomPosition {
 }
 
 // ═══════════════════════════ Store ═══════════════════════════
+// 官方 E/game/store.js 用 Proxy 实现:
+//   - 只枚举非零资源 (内部字段/方法不可枚举)
+//   - RESOURCES_ALL 中缺失的键读取返回 0
+//   - getUsedCapacity(res) 返回该资源的数量; 不传参数才返回总和
 
-class Store {
-	constructor(contents, capacity, capacities) {
-		this.__capacity = capacity || 0;
-		this.__capacities = capacities || null;
-		this.__contents = contents || {};
-		for (const k of Object.keys(this.__contents)) this[k] = this.__contents[k];
-	}
-	getCapacity(resource) {
-		const r = resource || "energy";
-		if (this.__capacities) return this.__capacities[r] ?? 0;
-		return this.__capacity;
-	}
-	getUsedCapacity(resource) {
-		const r = resource || "energy";
-		if (this.__capacities) return this[r] || 0;
-		let sum = 0;
-		for (const k of Object.keys(this.__contents)) sum += this.__contents[k];
-		return sum;
-	}
-	getFreeCapacity(resource) {
-		return this.getCapacity(resource) - this.getUsedCapacity(resource);
-	}
+const RESOURCES_ALL_SET = new Set(C.RESOURCES_ALL);
+const storeMeta = new WeakMap();
+
+function storeSum(target) {
+	let sum = 0;
+	for (const k of Object.keys(target)) sum += target[k];
+	return sum;
 }
 
-function makeStore(raw, storeCapacity, energyCapacity) {
-	const contents = raw || {};
-	const caps = storeCapacity == null ? null : { energy: energyCapacity ?? storeCapacity };
-	return new Store(contents, storeCapacity ?? 0, caps);
+function storeCapacityOf(target, resource) {
+	const meta = storeMeta.get(target);
+	if (!meta) return 0;
+	if (resource === undefined || resource === null) return meta.capacity;
+	if (meta.capacities) return meta.capacities[resource] || 0;
+	return meta.capacity;
+}
+
+const storeHandler = {
+	get(target, prop, receiver) {
+		switch (prop) {
+			case "getCapacity":
+				return (resource) => storeCapacityOf(target, resource);
+			case "getUsedCapacity":
+				return (resource) => {
+					if (resource === undefined || resource === null) return storeSum(target);
+					return target[resource] || 0;
+				};
+			case "getFreeCapacity":
+				return (resource) => storeCapacityOf(target, resource) - (resource === undefined || resource === null ? storeSum(target) : (target[resource] || 0));
+			case "toJSON":
+				return () => Object.assign({}, target);
+			default:
+				break;
+		}
+		if (typeof prop === "string" && prop in target) return target[prop];
+		if (typeof prop === "string" && RESOURCES_ALL_SET.has(prop)) return 0;
+		return Reflect.get(target, prop, receiver);
+	},
+	has(target, prop) {
+		if (typeof prop === "string" && RESOURCES_ALL_SET.has(prop)) return true;
+		return Reflect.has(target, prop);
+	},
+	set(target, prop, value) {
+		if (typeof prop === "string" && RESOURCES_ALL_SET.has(prop)) {
+			const v = +value || 0;
+			if (v > 0) target[prop] = v;
+			else delete target[prop];
+			return true;
+		}
+		return Reflect.set(target, prop, value);
+	},
+	deleteProperty(target, prop) {
+		return Reflect.deleteProperty(target, prop);
+	},
+};
+
+function makeStore(raw, storeCapacity, capacities) {
+	const data = {};
+	for (const k of Object.keys(raw || {})) {
+		const v = +raw[k];
+		if (v > 0) data[k] = v;
+	}
+	storeMeta.set(data, {
+		capacity: storeCapacity == null ? 0 : storeCapacity,
+		capacities: capacities || null,
+	});
+	return new Proxy(data, storeHandler);
 }
 
 // ═══════════════════════════ RoomObject 层 ═══════════════════════════
@@ -411,7 +599,7 @@ class Creep extends RoomObject {
 		this.saying = undefined;
 	}
 	get store() {
-		if (!this.__storeObj) this.__storeObj = new Store(this.__storeRaw, this.__storeCap, null);
+		if (!this.__storeObj) this.__storeObj = makeStore(this.__storeRaw, this.__storeCap, null);
 		return this.__storeObj;
 	}
 	get carry() {
@@ -526,22 +714,21 @@ class Creep extends RoomObject {
 		intent(this.id, "harvest", { id: target.id });
 		return C.OK;
 	}
+	/** 官方 E/game/creeps.js:428-500 的返回码顺序 */
 	transfer(target, resourceType, amount) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
 		if (!C.RESOURCES_ALL.includes(resourceType)) return C.ERR_INVALID_ARGS;
-		const store = this.__storeRaw;
-		if (!store || !store[resourceType]) return C.ERR_NOT_ENOUGH_RESOURCES;
-		if (amount === undefined) amount = store[resourceType];
-		if (amount < 0) return C.ERR_INVALID_ARGS;
+		if (amount !== undefined && amount < 0) return C.ERR_INVALID_ARGS;
 		if (!target || !target.id || target.spawning) return C.ERR_INVALID_TARGET;
-		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
 		if (!(target instanceof Creep) && !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
-		if (target instanceof Structure) {
-			const cap = target.__energyCapacity ?? 0;
-			const stored = target.__storeRaw ? target.__storeRaw[resourceType] || 0 : 0;
-			if (resourceType === "energy" && cap && stored >= cap) return C.ERR_FULL;
-		}
+		const store = this.store;
+		if (!store[resourceType]) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (amount === undefined) amount = store[resourceType];
+		// 官方: 数量超过持有量返回错误而不是截断
+		if (amount > store[resourceType]) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
+		if (target.store && target.store.getFreeCapacity(resourceType) <= 0) return C.ERR_FULL;
 		intent(this.id, "transfer", { id: target.id, resourceType, amount });
 		return C.OK;
 	}
@@ -549,11 +736,13 @@ class Creep extends RoomObject {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
 		if (!C.RESOURCES_ALL.includes(resourceType)) return C.ERR_INVALID_ARGS;
-		if (!target || !target.id || !(target instanceof RoomObject)) return C.ERR_INVALID_TARGET;
-		const available = target.__storeRaw ? target.__storeRaw[resourceType] || 0 : 0;
+		if (amount !== undefined && amount < 0) return C.ERR_INVALID_ARGS;
+		if (!target || !target.id || !target.store) return C.ERR_INVALID_TARGET;
+		const available = target.store.getUsedCapacity(resourceType);
 		if (amount === undefined) amount = available;
 		if (!available) return C.ERR_NOT_ENOUGH_RESOURCES;
 		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
+		if (this.store.getFreeCapacity() <= 0) return C.ERR_FULL;
 		intent(this.id, "withdraw", { id: target.id, resourceType, amount });
 		return C.OK;
 	}
@@ -570,10 +759,13 @@ class Creep extends RoomObject {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
 		if (!C.RESOURCES_ALL.includes(resourceType)) return C.ERR_INVALID_ARGS;
-		const store = this.__storeRaw;
-		if (!store || !store[resourceType]) return C.ERR_NOT_ENOUGH_RESOURCES;
-		if (amount === undefined) amount = store[resourceType];
-		if (store[resourceType] < amount) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (amount !== undefined && amount < 0) return C.ERR_INVALID_ARGS;
+		const store = this.store;
+		const have = store[resourceType];
+		if (!have) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (amount === undefined) amount = have;
+		// 官方 drop.js:13: 数量超过持有量返回错误而不是截断
+		if (amount > have) return C.ERR_NOT_ENOUGH_RESOURCES;
 		intent(this.id, "drop", { amount, resourceType });
 		return C.OK;
 	}
@@ -668,7 +860,7 @@ class ConstructionSite extends RoomObject {
 class Tombstone extends RoomObject {
 	constructor(raw) {
 		super(raw);
-		this.store = new Store(raw.store, Infinity, null);
+		this.store = makeStore(raw.store, Infinity, null);
 		this.ticksToDecay = raw.ticksToDecay;
 		this.creep = raw.creepName ? { name: raw.creepName } : null;
 		this.deathTime = 0;
@@ -685,13 +877,15 @@ class Structure extends RoomObject {
 		this.__storeRaw = raw.store;
 		this.__storeCap = raw.storeCapacity;
 		this.__energyCapacity = raw.energyCapacity;
+		this.__off = !!raw.off;
 	}
 	get store() {
-		if (!this.__storeObj && this.__storeRaw) this.__storeObj = new Store(this.__storeRaw, this.__storeCap, null);
+		if (!this.__storeObj && this.__storeRaw) this.__storeObj = makeStore(this.__storeRaw, this.__storeCap, null);
 		return this.__storeObj;
 	}
+	/** 官方 isActive(): 超出 RCL 上限被停用的 spawn/extension 返回 false */
 	isActive() {
-		return true;
+		return !this.__off;
 	}
 	destroy() {
 		if (!this.my) return C.ERR_NOT_OWNER;
@@ -717,30 +911,47 @@ class StructureSpawn extends OwnedStructure {
 	}
 	get memory() {
 		if (!Memory.spawns) Memory.spawns = {};
+		if (!Memory.spawns[this.name]) Memory.spawns[this.name] = {};
 		return Memory.spawns[this.name];
 	}
+	set memory(v) {
+		if (!Memory.spawns) Memory.spawns = {};
+		Memory.spawns[this.name] = v;
+	}
+	/** 官方 E/game/structures.js:1073-1128 */
 	spawnCreep(body, name, opts) {
 		opts = opts || {};
 		if (this.spawning) return C.ERR_BUSY;
-		if (typeof name !== "string" || name.length > 100 || !name) return C.ERR_INVALID_ARGS;
-		if (Game.creeps[name] || (Memory.creeps && Memory.creeps[name] && !Game.creeps[name] && false)) {
-			if (Game.creeps[name]) return C.ERR_NAME_EXISTS;
-		}
+		if (typeof name !== "string" || !name || name.length > 100) return C.ERR_INVALID_ARGS;
+		if (Game.creeps[name] || __createdCreepNames.has(name)) return C.ERR_NAME_EXISTS;
 		if (!Array.isArray(body) || body.length === 0) return C.ERR_INVALID_ARGS;
-		if (body.length > C.MAX_CREEP_SIZE) body = body.slice(0, C.MAX_CREEP_SIZE);
+		// 官方: 超过 50 个部件返回 ERR_INVALID_ARGS (不再静默截断)
+		if (body.length > C.MAX_CREEP_SIZE) return C.ERR_INVALID_ARGS;
 		let cost = 0;
 		for (const p of body) {
 			if (!C.BODYPART_COST[p]) return C.ERR_INVALID_ARGS;
 			cost += C.BODYPART_COST[p];
 		}
-		const roomEnergy = this.room.energyAvailable;
-		if (cost > roomEnergy) return C.ERR_NOT_ENOUGH_ENERGY;
-		if (opts.memory) {
-			if (!Memory.creeps) Memory.creeps = {};
-			Memory.creeps[name] = opts.memory;
-		}
-		intent(this.id, "spawnCreep", { body, name });
+		if (cost > this.room.energyAvailable) return C.ERR_NOT_ENOUGH_ENERGY;
+		// dryRun: 副作用 (意图/Memory) 之前返回
+		if (opts.dryRun) return C.OK;
+		if (!Memory.creeps) Memory.creeps = {};
+		// 官方总是创建 Memory.creeps[name], 未传 opts.memory 时为 {}
+		Memory.creeps[name] = opts.memory || {};
+		__createdCreepNames.add(name);
+		const data = { body, name };
+		if (opts.directions) data.directions = opts.directions;
+		if (opts.energyStructures) data.energyStructures = opts.energyStructures.map((s) => s.id || s);
+		intent(this.id, "spawnCreep", data);
 		return C.OK;
+	}
+	/** 官方 StructureSpawn.setDirections: 覆盖正在孵化单位的出生方向 */
+	setDirections(name, directions) {
+		if (this.spawning && this.spawning.name === name) {
+			intent(this.id, "setDirections", { name, directions });
+			return C.OK;
+		}
+		return C.ERR_NOT_FOUND;
 	}
 	canCreateCreep() {
 		return this.spawning ? C.ERR_BUSY : C.OK;
@@ -876,6 +1087,16 @@ class Flag extends RoomObject {
 		this.pos = new RoomPosition(pos.x, pos.y, this.pos.roomName);
 		return C.OK;
 	}
+	/** 官方 E/game/flags.js:31: flag 也有 memory (自动建对象 + setter) */
+	get memory() {
+		if (!Memory.flags) Memory.flags = {};
+		if (!Memory.flags[this.name]) Memory.flags[this.name] = {};
+		return Memory.flags[this.name];
+	}
+	set memory(v) {
+		if (!Memory.flags) Memory.flags = {};
+		Memory.flags[this.name] = v;
+	}
 }
 
 // ═══════════════════════════ Terrain / Room ═══════════════════════════
@@ -932,7 +1153,12 @@ class Room {
 	}
 	get memory() {
 		if (!Memory.rooms) Memory.rooms = {};
+		if (!Memory.rooms[this.name]) Memory.rooms[this.name] = {};
 		return Memory.rooms[this.name];
+	}
+	set memory(v) {
+		if (!Memory.rooms) Memory.rooms = {};
+		Memory.rooms[this.name] = v;
 	}
 	getTerrain() {
 		return new Terrain(this.name);
@@ -941,12 +1167,9 @@ class Room {
 		if (x < 0 || x > 49 || y < 0 || y > 49) return null;
 		return new RoomPosition(x, y, this.name);
 	}
+	/** 官方 E/game/rooms.js:648-650: `_.filter(result, opts.filter)` (函数/对象/字符串均可) */
 	find(type, opts) {
-		let results = collectFind(this.name, type);
-		if (opts && typeof opts.filter === "function") {
-			results = results.filter(opts.filter);
-		}
-		return results;
+		return collectFind(this.name, type, opts);
 	}
 	lookForAt(type, x, y) {
 		if (typeof x === "object") { y = x.y; x = x.x; }
@@ -1039,8 +1262,11 @@ class Room {
 	findExitTo(room) {
 		return Game.map.findExit(this.name, typeof room === "string" ? room : room.name);
 	}
-	getEventLog() {
-		return [];
+	/** 官方 E/game/rooms.js:573-582: 返回上一 tick 的房间事件; raw=true 时返回 JSON 字符串 */
+	getEventLog(raw) {
+		const events = (this.__raw && this.__raw.events) || [];
+		if (raw) return JSON.stringify(events);
+		return events.slice();
 	}
 	toString() {
 		return `[room ${this.name}]`;
@@ -1065,32 +1291,40 @@ function wrapObject(room, raw) {
 	}
 }
 
+/** 官方 `_.filter(result, opts.filter)`: 支持函数 / 对象 (matches) / 字符串 (属性简写) */
+function applyFilter(arr, filter) {
+	if (filter === undefined || filter === null) return arr;
+	return _.filter(arr, filter);
+}
+
 function collectFind(roomName, type, opts) {
 	const room = Game.rooms[roomName];
 	if (!room) return [];
+	const filter = opts && opts.filter;
+	const pick = (arr) => applyFilter(arr, filter);
 	switch (type) {
-		case C.FIND_CREEPS: return room.__byType.creep;
-		case C.FIND_MY_CREEPS: return room.__byType.creep.filter((c) => c.my);
-		case C.FIND_HOSTILE_CREEPS: return room.__byType.creep.filter((c) => !c.my);
-		case C.FIND_SOURCES: return room.__byType.source;
-		case C.FIND_SOURCES_ACTIVE: return room.__byType.source.filter((s) => s.energy > 0);
-		case C.FIND_DROPPED_RESOURCES: return room.__byType.energy;
-		case C.FIND_STRUCTURES: return room.__objects.filter((o) => o instanceof Structure);
-		case C.FIND_MY_STRUCTURES: return room.__objects.filter((o) => o instanceof OwnedStructure && o.my);
+		case C.FIND_CREEPS: return pick(room.__byType.creep);
+		case C.FIND_MY_CREEPS: return pick(room.__byType.creep.filter((c) => c.my));
+		case C.FIND_HOSTILE_CREEPS: return pick(room.__byType.creep.filter((c) => !c.my));
+		case C.FIND_SOURCES: return pick(room.__byType.source);
+		case C.FIND_SOURCES_ACTIVE: return pick(room.__byType.source.filter((s) => s.energy > 0));
+		case C.FIND_DROPPED_RESOURCES: return pick(room.__byType.energy);
+		case C.FIND_STRUCTURES: return pick(room.__objects.filter((o) => o instanceof Structure));
+		case C.FIND_MY_STRUCTURES: return pick(room.__objects.filter((o) => o instanceof OwnedStructure && o.my));
 		case C.FIND_CONSTRUCTION_SITES:
-		case C.FIND_MY_CONSTRUCTION_SITES: return room.__byType.constructionSite.filter((s) => s.my);
-		case C.FIND_TOMBSTONES: return room.__byType.tombstone;
-		case C.FIND_FLAGS: return Object.values(Game.flags).filter((f) => f.pos.roomName === roomName);
-		case C.FIND_MY_SPAWNS: return room.__byType.spawn.filter((s) => s.my);
-		case C.FIND_HOSTILE_SPAWNS: return room.__byType.spawn.filter((s) => !s.my);
-		case C.FIND_EXIT_TOP: return exitPositions(roomName, 1);
-		case C.FIND_EXIT_RIGHT: return exitPositions(roomName, 3);
-		case C.FIND_EXIT_BOTTOM: return exitPositions(roomName, 5);
-		case C.FIND_EXIT_LEFT: return exitPositions(roomName, 7);
+		case C.FIND_MY_CONSTRUCTION_SITES: return pick(room.__byType.constructionSite.filter((s) => s.my));
+		case C.FIND_TOMBSTONES: return pick(room.__byType.tombstone);
+		case C.FIND_FLAGS: return pick(Object.values(Game.flags).filter((f) => f.pos.roomName === roomName));
+		case C.FIND_MY_SPAWNS: return pick(room.__byType.spawn.filter((s) => s.my));
+		case C.FIND_HOSTILE_SPAWNS: return pick(room.__byType.spawn.filter((s) => !s.my));
+		case C.FIND_EXIT_TOP: return pick(exitPositions(roomName, 1));
+		case C.FIND_EXIT_RIGHT: return pick(exitPositions(roomName, 3));
+		case C.FIND_EXIT_BOTTOM: return pick(exitPositions(roomName, 5));
+		case C.FIND_EXIT_LEFT: return pick(exitPositions(roomName, 7));
 		case C.FIND_EXIT: {
 			const exits = [];
 			for (const dir of [1, 3, 5, 7]) exits.push(...exitPositions(roomName, dir));
-			return exits;
+			return pick(exits);
 		}
 		default: return [];
 	}
@@ -1119,19 +1353,31 @@ function findClosestImpl(pos, type, opts, mode) {
 		}
 		return best;
 	}
-	// path 模式: 多目标 PathFinder
+	// path 模式: 多目标 PathFinder (官方 E/game/rooms.js:337-373)
 	const goals = objects.map((o) => ({ pos: o.pos || o, range: 1 }));
 	const searchOpts = buildMoveSearchOpts(pos.roomName, opts);
+	// 官方 findClosestByPath 默认 maxRooms: 1
+	if (searchOpts.maxRooms === undefined) searchOpts.maxRooms = 1;
 	const result = pathFinderSearch(pos, goals, searchOpts);
-	if (result.incomplete || result.path.length === 0) return null;
-	const last = result.path[result.path.length - 1];
-	return objects.find((o) => (o.pos || o).isNearTo(last) || (o.pos || o).isEqualTo(last)) || null;
+	// 路径为空 (已相邻) 时以起点为 lastPos; 部分路径也照常返回最近对象
+	const last = result.path.length ? result.path[result.path.length - 1] : pos;
+	let best = null;
+	let bestRange = Infinity;
+	for (const o of objects) {
+		const r = last.getRangeTo(o.pos || o);
+		if (r < bestRange) {
+			bestRange = r;
+			best = o;
+		}
+	}
+	return best;
 }
 
 /** moveTo/findPath 的搜索参数 (官方 _findPath2: 默认考虑道路, plain 2 / swamp 10) */
 function buildMoveSearchOpts(roomName, opts) {
 	opts = opts || {};
-	const ignoreCreeps = opts.ignoreCreeps !== undefined ? opts.ignoreCreeps : true;
+	// 官方 E/game/rooms.js:163,169-171: 仅当 opts.ignoreCreeps 为真才忽略 creep, 默认 false
+	const ignoreCreeps = opts.ignoreCreeps !== undefined ? opts.ignoreCreeps : false;
 	return {
 		roomCallback: (name) => buildPathMatrix(name, { ignoreCreeps, ignoreDestructibleStructures: opts.ignoreDestructibleStructures, ignoreRoads: opts.ignoreRoads }),
 		plainCost: opts.plainCost || (opts.ignoreRoads ? undefined : 2),
@@ -1302,7 +1548,16 @@ const OP_LIMIT_ROOMS = 16, OP_LIMIT_OPS = 2000;
  */
 function pathFinderSearch(origin, goal, opts) {
 	opts = opts || {};
-	const goals = Array.isArray(goal) ? goal : [goal];
+	// 目标归一化: 接受 RoomPosition 或 {pos, range} (官方 path-finder.js:58-60)
+	const goals = (Array.isArray(goal) ? goal : [goal])
+		.map((g) => {
+			if (!g) return null;
+			if (g.pos) return { pos: g.pos, range: g.range || 0 };
+			return { pos: g, range: 0 };
+		})
+		.filter((g) => g && g.pos && g.pos.roomName);
+	// 空目标数组: 官方直接返回, 不消耗 ops
+	if (goals.length === 0) return { path: [], ops: 0, cost: 0, incomplete: false };
 	const plainCost = opts.plainCost || 1;
 	const swampCost = opts.swampCost || 5;
 	const maxRooms = Math.max(1, opts.maxRooms || OP_LIMIT_ROOMS);
@@ -1382,6 +1637,9 @@ function pathFinderSearch(origin, goal, opts) {
 	gCost[originIdx][origin.y * 50 + origin.x] = 0;
 	let ops = 0;
 	let found = null;
+	// 官方: 搜索不完整时返回通往启发值最低节点的部分路径
+	let bestNode = null;
+	let bestH = Infinity;
 	if (inGoal(originIdx, origin.x, origin.y)) found = { room: originIdx, x: origin.x, y: origin.y };
 
 	while (!found && heap.size && ops < maxOps) {
@@ -1392,6 +1650,11 @@ function pathFinderSearch(origin, goal, opts) {
 		if (closed[ridx][ci]) continue;
 		closed[ridx][ci] = 1;
 		if (node.g > gCost[ridx][ci]) continue;
+		const h = heuristic(ridx, x, y);
+		if (h < bestH) {
+			bestH = h;
+			bestNode = { room: ridx, x, y };
+		}
 		if (inGoal(ridx, x, y)) { found = { room: ridx, x, y }; break; }
 
 		const room = roomData[ridx];
@@ -1441,10 +1704,10 @@ function pathFinderSearch(origin, goal, opts) {
 
 	const path = [];
 	let cost = 0;
-	if (found) {
-		let { room: ridx, x, y } = found;
+	const end = found || bestNode;
+	if (end) {
+		let { room: ridx, x, y } = end;
 		cost = gCost[ridx][y * 50 + x];
-		const originRoom = roomData[originIdx].name;
 		for (;;) {
 			path.push(new RoomPosition(x, y, roomData[ridx].name));
 			if (ridx === originIdx && x === origin.x && y === origin.y) break;
@@ -1497,6 +1760,7 @@ var Memory = null;
 
 function buildGame() {
 	byId = new Map();
+	__createdCreepNames = new Set();
 	Game = {
 		time: __W.time,
 		rooms: {},
@@ -1543,25 +1807,12 @@ function buildGame() {
 	}
 }
 
+/** 由官方 CONTROLLER_STRUCTURES 派生 (不再手写一份易漂移的表) */
 function structureLimitsFor(rcl) {
-	return {
-		spawn: [0, 1, 1, 1, 1, 1, 1, 2, 3][Math.min(rcl, 8)],
-		extension: [0, 0, 5, 10, 20, 30, 40, 50, 60][Math.min(rcl, 8)],
-		road: 2500,
-		constructedWall: [0, 0, 2500, 2500, 2500, 2500, 2500, 2500, 2500][Math.min(rcl, 8)],
-		rampart: [0, 0, 2500, 2500, 2500, 2500, 2500, 2500, 2500][Math.min(rcl, 8)],
-		link: [0, 0, 0, 0, 0, 2, 3, 4, 6][Math.min(rcl, 8)],
-		storage: [0, 0, 0, 1, 1, 1, 1, 1, 1][Math.min(rcl, 8)],
-		tower: [0, 0, 0, 1, 1, 2, 2, 3, 6][Math.min(rcl, 8)],
-		observer: [0, 0, 0, 0, 0, 0, 0, 0, 1][Math.min(rcl, 8)],
-		powerSpawn: [0, 0, 0, 0, 0, 0, 0, 1, 1][Math.min(rcl, 8)],
-		extractor: [0, 0, 0, 0, 0, 1, 1, 1, 1][Math.min(rcl, 8)],
-		lab: [0, 0, 0, 0, 0, 3, 6, 10, 10][Math.min(rcl, 8)],
-		terminal: [0, 0, 0, 0, 0, 1, 1, 1, 1][Math.min(rcl, 8)],
-		container: 5,
-		nuker: [0, 0, 0, 0, 0, 0, 0, 0, 1][Math.min(rcl, 8)],
-		factory: [0, 0, 0, 0, 0, 0, 0, 1, 1][Math.min(rcl, 8)],
-	};
+	const out = {};
+	const lv = Math.min(rcl, 8);
+	for (const [st, table] of Object.entries(C.CONTROLLER_STRUCTURES)) out[st] = table[lv];
+	return out;
 }
 
 function makeCpu(raw) {
@@ -1720,7 +1971,7 @@ const InterShardMemory = {
 /** 全局类导出: 真实实现的直接挂载, 未实现的挂占位基类 */
 const GLOBAL_CLASSES = {
 	RoomPosition, Room, RoomObject, RoomVisual, Creep, Source, Resource,
-	ConstructionSite, Tombstone, Flag, Structure, OwnedStructure, Store,
+	ConstructionSite, Tombstone, Flag, Structure, OwnedStructure,
 	StructureSpawn, StructureController, StructureExtension, StructureStorage,
 	StructureContainer, StructureTerminal, StructureTower, StructureLink, StructureLab,
 	StructureNuker, StructureObserver, StructurePowerSpawn, StructureExtractor,
@@ -1764,7 +2015,11 @@ function __bootstrapBundle(bundleCode) {
 	installBootstrapGlobals();
 	const module = { exports: {} };
 	const exports = module.exports;
-	globalThis.__require = (name) => ({});
+	// 官方 E/game/game.js:503-510,543-548: lodash 可 require, 未知模块抛 "Unknown module"
+	globalThis.__require = (name) => {
+		if (name === "lodash") return globalThis._;
+		throw new Error(`Unknown module: ${name}`);
+	};
 	try {
 		const fn = new Function("module", "exports", "require", `"use strict";\n${bundleCode}\n`);
 		fn(module, exports, globalThis.__require);

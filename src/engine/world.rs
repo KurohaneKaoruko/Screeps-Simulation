@@ -5,10 +5,20 @@ use crate::engine::objects::{self, Obj, Store};
 use crate::engine::terrain::Terrain;
 use std::collections::BTreeMap;
 
+/// 房间事件日志条目 (官方 Room.getEventLog 的结构: {event, objectId, data})
+#[derive(Clone, Debug)]
+pub struct GameEvent {
+    pub event: u32,
+    pub object_id: u64,
+    pub data: serde_json::Value,
+}
+
 pub struct Room {
     pub name: String,
     pub terrain: Terrain,
     pub objects: BTreeMap<u64, Obj>,
+    /// 本 tick 发生的事件 (每 tick 开始时清空, 经快照传给 bot)
+    pub events: Vec<GameEvent>,
 }
 
 impl Room {
@@ -17,7 +27,13 @@ impl Room {
             name: name.to_string(),
             terrain,
             objects: BTreeMap::new(),
+            events: Vec::new(),
         }
+    }
+
+    /// 记录一条事件 (引擎结算期间调用)
+    pub fn push_event(&mut self, event: u32, object_id: u64, data: serde_json::Value) {
+        self.events.push(GameEvent { event, object_id, data });
     }
 
     pub fn controller(&self) -> Option<&Obj> {
@@ -34,11 +50,11 @@ impl Room {
         self.controller().map(|c| c.level).unwrap_or(0)
     }
 
-    /// spawn + extension 的能量合计 (engine: _calc_spawns)
+    /// spawn + extension 的能量合计 (engine: _calc_spawns), 排除被停用 (off) 的结构
     pub fn energy_available(&self) -> u32 {
         self.objects
             .values()
-            .filter(|o| o.mine && (o.obj_type == "spawn" || o.obj_type == "extension"))
+            .filter(|o| o.mine && o.is_active() && (o.obj_type == "spawn" || o.obj_type == "extension"))
             .map(|o| o.store.get("energy").copied().unwrap_or(0))
             .sum()
     }
@@ -46,9 +62,49 @@ impl Room {
     pub fn energy_capacity_available(&self) -> u32 {
         self.objects
             .values()
-            .filter(|o| o.mine && (o.obj_type == "spawn" || o.obj_type == "extension"))
+            .filter(|o| o.mine && o.is_active() && (o.obj_type == "spawn" || o.obj_type == "extension"))
             .map(|o| o.energy_capacity)
             .sum()
+    }
+
+    /// 官方 _calc_spawns: 按到控制器的距离, 把超出 RCL 上限的 spawn/extension 标记为 off。
+    /// 距离越远越先停用; 距离相同时按 id 序稳定。
+    pub fn refresh_spawn_off(&mut self) {
+        let rcl = self.rcl();
+        let spawn_limit = constants::controller_structure_limit("spawn", rcl) as usize;
+        let ext_limit = constants::controller_structure_limit("extension", rcl) as usize;
+        let ctrl = self.controller().map(|c| (c.x as i32, c.y as i32));
+        // (id, 是 spawn, 到控制器距离)
+        let mut items: Vec<(u64, bool, i32)> = self
+            .objects
+            .values()
+            .filter(|o| o.mine && (o.obj_type == "spawn" || o.obj_type == "extension"))
+            .map(|o| {
+                let dist = ctrl
+                    .map(|(cx, cy)| {
+                        (o.x as i32 - cx).abs().max((o.y as i32 - cy).abs())
+                    })
+                    .unwrap_or(0);
+                (o.id, o.obj_type == "spawn", dist)
+            })
+            .collect();
+        items.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+        let mut spawn_left = spawn_limit;
+        let mut ext_left = ext_limit;
+        let mut off_ids: Vec<u64> = Vec::new();
+        for (id, is_spawn, _) in items {
+            let slot = if is_spawn { &mut spawn_left } else { &mut ext_left };
+            if *slot > 0 {
+                *slot -= 1;
+            } else {
+                off_ids.push(id);
+            }
+        }
+        for o in self.objects.values_mut() {
+            if o.obj_type == "spawn" || o.obj_type == "extension" {
+                o.off = off_ids.contains(&o.id);
+            }
+        }
     }
 
     /// 我方单位或自有结构在场 → 可见
@@ -248,6 +304,9 @@ pub fn prime_world(world: &mut World) {
                 "tower" => {
                     o.energy_capacity = constants::TOWER_CAPACITY;
                 }
+                "link" => {
+                    o.energy_capacity = constants::LINK_CAPACITY;
+                }
                 _ => {}
             }
         }
@@ -260,6 +319,10 @@ pub fn prime_world(world: &mut World) {
                 world.rcl_timeline.insert(c.level, world.tick);
             }
         }
+    }
+    // 超 RCL 上限的 spawn/extension 停用 (官方 _calc_spawns)
+    for room in world.rooms.values_mut() {
+        room.refresh_spawn_off();
     }
 }
 
@@ -285,6 +348,7 @@ pub fn place_structure(
         "container" => obj.energy_capacity = constants::CONTAINER_CAPACITY,
         "tower" => obj.energy_capacity = constants::TOWER_CAPACITY,
         "terminal" => obj.energy_capacity = constants::TERMINAL_CAPACITY,
+        "link" => obj.energy_capacity = constants::LINK_CAPACITY,
         _ => {}
     }
     let room = world.rooms.get_mut(room_name).expect("room exists");

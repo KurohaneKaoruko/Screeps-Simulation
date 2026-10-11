@@ -116,25 +116,63 @@ pub fn construction_cost(structure_type: &str) -> Option<u32> {
 
 pub const CONSTRUCTION_COST_ROAD_SWAMP_RATIO: u32 = 5;
 
-/// RCL 对应的可建数量上限 (CONTROLLER_STRUCTURES 精简版: 只列经济期会用到的)
+/// RCL 对应的可建数量上限 (CONTROLLER_STRUCTURES, 逐级照抄官方 K:213-229)
+///
+/// 索引即 RCL (0..=8)。注意 RCL0 不含任何 spawn, storage 自 RCL4, terminal/extractor
+/// 自 RCL6, lab 3/6/10 位于 RCL6/7/8, powerSpawn 位于 RCL8。
 pub fn controller_structure_limit(structure_type: &str, rcl: u8) -> u32 {
+    let table: [u32; 9] = match structure_type {
+        "spawn" => [0, 1, 1, 1, 1, 1, 1, 2, 3],
+        "extension" => [0, 0, 5, 10, 20, 30, 40, 50, 60],
+        "road" => [2500; 9],
+        "constructedWall" => [0, 0, 2500, 2500, 2500, 2500, 2500, 2500, 2500],
+        "rampart" => [0, 0, 2500, 2500, 2500, 2500, 2500, 2500, 2500],
+        "link" => [0, 0, 0, 0, 0, 2, 3, 4, 6],
+        "storage" => [0, 0, 0, 0, 1, 1, 1, 1, 1],
+        "tower" => [0, 0, 0, 1, 1, 2, 2, 3, 6],
+        "observer" => [0, 0, 0, 0, 0, 0, 0, 0, 1],
+        "powerSpawn" => [0, 0, 0, 0, 0, 0, 0, 0, 1],
+        "extractor" => [0, 0, 0, 0, 0, 0, 1, 1, 1],
+        "lab" => [0, 0, 0, 0, 0, 0, 3, 6, 10],
+        "terminal" => [0, 0, 0, 0, 0, 0, 1, 1, 1],
+        "container" => [5; 9],
+        "nuker" => [0, 0, 0, 0, 0, 0, 0, 0, 1],
+        "factory" => [0, 0, 0, 0, 0, 0, 0, 1, 1],
+        _ => [0; 9],
+    };
+    table[rcl.min(8) as usize]
+}
+
+/// 结构对指定资源的容量 (官方 capacityForResource 的结构部分)。
+/// creep 见 `objects::Obj::capacity_for_resource`; 这里只覆盖非 creep 结构。
+pub fn structure_capacity_for_resource(structure_type: &str, resource: &str, energy_capacity: u32) -> u32 {
     match structure_type {
-        "spawn" => [1, 1, 1, 1, 1, 1, 1, 2, 3][rcl.min(8) as usize],
-        "extension" => [0, 0, 5, 10, 20, 30, 40, 50, 60][rcl.min(8) as usize],
-        "road" => 2500,
-        "constructedWall" => [0, 0, 2500, 2500, 2500, 2500, 2500, 2500, 2500][rcl.min(8) as usize],
-        "rampart" => [0, 0, 2500, 2500, 2500, 2500, 2500, 2500, 2500][rcl.min(8) as usize],
-        "link" => [0, 0, 0, 0, 0, 2, 3, 4, 6][rcl.min(8) as usize],
-        "storage" => [0, 0, 0, 1, 1, 1, 1, 1, 1][rcl.min(8) as usize],
-        "tower" => [0, 0, 0, 1, 1, 2, 2, 3, 6][rcl.min(8) as usize],
-        "observer" => [0, 0, 0, 0, 0, 0, 0, 0, 1][rcl.min(8) as usize],
-        "powerSpawn" => [0, 0, 0, 0, 0, 0, 0, 1, 1][rcl.min(8) as usize],
-        "extractor" => [0, 0, 0, 0, 0, 1, 1, 1, 1][rcl.min(8) as usize],
-        "lab" => [0, 0, 0, 0, 0, 3, 6, 10, 10][rcl.min(8) as usize],
-        "terminal" => [0, 0, 0, 0, 0, 1, 1, 1, 1][rcl.min(8) as usize],
-        "container" => 5,
-        "nuker" => [0, 0, 0, 0, 0, 0, 0, 0, 1][rcl.min(8) as usize],
-        "factory" => [0, 0, 0, 0, 0, 0, 0, 1, 1][rcl.min(8) as usize],
+        "link" => LINK_CAPACITY,
+        "container" => CONTAINER_CAPACITY,
+        "storage" => STORAGE_CAPACITY,
+        "terminal" => TERMINAL_CAPACITY,
+        // 只存能量的结构: 非 energy 资源容量为 0
+        "spawn" | "extension" | "tower" | "powerSpawn" | "nuker" | "lab" | "factory" => {
+            if resource == "energy" {
+                energy_capacity
+            } else {
+                0
+            }
+        }
+        _ => energy_capacity,
+    }
+}
+
+/// 建造完成后结构的能量容量 (官方 build.js 结构初始化表)
+pub fn structure_energy_capacity(structure_type: &str, rcl: u8) -> u32 {
+    match structure_type {
+        "spawn" => SPAWN_ENERGY_CAPACITY,
+        "extension" => extension_capacity(rcl),
+        "storage" => STORAGE_CAPACITY,
+        "container" => CONTAINER_CAPACITY,
+        "tower" => TOWER_CAPACITY,
+        "terminal" => TERMINAL_CAPACITY,
+        "link" => LINK_CAPACITY,
         _ => 0,
     }
 }
@@ -191,6 +229,12 @@ pub const STORAGE_CAPACITY: u32 = 1_000_000;
 pub const CONTAINER_CAPACITY: u32 = 2000;
 pub const TOWER_CAPACITY: u32 = 1000;
 pub const TERMINAL_CAPACITY: u32 = 300_000;
+/// link 容量 (官方 LINK_CAPACITY): creep→link 转移的容量来源
+pub const LINK_CAPACITY: u32 = 800;
+/// link 转移损耗 (官方 LINK_LOSS_RATIO, 本模拟器未实现 link.transferEnergy)
+pub const LINK_LOSS_RATIO: f64 = 0.03;
+/// 道路在墙上的造价/血量/衰减系数 (官方 CONSTRUCTION_COST_ROAD_WALL_RATIO)
+pub const CONSTRUCTION_COST_ROAD_WALL_RATIO: u32 = 150;
 
 /// 容器衰减: 每 CONTAINER_DECAY_TIME 掉 CONTAINER_DECAY 血 (自有房间 500t)
 pub const CONTAINER_DECAY: u32 = 5000;
@@ -210,7 +254,9 @@ pub const TERRAIN_MASK_SWAMP: u8 = 2;
 /// 每个玩家的最大工地数
 pub const MAX_CONSTRUCTION_SITES: usize = 100;
 
-/// GCL 等级 → 升到下一级所需总进度 (1 基)
+/// GCL: 从 `level` 升到 `level+1` 所需的累计分数增量。
+/// 官方 game.js:130-131 的 `progressTotal = level^GCL_POW × GCL_MULTIPLY`
+/// (即 GCL1→2 = 1e6, 2→3 = 2^2.4 × 1e6 ≈ 5.278e6)。
 pub fn gcl_progress_total(level: u32) -> u64 {
-    (GCL_MULTIPLY as f64 * GCL_POW.powi(level as i32 - 1)) as u64
+    (GCL_MULTIPLY as f64 * (level as f64).powf(GCL_POW)) as u64
 }

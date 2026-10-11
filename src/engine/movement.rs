@@ -250,8 +250,14 @@ pub fn recover_fatigue(obj: &mut Obj) {
     }
 }
 
-/// 出生放置: spawn 周围 8 向第一格无阻挡位 (engine: _born-creep, 固定方向序)
-pub fn find_birth_tile(room: &Room, spawn: &Obj, movement: &Movement) -> Option<(u8, u8)> {
+/// 出生放置: spawn 周围 8 向第一格无阻挡位 (engine: _born-creep)。
+/// `directions` 非空时按官方 `setDirections` 语义只在该优先序内挑格。
+pub fn find_birth_tile(
+    room: &Room,
+    spawn: &Obj,
+    movement: &Movement,
+    directions: Option<&[i32]>,
+) -> Option<(u8, u8)> {
     const DIRS: [(i32, i32); 8] = [
         (0, -1),
         (1, -1),
@@ -262,7 +268,14 @@ pub fn find_birth_tile(room: &Room, spawn: &Obj, movement: &Movement) -> Option<
         (-1, 0),
         (-1, -1),
     ];
-    for (dx, dy) in DIRS {
+    let candidates: Vec<(i32, i32)> = match directions {
+        Some(dirs) if !dirs.is_empty() => dirs
+            .iter()
+            .filter_map(|d| DIRS.get((*d - 1).max(0) as usize).copied())
+            .collect(),
+        _ => DIRS.to_vec(),
+    };
+    for (dx, dy) in candidates {
         let nx = spawn.x as i32 + dx;
         let ny = spawn.y as i32 + dy;
         if !(0..50).contains(&nx) || !(0..50).contains(&ny) {

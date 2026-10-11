@@ -3,8 +3,17 @@
 
 use crate::engine::constants;
 use crate::engine::objects::{self, BodyPart};
-use crate::engine::world::{alloc_id, World};
-use serde_json::Value;
+use crate::engine::world::{alloc_id, Room, World};
+use serde_json::{json, Value};
+
+/// 官方 EVENT_* 常量 (common/lib/constants.js)
+pub const EVENT_OBJECT_DESTROYED: u32 = 2;
+pub const EVENT_BUILD: u32 = 4;
+pub const EVENT_HARVEST: u32 = 5;
+pub const EVENT_REPAIR: u32 = 7;
+pub const EVENT_UPGRADE_CONTROLLER: u32 = 9;
+pub const EVENT_EXIT: u32 = 10;
+pub const EVENT_TRANSFER: u32 = 11;
 
 pub struct IntentList {
     /// (对象 id, 意图名, 数据) — 已按对象分组前保持提交序
@@ -61,22 +70,34 @@ pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
     }
     object_intents.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // 同对象意图排序的固定顺序 (经济动作间相对顺序影响极小, 固定即可复现)
+    // 同对象意图排序: 照搬官方 processor/intents/creeps/intents.js 的 creepActions 顺序
     fn intent_rank(name: &str) -> u8 {
         match name {
-            "move" => 0,
-            "pickup" => 1,
-            "harvest" => 2,
-            "withdraw" => 3,
-            "transfer" => 4,
-            "build" => 5,
+            "drop" => 0,
+            "transfer" => 1,
+            "withdraw" => 2,
+            "pickup" => 3,
+            "harvest" => 4,
+            "move" => 5,
             "repair" => 6,
-            "upgradeController" => 7,
-            "drop" => 8,
+            "build" => 7,
+            "upgradeController" => 8,
             "say" => 9,
             "suicide" => 10,
             "spawnCreep" => 11,
+            "setDirections" => 12,
             _ => 50,
+        }
+    }
+    // 官方 checkPriorities 互斥表: 同 tick 有 repair 时 build 不执行;
+    // 有 build 或 repair 时 harvest 不执行。
+    fn drop_priority_conflicts(group: &mut Vec<(String, Value)>) {
+        let has = |g: &Vec<(String, Value)>, n: &str| g.iter().any(|(x, _)| x == n);
+        if has(group, "repair") && has(group, "build") {
+            group.retain(|(n, _)| n != "build");
+        }
+        if has(group, "build") || has(group, "repair") {
+            group.retain(|(n, _)| n != "harvest");
         }
     }
     let mut i = 0;
@@ -98,6 +119,7 @@ pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
                 deduped.push((n, d));
             }
         }
+        drop_priority_conflicts(&mut deduped);
         apply_object_intents(world, id, &deduped, &mut effects);
         i = j;
     }
@@ -175,6 +197,11 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 let obj = room.objects.get_mut(&id).unwrap();
                 let carried = obj.store.get("energy").copied().unwrap_or(0) + amount;
                 obj.store.insert("energy".into(), carried);
+                room.push_event(
+                    EVENT_HARVEST,
+                    id,
+                    json!({ "amount": amount, "sourceId": World::id_string(target_id) }),
+                );
                 world.energy_harvested += amount as u64;
                 // 超容量掉落
                 drop_overflow(world, &room_name, id);
@@ -187,17 +214,17 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     Some(o) if !o.spawning => (o.x, o.y),
                     _ => continue,
                 };
-                let (target_capacity, target_pos, target_store_capacity) = match room.objects.get(&target_id) {
+                // 容量按官方 capacityForResource: creep = CARRY×50, link = 800, 结构 = 各自容量
+                let (cap, target_pos) = match room.objects.get(&target_id) {
                     Some(t) if t.obj_type != "creep" || !t.spawning => {
-                        (t.energy_capacity, (t.x, t.y), t.store_capacity())
+                        (t.capacity_for_resource(&resource), (t.x, t.y))
                     }
                     _ => continue,
                 };
-                if (target_pos.0 as i32 - ox as i32).abs() > 1 || (target_pos.1 as i32 - oy as i32).abs() > 1 {
+                if cap == 0 {
                     continue;
                 }
-                let cap = if resource == "energy" { target_capacity } else { target_store_capacity };
-                if cap == 0 {
+                if (target_pos.0 as i32 - ox as i32).abs() > 1 || (target_pos.1 as i32 - oy as i32).abs() > 1 {
                     continue;
                 }
                 let stored = room.objects.get(&target_id).unwrap().store.get(&resource).copied().unwrap_or(0);
@@ -205,8 +232,7 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     continue;
                 }
                 let have = room.objects.get(&id).unwrap().store.get(&resource).copied().unwrap_or(0);
-                let mut amount = amount.min(have);
-                amount = amount.min(cap - stored);
+                let amount = amount.min(have).min(cap - stored);
                 if amount == 0 {
                     continue;
                 }
@@ -214,10 +240,15 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 let obj = room.objects.get_mut(&id).unwrap();
                 let left = obj.store.get(&resource).copied().unwrap_or(0) - amount;
                 if left > 0 {
-                    obj.store.insert(resource, left);
+                    obj.store.insert(resource.clone(), left);
                 } else {
                     obj.store.remove(&resource);
                 }
+                room.push_event(
+                    EVENT_TRANSFER,
+                    id,
+                    json!({ "amount": amount, "resourceType": resource, "targetId": World::id_string(target_id) }),
+                );
             }
             ("creep", "withdraw") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
@@ -254,11 +285,21 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 if (target.x as i32 - ox as i32).abs() > 1 || (target.y as i32 - oy as i32).abs() > 1 {
                     continue;
                 }
-                let amount = target.store.get("energy").copied().unwrap_or(0).min(obj_free);
+                let available = target.store.get("energy").copied().unwrap_or(0);
+                let amount = available.min(obj_free);
                 if amount == 0 {
                     continue;
                 }
-                room.objects.remove(&target_id);
+                // 官方 pickup.js: 扣减堆的数量, 减到 0 才删除 (部分拾取不销毁整堆)
+                if amount >= available {
+                    room.objects.remove(&target_id);
+                } else {
+                    room.objects
+                        .get_mut(&target_id)
+                        .unwrap()
+                        .store
+                        .insert("energy".into(), available - amount);
+                }
                 let obj = room.objects.get_mut(&id).unwrap();
                 let carried = obj.store.get("energy").copied().unwrap_or(0) + amount;
                 obj.store.insert("energy".into(), carried);
@@ -311,6 +352,11 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 let obj = room.objects.get_mut(&id).unwrap();
                 let left = obj.store.get("energy").copied().unwrap_or(0) - effect;
                 obj.store.insert("energy".into(), left);
+                room.push_event(
+                    EVENT_BUILD,
+                    id,
+                    json!({ "amount": effect, "energySpent": effect, "targetId": World::id_string(target_id) }),
+                );
                 world.energy_built += effect as u64;
                 let complete = room.objects.get(&target_id).unwrap().progress
                     >= room.objects.get(&target_id).unwrap().progress_total;
@@ -343,6 +389,11 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 let obj = room.objects.get_mut(&id).unwrap();
                 let left = obj.store.get("energy").copied().unwrap_or(0).saturating_sub(spent);
                 obj.store.insert("energy".into(), left);
+                room.push_event(
+                    EVENT_REPAIR,
+                    id,
+                    json!({ "amount": effect, "energySpent": spent, "targetId": World::id_string(target_id) }),
+                );
             }
             ("creep", "upgradeController") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
@@ -400,6 +451,11 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 let obj = room.objects.get_mut(&id).unwrap();
                 let left = obj.store.get("energy").copied().unwrap_or(0) - effect;
                 obj.store.insert("energy".into(), left);
+                room.push_event(
+                    EVENT_UPGRADE_CONTROLLER,
+                    id,
+                    json!({ "amount": effect, "energySpent": effect, "targetId": World::id_string(controller_id) }),
+                );
                 world.energy_control += effect as u64;
                 world.gcl_progress += effect as u64;
             }
@@ -423,8 +479,21 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 if spawn_busy || name.is_empty() || body_spec.is_empty() || body_spec.len() > constants::MAX_CREEP_SIZE {
                     continue;
                 }
+                // 同 tick 重名: 孵化中的 creep 已落位, 直接查重即可 (官方 createdCreepNames)
+                let dup = room
+                    .objects
+                    .values()
+                    .any(|o| o.obj_type == "creep" && o.name.as_deref() == Some(name.as_str()));
+                if dup {
+                    continue;
+                }
                 let cost: u32 = body_spec.iter().map(|p| constants::bodypart_cost(p)).sum();
-                if !charge_spawn_energy(room, id, cost) {
+                let preferred: Vec<u64> = data
+                    .get("energyStructures")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).filter_map(|s| u64::from_str_radix(s, 16).ok()).collect())
+                    .unwrap_or_default();
+                if !charge_spawn_energy(room, id, cost, &preferred) {
                     continue;
                 }
                 let need_time = constants::CREEP_SPAWN_TIME * body_spec.len() as u64;
@@ -439,14 +508,39 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 creep.spawning = true;
                 creep.mine = true;
                 room.objects.insert(creep_id, creep);
+                let directions: Option<Vec<i32>> = data
+                    .get("directions")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_i64).map(|d| d as i32).collect())
+                    .filter(|v: &Vec<i32>| !v.is_empty());
                 let spawn = room.objects.get_mut(&id).unwrap();
                 spawn.spawn_job = Some(objects::SpawnJob {
                     name,
                     need_time,
                     spawn_time: world.tick + need_time,
+                    directions,
                 });
                 world.creeps_produced += 1;
                 world.energy_spawned += cost as u64;
+            }
+            ("spawn", "setDirections") => {
+                // 官方 StructureSpawn.setDirections: 覆盖正在孵化单位的出生方向序
+                let name = data.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                let directions: Vec<i32> = data
+                    .get("directions")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_i64).map(|d| d as i32).collect())
+                    .unwrap_or_default();
+                if name.is_empty() || directions.is_empty() {
+                    continue;
+                }
+                if let Some(spawn) = room.objects.get_mut(&id) {
+                    if let Some(job) = spawn.spawn_job.as_mut() {
+                        if job.name == name {
+                            job.directions = Some(directions);
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -506,7 +600,17 @@ fn apply_room_intent(world: &mut World, room_name: &str, name: &str, data: &Valu
         }
         "removeConstructionSite" | "destroyStructure" => {
             let Some(target_id) = id_of(data, "id") else { return };
-            room.objects.remove(&target_id);
+            if let Some(removed) = room.objects.remove(&target_id) {
+                let type_name = removed
+                    .structure_type
+                    .clone()
+                    .unwrap_or_else(|| removed.obj_type.clone());
+                room.push_event(
+                    EVENT_OBJECT_DESTROYED,
+                    target_id,
+                    json!({ "type": type_name }),
+                );
+            }
         }
         "createFlag" => {
             // 旗标仅做最小支持: 不入 world (bot 未使用)
@@ -551,8 +655,10 @@ fn downgrade_for(level: u8) -> u64 {
         .unwrap_or(20_000)
 }
 
-/// spawn 能量扣费: 先就近 spawn, 再就近 extension (官方 _charge-energy 旧路径, 切比雪夫距离)
-fn charge_spawn_energy(room: &mut crate::engine::world::Room, spawn_id: u64, mut cost: u32) -> bool {
+/// spawn 能量扣费: 先就近 spawn, 再就近 extension (官方 _charge-energy 旧路径, 切比雪夫距离)。
+/// `preferred` 非空时按官方 `opts.energyStructures` 语义只用这些结构 (保持给定顺序);
+/// 被停用 (off) 的结构不参与扣费 (官方 _charge-energy.js:7-8)。
+fn charge_spawn_energy(room: &mut Room, spawn_id: u64, mut cost: u32, preferred: &[u64]) -> bool {
     #[derive(Clone)]
     struct Src {
         id: u64,
@@ -564,7 +670,7 @@ fn charge_spawn_energy(room: &mut crate::engine::world::Room, spawn_id: u64, mut
     let sources: Vec<Src> = room
         .objects
         .values()
-        .filter(|o| o.mine && (o.obj_type == "spawn" || o.obj_type == "extension"))
+        .filter(|o| o.mine && o.is_active() && (o.obj_type == "spawn" || o.obj_type == "extension"))
         .map(|o| Src {
             id: o.id,
             energy: o.store.get("energy").copied().unwrap_or(0),
@@ -582,11 +688,27 @@ fn charge_spawn_energy(room: &mut crate::engine::world::Room, spawn_id: u64, mut
         (s.x as i32, s.y as i32)
     };
     let cheb = |s: &Src| (s.x - sx).abs().max((s.y - sy).abs());
-    let mut ordered = sources.clone();
-    ordered.sort_by_key(cheb);
-    // 官方顺序: 全部 spawn 就近优先, 再 extension 就近优先
-    ordered.sort_by_key(|s| !s.is_spawn);
-    for src in ordered {
+    let mut ordered: Vec<Src> = if preferred.is_empty() {
+        let mut v = sources.clone();
+        v.sort_by_key(cheb);
+        // 官方顺序: 全部 spawn 就近优先, 再 extension 就近优先
+        v.sort_by_key(|s| !s.is_spawn);
+        v
+    } else {
+        // 显式 energyStructures: 严格按给定顺序 (只保留房间内的 spawn/extension)
+        preferred
+            .iter()
+            .filter_map(|pid| sources.iter().find(|s| s.id == *pid).cloned())
+            .collect()
+    };
+    if ordered.is_empty() {
+        return false;
+    }
+    let ordered_total: u32 = ordered.iter().map(|s| s.energy).sum();
+    if ordered_total < cost {
+        return false;
+    }
+    for src in ordered.drain(..) {
         if cost == 0 {
             break;
         }
@@ -617,11 +739,40 @@ fn drop_overflow(world: &mut World, room_name: &str, id: u64) {
     }
 }
 
+/// 把 `amount` 尽量装入 (x,y) 上 hits>0 的同格容器, 返回未装下的剩余量。
+/// 官方 _create-energy.js:20-31 / _die.js 的共用语义。
+pub fn fill_container(room: &mut Room, x: u8, y: u8, resource: &str, amount: u32) -> u32 {
+    if amount == 0 {
+        return 0;
+    }
+    let Some(cid) = room
+        .objects
+        .values()
+        .find(|o| o.obj_type == "container" && o.hits > 0 && o.x == x && o.y == y)
+        .map(|o| o.id)
+    else {
+        return amount;
+    };
+    let obj = room.objects.get_mut(&cid).unwrap();
+    let cap = obj.capacity_for_resource(resource);
+    let stored = obj.store.get(resource).copied().unwrap_or(0);
+    let put = amount.min(cap.saturating_sub(stored));
+    if put > 0 {
+        obj.store.insert(resource.to_string(), stored + put);
+    }
+    amount - put
+}
+
+/// 资源落地: 先装入同格容器, 装不下的部分才成为地上的堆 (官方 _create-energy.js)
 pub fn create_dropped(world: &mut World, room_name: &str, x: u8, y: u8, resource: &str, amount: u32) {
     if amount == 0 {
         return;
     }
     let room = world.rooms.get_mut(room_name).unwrap();
+    let amount = fill_container(room, x, y, resource, amount);
+    if amount == 0 {
+        return;
+    }
     let existing = room
         .objects
         .values()
@@ -667,6 +818,7 @@ fn complete_site(world: &mut World, room_name: &str, site_id: u64) {
         }
         "tower" => obj.energy_capacity = constants::TOWER_CAPACITY,
         "terminal" => obj.energy_capacity = constants::TERMINAL_CAPACITY,
+        "link" => obj.energy_capacity = constants::LINK_CAPACITY,
         "road" => {
             let mut hits = constants::ROAD_HITS;
             if room.terrain.is_swamp(x as usize, y as usize) {

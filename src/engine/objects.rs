@@ -53,6 +53,8 @@ pub struct Obj {
     pub creep_name: Option<String>,
     /// spawn 孵化任务 (仅 spawn 使用)
     pub spawn_job: Option<SpawnJob>,
+    /// 超出 RCL 上限而被停用的 spawn/extension (官方 _calc_spawns 的 off 标记)
+    pub off: bool,
 }
 
 /// 孵化任务: name=目标单位名, need_time=总时长, spawn_time=完成 tick
@@ -61,6 +63,8 @@ pub struct SpawnJob {
     pub name: String,
     pub need_time: u64,
     pub spawn_time: u64,
+    /// 出生方向优先序 (官方 setDirections / opts.directions)
+    pub directions: Option<Vec<i32>>,
 }
 
 impl Obj {
@@ -97,8 +101,26 @@ impl Obj {
                     * constants::CARRY_CAPACITY
             }
             "tombstone" | "energy" => u32::MAX / 4,
+            "link" => constants::LINK_CAPACITY,
+            "container" => constants::CONTAINER_CAPACITY,
+            "storage" => constants::STORAGE_CAPACITY,
+            "terminal" => constants::TERMINAL_CAPACITY,
             _ => self.energy_capacity,
         }
+    }
+
+    /// 官方 `capacityForResource`: 该对象能容纳多少 `resource`。
+    /// creep 是 CARRY×50, link 是 800, 只存能量的结构对非 energy 资源为 0。
+    pub fn capacity_for_resource(&self, resource: &str) -> u32 {
+        if self.obj_type == "creep" {
+            return self.store_capacity();
+        }
+        constants::structure_capacity_for_resource(&self.obj_type, resource, self.energy_capacity)
+    }
+
+    /// 官方 `isActive()`: 超出 RCL 上限被停用的 spawn/extension 不参与能量结算
+    pub fn is_active(&self) -> bool {
+        !self.off
     }
 }
 
@@ -131,6 +153,7 @@ pub fn structure(id: u64, structure_type: &str, x: u8, y: u8, mine: bool) -> Obj
         next_decay_time: None,
         creep_name: None,
         spawn_job: None,
+        off: false,
     }
 }
 
@@ -178,6 +201,7 @@ pub fn creep_obj(id: u64, name: &str, x: u8, y: u8, body: Vec<BodyPart>) -> Obj 
         next_decay_time: None,
         creep_name: None,
         spawn_job: None,
+        off: false,
     }
 }
 
