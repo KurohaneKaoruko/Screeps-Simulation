@@ -1,0 +1,286 @@
+//! 移动结算: 移植官方 engine src/processor/intents/movement.js 的语义。
+//! 1) move 意图登记目标格 → 2) check() 碰撞仲裁 → 3) creep tick 时 execute() 应用位移与疲劳。
+//! 疲劳规则: (非 MOVE/CARRY 部件 + 按负载折算的 CARRY 件数) × 地形成本 (路1/平原2/沼泽10),
+//! 每 tick 恢复 2 × 活跃 MOVE。
+
+use crate::constants;
+use crate::objects::Obj;
+use crate::world::Room;
+use std::collections::BTreeMap;
+
+#[derive(Default)]
+pub struct Movement {
+    /// 目标格 → 想要进入的对象 (登记顺序)
+    matrix: BTreeMap<(u8, u8), Vec<u64>>,
+    /// 仲裁后每个对象的落点
+    resolved: BTreeMap<u64, (u8, u8)>,
+    /// 各格竞争计数 (受压优先仲裁用)
+    affected_cnt: BTreeMap<(u8, u8), usize>,
+    /// move 意图提交时的疲劳快照 (engine: _oldFatigue, 提交时疲劳非 0 则不可动)
+    old_fatigue: BTreeMap<u64, u32>,
+}
+
+impl Movement {
+    pub fn init(&mut self) {
+        self.matrix.clear();
+        self.resolved.clear();
+        self.affected_cnt.clear();
+        self.old_fatigue.clear();
+    }
+
+    pub fn add(&mut self, id: u64, x: u8, y: u8, old_fatigue: u32) {
+        let key = (x, y);
+        self.matrix.entry(key).or_default().push(id);
+        *self.affected_cnt.entry(key).or_insert(0) += 1;
+        self.old_fatigue.insert(id, old_fatigue);
+    }
+
+    /// 目标格是否有对象正在进入 (出生放置用)
+    pub fn is_tile_busy(&self, x: u8, y: u8) -> bool {
+        self.matrix.contains_key(&(x, y))
+    }
+
+    fn can_move(&self, id: u64, obj: &Obj) -> bool {
+        self.old_fatigue.get(&id).copied().unwrap_or(0) == 0 && obj.live_parts("move") > 0
+    }
+
+    /// 目标格是否存在阻挡: 静止 creep / 阻挡结构 / 墙 (有路除外)
+    fn check_obstacle_at(
+        room: &Room,
+        x: usize,
+        y: usize,
+        resolved: &BTreeMap<u64, (u8, u8)>,
+    ) -> bool {
+        let mut has_road = false;
+        for o in room.objects.values() {
+            if o.x as usize != x || o.y as usize != y {
+                continue;
+            }
+            match o.obj_type.as_str() {
+                "creep" => {
+                    // 站在目标格且本 tick 未获准离开的 creep 是阻挡
+                    if !resolved.contains_key(&o.id) {
+                        return true;
+                    }
+                }
+                "road" => has_road = true,
+                t if constants::OBSTACLE_OBJECT_TYPES.contains(&t) => return true,
+                "constructionSite" => {
+                    if o.is_obstacle() {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        room.terrain.is_wall(x, y) && !has_road
+    }
+
+    /// 碰撞仲裁: 官方 rate1(原格受压)→rate2(被拉)→rate3(拉人)→rate4(移动比) 排序取每格胜者,
+    /// 败者与被阻挡者不移动, 且连锁取消要进入其原格的对象。
+    pub fn check(&mut self, room: &Room) {
+        // 第一轮: 每个目标格选出胜者
+        for (&key, candidates) in &self.matrix {
+            let winner = if candidates.len() > 1 {
+                let mut rated: Vec<(u32, u32, u32, f64, u64)> = candidates
+                    .iter()
+                    .filter_map(|id| room.objects.get(id).map(|obj| (*id, obj)))
+                    .map(|(id, obj)| {
+                        let rate1 = if self
+                            .matrix
+                            .get(&(obj.x, obj.y))
+                            .is_some_and(|arr| arr.contains(&id))
+                        {
+                            100
+                        } else {
+                            self.affected_cnt
+                                .get(&(obj.x, obj.y))
+                                .copied()
+                                .unwrap_or(0) as u32
+                        };
+                        let rate4 = obj.live_parts("move") as f64 / move_weight(obj).max(1) as f64;
+                        (rate1, 0, 0, rate4, id)
+                    })
+                    .collect();
+                rated.sort_by(|a, b| {
+                    b.0.cmp(&a.0)
+                        .then(b.1.cmp(&a.1))
+                        .then(b.2.cmp(&a.2))
+                        .then(b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
+                });
+                rated.first().map(|r| r.4)
+            } else {
+                candidates.first().copied()
+            };
+            if let Some(w) = winner {
+                self.resolved.insert(w, key);
+            }
+        }
+
+        // 第二轮: 不可动 / 目标被占 → 移除并连锁
+        let keys: Vec<(u8, u8)> = self.resolved.values().copied().collect();
+        for key in keys {
+            if !self.resolved.values().any(|&k| k == key) {
+                continue;
+            }
+            let blocked = self
+                .resolved
+                .iter()
+                .find(|(_, &k)| k == key)
+                .map(|(&id, _)| {
+                    room.objects
+                        .get(&id)
+                        .map(|obj| {
+                            !self.can_move(id, obj)
+                                || Self::check_obstacle_at(room, key.0 as usize, key.1 as usize, &self.resolved)
+                        })
+                        .unwrap_or(true)
+                })
+                .unwrap_or(true);
+            if blocked {
+                Self::remove_from_matrix(room, &mut self.resolved, key);
+            }
+        }
+    }
+
+    /// 移除一个已裁决的移动并连锁取消进入其原格的移动
+    fn remove_from_matrix(
+        room: &Room,
+        resolved: &mut BTreeMap<u64, (u8, u8)>,
+        key: (u8, u8),
+    ) {
+        let object_id = match resolved.iter().find(|(_, &k)| k == key) {
+            Some((&id, _)) => id,
+            None => return,
+        };
+        resolved.remove(&object_id);
+        if let Some(obj) = room.objects.get(&object_id) {
+            let origin = (obj.x, obj.y);
+            if origin != key && resolved.values().any(|&k| k == origin) {
+                Self::remove_from_matrix(room, resolved, origin);
+            }
+        }
+    }
+
+    /// creep tick: 应用位移/疲劳/道路磨损; 返回是否实际移动
+    pub fn execute(&mut self, room: &mut Room, id: u64) -> bool {
+        let Some(&(nx, ny)) = self.resolved.get(&id) else {
+            return false;
+        };
+        let (at_edge_before, parts_len) = {
+            let Some(obj) = room.objects.get(&id) else {
+                return false;
+            };
+            if !self.can_move(id, obj) {
+                return false;
+            }
+            (
+                obj.x == 0 || obj.x == 49 || obj.y == 0 || obj.y == 49,
+                obj.body.len() as u32,
+            )
+        };
+        let (nxi, nyi) = (nx as usize, ny as usize);
+        let has_road = room
+            .objects
+            .values()
+            .any(|o| o.obj_type == "road" && o.x as usize == nxi && o.y as usize == nyi);
+
+        // 目标格地形成本: 路1 / 沼泽10 / 平原2 (engine: fatigueRate)
+        let fatigue_rate = if has_road {
+            1
+        } else if room.terrain.is_swamp(nxi, nyi) {
+            10
+        } else {
+            2
+        };
+
+        let obj = room.objects.get_mut(&id).unwrap();
+        let at_edge_after = nx == 0 || nx == 49 || ny == 0 || ny == 49;
+        obj.x = nx;
+        obj.y = ny;
+        if at_edge_after && !at_edge_before {
+            // 从房内进入边缘格: 不加疲劳 (跨房过渡)
+            obj.fatigue = 0;
+        } else {
+            obj.fatigue = obj.fatigue.saturating_add(fatigue_rate * move_weight(obj));
+        }
+
+        // 道路磨损: 提前到期 nextDecayTime (等价官方 nextDecayTime -= wear)
+        if has_road {
+            for o in room.objects.values_mut() {
+                if o.obj_type == "road" && o.x as usize == nxi && o.y as usize == nyi {
+                    if let Some(t) = o.next_decay_time {
+                        o.next_decay_time = Some(t.saturating_sub(parts_len));
+                    }
+                    break;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// 移动重量: 非 MOVE/CARRY 部件全重 + 按负载折算占用的 CARRY 件数 (calcResourcesWeight)
+fn move_weight(obj: &Obj) -> u32 {
+    let mut remaining = obj.store.values().sum::<u32>();
+    let mut weight = obj
+        .body
+        .iter()
+        .filter(|p| p.part_type != "move" && p.part_type != "carry")
+        .count() as u32;
+    for part in obj.body.iter().rev() {
+        if remaining == 0 {
+            break;
+        }
+        if part.part_type != "carry" || part.hits == 0 {
+            continue;
+        }
+        let take = remaining.min(constants::CARRY_CAPACITY);
+        remaining -= take;
+        weight += 1;
+    }
+    weight
+}
+
+/// 每 tick 疲劳恢复: 2 × 活跃 MOVE
+pub fn recover_fatigue(obj: &mut Obj) {
+    let moves = obj.live_parts("move") as u32;
+    if moves > 0 {
+        obj.fatigue = obj.fatigue.saturating_sub(2 * moves);
+    }
+}
+
+/// 出生放置: spawn 周围 8 向第一格无阻挡位 (engine: _born-creep, 固定方向序)
+pub fn find_birth_tile(room: &Room, spawn: &Obj, movement: &Movement) -> Option<(u8, u8)> {
+    const DIRS: [(i32, i32); 8] = [
+        (0, -1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+    ];
+    for (dx, dy) in DIRS {
+        let nx = spawn.x as i32 + dx;
+        let ny = spawn.y as i32 + dy;
+        if !(0..50).contains(&nx) || !(0..50).contains(&ny) {
+            continue;
+        }
+        let (nx, ny) = (nx as u8, ny as u8);
+        if room.terrain.is_wall(nx as usize, ny as usize) {
+            continue;
+        }
+        if movement.is_tile_busy(nx, ny) {
+            continue;
+        }
+        let blocked = room.objects.values().any(|o| {
+            o.x == nx && o.y == ny && (o.is_obstacle() || o.obj_type == "creep")
+        });
+        if !blocked {
+            return Some((nx, ny));
+        }
+    }
+    None
+}
