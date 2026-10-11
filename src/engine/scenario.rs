@@ -24,11 +24,47 @@ pub enum TerrainSpec {
     Raw { data: String },
 }
 
-#[derive(Deserialize, Debug, Clone)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum SourcesSpec {
+    /// 自动放置: count (默认 2) / energy (默认 3000)
     Auto { count: Option<u32>, energy: Option<u32> },
+    /// 显式位置
     Explicit { positions: Vec<[u8; 2]> },
+}
+
+/// 含 positions 键 → 显式位置, 否则视为自动放置
+/// (不能使用 untagged: Auto 全 Option 字段会吞掉任何未知形态)
+impl<'de> serde::Deserialize<'de> for SourcesSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SourcesVisitor;
+        impl<'de> serde::de::Visitor<'de> for SourcesVisitor {
+            type Value = SourcesSpec;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("sources 配置对象")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<SourcesSpec, A::Error> {
+                let mut count = None;
+                let mut energy = None;
+                let mut positions = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "count" => count = map.next_value()?,
+                        "energy" => energy = map.next_value()?,
+                        "positions" => positions = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                if let Some(positions) = positions {
+                    Ok(SourcesSpec::Explicit { positions })
+                } else {
+                    Ok(SourcesSpec::Auto { count, energy })
+                }
+            }
+        }
+        deserializer.deserialize_map(SourcesVisitor)
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -221,8 +257,9 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
         }
 
         // 结构
+        let mut spawn_index = 0u32;
         for st in &spec.structures {
-            let id = world.alloc_id();
+            let id = alloc_id(&mut world.next_id);
             let mut obj = objects::structure(id, &st.structure_type, st.pos[0], st.pos[1], true);
             if let Some(e) = st.energy {
                 obj.store.insert("energy".into(), e);
@@ -233,7 +270,8 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
             match st.structure_type.as_str() {
                 "spawn" => {
                     obj.energy_capacity = constants::SPAWN_ENERGY_CAPACITY;
-                    obj.name = Some(format!("Spawn1"));
+                    spawn_index += 1;
+                    obj.name = Some(format!("Spawn{spawn_index}"));
                 }
                 "storage" => obj.energy_capacity = constants::STORAGE_CAPACITY,
                 "container" => obj.energy_capacity = constants::CONTAINER_CAPACITY,

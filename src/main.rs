@@ -4,17 +4,14 @@
 //!   nexus-sim --scenario <json> [--bundle dist/main.js] [--ticks N]
 //!            [--csv out.csv] [--json-report out.json] [--quiet]
 
-mod engine;
-mod runtime;
-
-use runtime::BotRuntime;
-use engine::intents::IntentList;
-use engine::metrics::{evaluate_asserts, MetricsCollector, TickMetrics};
-use engine::movement::Movement;
-use engine::scenario::Scenario;
-use engine::snapshot::{build_snapshot, SnapshotOptions};
-use engine::tick;
-use engine::world::World;
+use nexus_sim::runtime::BotRuntime;
+use nexus_sim::engine::intents::IntentList;
+use nexus_sim::engine::metrics::{evaluate_asserts, MetricsCollector, TickMetrics};
+use nexus_sim::engine::movement::Movement;
+use nexus_sim::engine::scenario::Scenario;
+use nexus_sim::engine::snapshot::{build_snapshot, SnapshotOptions};
+use nexus_sim::engine::tick;
+use nexus_sim::engine::world::World;
 use std::io::Write as _;
 use std::time::Instant;
 
@@ -37,6 +34,7 @@ async fn async_main() {
     let mut quiet = false;
     let mut verbose = false;
     let mut dump_memory_path: Option<String> = None;
+    let mut render_room: Option<String> = None;
     let mut seed_random = true;
 
     let mut i = 1;
@@ -70,6 +68,10 @@ async fn async_main() {
                 verbose = true;
                 i += 1;
             }
+            "--render-terrain" => {
+                render_room = args.get(i + 1).cloned();
+                i += 2;
+            }
             "--dump-memory" => {
                 dump_memory_path = args.get(i + 1).cloned();
                 i += 2;
@@ -98,8 +100,30 @@ async fn async_main() {
     let bundle = std::fs::read_to_string(&bundle_path)
         .unwrap_or_else(|e| panic!("读取 bundle 失败 {bundle_path}: {e}"));
 
-    let mut world = engine::scenario::build_world(&scenario)
+    let mut world = nexus_sim::engine::scenario::build_world(&scenario)
         .unwrap_or_else(|e| panic!("{e}"));
+
+    // 地形可视化 (场景作者核对生成质量)
+    if let Some(room_name) = &render_room {
+        let Some(room) = world.rooms.get(room_name) else {
+            eprintln!("场景中没有房间 {room_name}");
+            std::process::exit(2);
+        };
+        let mut walls = 0usize;
+        let mut swamps = 0usize;
+        for y in 0..50 {
+            for x in 0..50 {
+                if room.terrain.is_wall(x, y) {
+                    walls += 1;
+                }
+                if room.terrain.is_swamp(x, y) {
+                    swamps += 1;
+                }
+            }
+        }
+        println!("地形 {room_name}: 墙 {}/2500 ({:.1}%), 沼泽 {}/2500 ({:.1}%)", walls, 100.0 * walls as f32 / 2500.0, swamps, 100.0 * swamps as f32 / 2500.0);
+        println!("{}", room.terrain.render());
+    }
     let mut movement = Movement::default();
     let mut metrics = MetricsCollector::default();
 
@@ -137,7 +161,7 @@ async fn async_main() {
     while run < total_ticks {
         // 1. 快照
         let snapshot_opts = SnapshotOptions {
-            cpu: engine::snapshot::CpuView {
+            cpu: nexus_sim::engine::snapshot::CpuView {
                 limit: cpu_limit,
                 tick_limit: bucket.max(cpu_limit).min(500.0).max(cpu_limit),
                 bucket,
@@ -284,12 +308,12 @@ async fn async_main() {
                 all_pass = false;
             }
             let label = match &r.spec {
-                engine::scenario::AssertSpec::RclAtLeast { .. } => "rclAtLeast",
-                engine::scenario::AssertSpec::RclReachedBy { .. } => "rclReachedBy",
-                engine::scenario::AssertSpec::CreepCountAtLeast { .. } => "creepCountAtLeast",
-                engine::scenario::AssertSpec::CpuAvgBelow { .. } => "cpuAvgBelow",
-                engine::scenario::AssertSpec::CpuP95Below { .. } => "cpuP95Below",
-                engine::scenario::AssertSpec::NoErrors => "noErrors",
+                nexus_sim::engine::scenario::AssertSpec::RclAtLeast { .. } => "rclAtLeast",
+                nexus_sim::engine::scenario::AssertSpec::RclReachedBy { .. } => "rclReachedBy",
+                nexus_sim::engine::scenario::AssertSpec::CreepCountAtLeast { .. } => "creepCountAtLeast",
+                nexus_sim::engine::scenario::AssertSpec::CpuAvgBelow { .. } => "cpuAvgBelow",
+                nexus_sim::engine::scenario::AssertSpec::CpuP95Below { .. } => "cpuP95Below",
+                nexus_sim::engine::scenario::AssertSpec::NoErrors => "noErrors",
             };
             println!("{tag}  {label}  ({})", r.detail);
         }
@@ -313,7 +337,7 @@ fn summarize(world: &World) -> (u8, u32, u32, u32, u32, usize, usize) {
             if c.mine {
                 rcl = rcl.max(c.level);
                 progress = c.progress;
-                progress_total = engine::constants::CONTROLLER_LEVELS
+                progress_total = nexus_sim::engine::constants::CONTROLLER_LEVELS
                     .iter()
                     .find(|(l, _)| *l == c.level)
                     .map(|(_, p)| *p)

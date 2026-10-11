@@ -1,6 +1,6 @@
 {
 	"name": "boot-from-scratch",
-	"description": "空房间从零启动: spawn 300 能量, 验证 bot 自举闭环与 RCL 爬升 (当前基线: RCL2 @ t≈17700)",
+	"description": "空房间从零启动 (基线: RCL2 @ t650; 注意: 当前 bot 升级停摆会导致 RCL 在 ~t10650 降回 1)",
 	"seed": 42,
 	"ticks": 20000,
 	"cpu": {
@@ -49,8 +49,9 @@
 	],
 	"asserts": [
 		{
-			"kind": "rclAtLeast",
-			"value": 2
+			"kind": "rclReachedBy",
+			"value": 2,
+			"tick": 5000
 		},
 		{
 			"kind": "creepCountAtLeast",

@@ -331,9 +331,9 @@ fn tick_controllers(world: &mut World, room_name: &str) {
         } else {
             controller.downgrade_time =
                 Some(controller.downgrade_time.unwrap_or(tick) + downgrade(new_level) / 2 + 1);
-            // 降级后保留 90% 升到下一级的进度 (官方规则)
+            // 降级后进度 += 新等级需求的 90% (官方: progress += round(LEVELS[level]*0.9))
             let keep = ((controller_levels(new_level) as f64) * 0.9).round() as u32;
-            controller.progress = controller.progress.min(keep).max(keep);
+            controller.progress += keep;
         }
     }
 }
@@ -440,10 +440,10 @@ fn apply_crossings(world: &mut World, crossings: &mut Vec<(String, u64)>) {
         let h = chars.next()?;
         let rest: String = chars.collect();
         let (x_part, y_part) = rest.split_once(['N', 'S'])?;
-        let x: i64 = x_part[1..].parse().ok()?;
+        let x: i64 = x_part.parse().ok()?;
         let x = if h == 'W' || h == 'w' { -x - 1 } else { x };
-        let y: i64 = y_part[1..].parse().ok()?;
-        let y = if rest.contains('N') { -y - 1 } else { y };
+        let y: i64 = y_part.parse().ok()?;
+        let y = if rest.contains('N') || rest.contains('n') { -y - 1 } else { y };
         Some((x, y))
     }
     fn xy_name(x: i64, y: i64) -> String {

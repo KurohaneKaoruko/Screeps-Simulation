@@ -103,13 +103,12 @@ impl Rng {
     }
 }
 
-/// 种子生成地形: 值噪声 → 墙脊 + 沼泽洼地, 保证可通行区域占多数。
+/// 种子生成地形: 值噪声 + 分位数阈值 → 墙带 ~12% / 沼泽 ~28%。
 /// 生成规则偏"竞技地图", 不模拟官方地形算法的岩壁走向。
 pub fn generate(seed: u64) -> Terrain {
     let mut rng = Rng::new(seed);
-    let mut elevation = [[0f64; ROOM_SIZE]; ROOM_SIZE];
-    let mut moisture = [[0f64; ROOM_SIZE]; ROOM_SIZE];
-    // 3 组随机梯度点做插值噪声
+    let mut elevation = [0f64; TILES];
+    let mut moisture = [0f64; TILES];
     let nodes: Vec<(usize, usize, f64)> = (0..10)
         .map(|_| {
             (
@@ -128,40 +127,43 @@ pub fn generate(seed: u64) -> Terrain {
             )
         })
         .collect();
+    let field = |nodes: &[(usize, usize, f64)], x: usize, y: usize| -> f64 {
+        let mut v = 0.0;
+        let mut wsum = 0.0;
+        for &(nx, ny, val) in nodes {
+            let dx = (nx as f64 - x as f64).abs();
+            let dy = (ny as f64 - y as f64).abs();
+            let d = (dx * dx + dy * dy).sqrt().max(1.0);
+            let w = 1.0 / (d * d);
+            v += val * w;
+            wsum += w;
+        }
+        v / wsum
+    };
     for y in 0..ROOM_SIZE {
         for x in 0..ROOM_SIZE {
-            let mut e = 0.0;
-            let mut wsum = 0.0;
-            for &(nx, ny, val) in &nodes {
-                let dx = (nx as f64 - x as f64).abs();
-                let dy = (ny as f64 - y as f64).abs();
-                let d = (dx * dx + dy * dy).sqrt().max(1.0);
-                let w = 1.0 / (d * d);
-                e += val * w;
-                wsum += w;
-            }
-            elevation[y][x] = e / wsum;
-            let mut m = 0.0;
-            let mut mw = 0.0;
-            for &(nx, ny, val) in &moisture_nodes {
-                let dx = (nx as f64 - x as f64).abs();
-                let dy = (ny as f64 - y as f64).abs();
-                let d = (dx * dx + dy * dy).sqrt().max(1.0);
-                let w = 1.0 / (d * d);
-                m += val * w;
-                mw += w;
-            }
-            moisture[y][x] = m / mw;
+            elevation[y * ROOM_SIZE + x] = field(&nodes, x, y);
+            moisture[y * ROOM_SIZE + x] = field(&moisture_nodes, x, y);
         }
     }
+    // 分位数阈值: 墙取海拔 [55%, 67%) 分位带 (≈12%), 沼泽取湿度前 40% (≈28%)
+    let mut e_sorted = elevation;
+    e_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut m_sorted = moisture;
+    m_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let quantile = |arr: &[f64], q: f64| arr[((TILES as f64 - 1.0) * q) as usize];
+    let wall_low = quantile(&e_sorted, 0.55);
+    let wall_high = quantile(&e_sorted, 0.67);
+    let swamp_threshold = quantile(&m_sorted, 0.60);
+
     let mut terrain = Terrain::plain();
     for y in 0..ROOM_SIZE {
         for x in 0..ROOM_SIZE {
-            let e = elevation[y][x];
-            let m = moisture[y][x];
-            let tile = if e > 0.085 && e < 0.095 {
+            let e = elevation[y * ROOM_SIZE + x];
+            let m = moisture[y * ROOM_SIZE + x];
+            let tile = if e >= wall_low && e < wall_high {
                 TERRAIN_MASK_WALL
-            } else if m > 0.12 {
+            } else if m >= swamp_threshold {
                 TERRAIN_MASK_SWAMP
             } else {
                 0
@@ -169,6 +171,5 @@ pub fn generate(seed: u64) -> Terrain {
             terrain.set(x, y, tile);
         }
     }
-    // 外圈不强制墙 (官方地图外圈可有平原), 但给出口留通行余地: 不处理
     terrain
 }

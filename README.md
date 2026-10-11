@@ -102,6 +102,18 @@ cp /tmp/librusty_v8.a.gz ~/.cargo/.rusty_v8/https___github_com_denoland_rusty_v8
 断言类型：`rclAtLeast` / `rclReachedBy` / `creepCountAtLeast` / `cpuAvgBelow` /
 `cpuP95Below` / `noErrors`。指标对齐 docs/13 §13.3 回归基准。
 
+`sources` 字段：`{"count": 2, "energy": 3000}` 自动对称放置，或 `{"positions": [[x,y],...]}` 显式指定。
+
+### 机制回归测试
+
+```bash
+cargo test --release
+```
+
+`tests/engine_rules.rs` 用受控意图直接驱动引擎（不经 V8），锁定掉落衰减、Source 再生时序、
+疲劳步频、出口格越房与弹回、RCL 升级/降级数值；`tests/shim_apis.rs` 用微型 bundle 驱动 V8 验证
+PathFinder 跨房、地图 API、moveTo 端到端闭环。
+
 ## 目录
 
 ```
