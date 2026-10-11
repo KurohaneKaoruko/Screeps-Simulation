@@ -452,11 +452,260 @@ fn death_resources_go_to_container() {
 	let json = format!(r#"[{{"o":"{:024x}","n":"suicide","d":{{}}}}]"#, c);
 	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
 	let room = &world.rooms["W5N8"];
-	assert_eq!(store_of(&world, container), 50, "死亡资源应先入同格容器");
+	// 携带 50 + 身体资源 2 部件 × min(125, 50×0.2)=10 → 70 (官方 _die.js: 自杀按 CREEP_CORPSE_RATE 回收)
+	assert_eq!(store_of(&world, container), 70, "死亡资源 (携带+身体) 应先入同格容器");
 	let tomb = room
 		.objects
 		.values()
 		.find(|o| o.obj_type == "tombstone")
 		.expect("应留下墓碑");
 	assert_eq!(tomb.store.get("energy").copied().unwrap_or(0), 0, "容器装下的部分不再进墓碑");
+}
+
+// ── 以下为 issue #1「多房间 / 数值 / 次要规则 / API」回归用例 ──
+
+const RCL3_ROOM: &str = r#"{
+	"name": "t3",
+	"seed": 1,
+	"rooms": [
+		{ "name": "W5N8", "terrain": { "kind": "flat" },
+		  "controller": { "level": 3, "pos": [28, 27] },
+		  "structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 }] }
+	]
+}"#;
+
+fn add_creep_in(world: &mut World, room: &str, name: &str, x: u8, y: u8, body: &[&str]) -> u64 {
+	use nexus_sim::engine::objects::{creep_obj, BodyPart};
+	let id = alloc_id(&mut world.next_id);
+	let body: Vec<BodyPart> = body
+		.iter()
+		.map(|p| BodyPart { part_type: p.to_string(), hits: 100 })
+		.collect();
+	let creep = creep_obj(id, name, x, y, body);
+	let room = world.rooms.get_mut(room).unwrap();
+	room.objects.insert(id, creep);
+	room.objects.get_mut(&id).unwrap().age_time = Some(world.tick + 1500);
+	id
+}
+
+fn spawn_of(world: &World, room: &str) -> u64 {
+	world.rooms[room]
+		.objects
+		.values()
+		.find(|o| o.obj_type == "spawn")
+		.unwrap()
+		.id
+}
+
+/// issue#1 §2.1: 每个房间各自仲裁, 后处理房间不得取消前面房间的移动
+#[test]
+fn multi_room_movement_isolated() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let a = add_creep_in(&mut world, "W5N8", "A", 20, 20, &["move"]);
+	let b = add_creep_in(&mut world, "W4N8", "B", 20, 20, &["move"]);
+	let json = format!(
+		r#"[{{"o":"{:024x}","n":"move","d":{{"direction":3}}}},{{"o":"{:024x}","n":"move","d":{{"direction":3}}}}]"#,
+		a, b
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!((world.rooms["W5N8"].objects[&a].x, world.rooms["W5N8"].objects[&a].y), (21, 20));
+	assert_eq!(
+		(world.rooms["W4N8"].objects[&b].x, world.rooms["W4N8"].objects[&b].y),
+		(21, 20),
+		"两个房间的移动都应在同一 tick 生效"
+	);
+}
+
+/// issue#1 §2.2: 交换对象 (rate1) 应优先于同格的第三方抢位
+#[test]
+fn swap_priority_resolves_head_on() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	// 避开 (25,25) 的 spawn, 否则目标格会被阻挡结构占住导致意图不登记
+	let a = add_creep_in(&mut world, "W5N8", "A", 20, 20, &["move", "carry"]);
+	let b = add_creep_in(&mut world, "W5N8", "B", 21, 20, &["move", "carry"]);
+	// C 的 MOVE 部件更多 (rate4 更高), 若无 rate1 会抢走 (21,20)
+	let c = add_creep_in(&mut world, "W5N8", "C", 22, 20, &["move", "move", "move", "carry"]);
+	let json = format!(
+		r#"[{{"o":"{:024x}","n":"move","d":{{"direction":3}}}},{{"o":"{:024x}","n":"move","d":{{"direction":7}}}},{{"o":"{:024x}","n":"move","d":{{"direction":7}}}}]"#,
+		a, b, c
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let room = &world.rooms["W5N8"];
+	assert_eq!((room.objects[&a].x, room.objects[&a].y), (21, 20), "A 与 B 交换应优先");
+	assert_eq!((room.objects[&b].x, room.objects[&b].y), (20, 20));
+	assert_eq!((room.objects[&c].x, room.objects[&c].y), (22, 20), "C 应被挡下");
+}
+
+/// issue#1 §3.9: 可见性来自带 user 的对象; 只有路/容器的房间不算可见
+#[test]
+fn visibility_requires_user_object() {
+	let (mut world, _) = setup(TWO_ROOMS);
+	assert!(world.rooms["W5N8"].visible(), "有 controller/spawn 应可见");
+	assert!(!world.rooms["W4N8"].visible(), "空房不可见");
+	add_structure(&mut world, "W4N8", "road", 10, 10);
+	add_structure(&mut world, "W4N8", "container", 11, 10);
+	assert!(!world.rooms["W4N8"].visible(), "只有路和容器仍不算可见");
+}
+
+/// issue#1 §4.2: 墙上的路造价 ×150
+#[test]
+fn road_on_wall_construction_cost_ratio() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	world.rooms.get_mut("W5N8").unwrap().terrain.set(5, 5, 1);
+	let json = r#"[{"o":"room","n":"createConstructionSite","d":{"room":"W5N8","x":5,"y":5,"structureType":"road"}}]"#;
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(json));
+	let site = world.rooms["W5N8"]
+		.objects
+		.values()
+		.find(|o| o.obj_type == "constructionSite")
+		.expect("墙上应能建路");
+	assert_eq!(site.progress_total, 300 * constants::CONSTRUCTION_COST_ROAD_WALL_RATIO);
+}
+
+/// issue#1 §4.3: 新建容器首次衰减计时为 +100
+#[test]
+fn container_first_decay_is_100() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let site_id = alloc_id(&mut world.next_id);
+	let mut site = objects::construction_site(site_id, "container", 10, 10, 5000);
+	site.progress = 4995;
+	world.rooms.get_mut("W5N8").unwrap().objects.insert(site_id, site);
+	let c = add_creep_in(&mut world, "W5N8", "B1", 10, 11, &["work", "carry"]);
+	set_store(&mut world, c, 100);
+	let json = format!(r#"[{{"o":"{:024x}","n":"build","d":{{"id":"{:024x}"}}}}]"#, c, site_id);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let container = world.rooms["W5N8"]
+		.objects
+		.values()
+		.find(|o| o.obj_type == "container")
+		.expect("容器应建成");
+	assert_eq!(container.next_decay_time, Some(100), "新建容器首次衰减在 +100");
+}
+
+/// issue#1 §4.4: rampart 每 100t 减 300, hitsMax 按 RCL
+#[test]
+fn rampart_decays_and_hits_max_by_rcl() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let id = add_structure(&mut world, "W5N8", "rampart", 10, 10);
+	{
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&id).unwrap();
+		o.hits = 1000;
+		o.next_decay_time = Some(0);
+	}
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	let o = &world.rooms["W5N8"].objects[&id];
+	assert_eq!(o.hits, 700, "rampart 每 100t 减 300");
+	assert_eq!(o.hits_max, constants::rampart_hits_max(3), "hitsMax = RAMPART_HITS_MAX[RCL3]");
+}
+
+/// issue#1 §4.6: 障碍类工地被同格 creep 挡住时不施工
+#[test]
+fn build_blocked_by_creep_on_obstacle_site() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let site_id = alloc_id(&mut world.next_id);
+	let site = objects::construction_site(site_id, "spawn", 10, 10, 15000);
+	world.rooms.get_mut("W5N8").unwrap().objects.insert(site_id, site);
+	add_creep_in(&mut world, "W5N8", "X1", 10, 10, &["work", "carry"]);
+	let c = add_creep_in(&mut world, "W5N8", "B1", 10, 11, &["work", "carry"]);
+	set_store(&mut world, c, 100);
+	let json = format!(r#"[{{"o":"{:024x}","n":"build","d":{{"id":"{:024x}"}}}}]"#, c, site_id);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(world.rooms["W5N8"].objects[&site_id].progress, 0, "同格 creep 挡住时不施工");
+}
+
+/// issue#1 §4.7: 拆除工地掉落 floor(progress/2) 能量
+#[test]
+fn remove_construction_site_refunds_energy() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let site_id = alloc_id(&mut world.next_id);
+	let mut site = objects::construction_site(site_id, "extension", 10, 10, 3000);
+	site.progress = 1000;
+	world.rooms.get_mut("W5N8").unwrap().objects.insert(site_id, site);
+	let json = format!(
+		r#"[{{"o":"room","n":"removeConstructionSite","d":{{"room":"W5N8","id":"{:024x}"}}}}]"#,
+		site_id
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let room = &world.rooms["W5N8"];
+	assert!(!room.objects.contains_key(&site_id));
+	let drop = room
+		.objects
+		.values()
+		.find(|o| o.obj_type == "energy")
+		.expect("应掉落能量");
+	// 500 在当 tick 被衰减 1 → 499
+	assert_eq!(drop.store.get("energy").copied().unwrap_or(0), 499, "floor(progress/2) 掉落后当 tick 衰减");
+}
+
+/// issue#1 §4.12: spawn.renewCreep 恢复寿命并扣能
+#[test]
+fn renew_creep_extends_life_and_charges_energy() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	let c = add_creep_in(&mut world, "W5N8", "R1", 25, 26, &["move", "carry", "work"]);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&c).unwrap().age_time = Some(100);
+	let before = store_of(&world, spawn);
+	let json = format!(r#"[{{"o":"{:024x}","n":"renewCreep","d":{{"id":"{:024x}"}}}}]"#, spawn, c);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let room = &world.rooms["W5N8"];
+	assert_eq!(room.objects[&c].age_time, Some(300), "寿命 +floor(1.2*1500/3/3)=+200");
+	// 扣 ceil(1.2*200/3/3)=27 能量; 同 tick spawn 自动回能 +1 (官方 spawns/tick.js) → 净 -26
+	assert_eq!(before - store_of(&world, spawn), 26, "renew 扣 27 能量, spawn 同 tick 自动回能 +1");
+}
+
+/// issue#1 §4.12: spawn.recycleCreep 100% 回收 (携带 + 身体)
+#[test]
+fn recycle_creep_drops_full_resources() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	let c = add_creep_in(&mut world, "W5N8", "C1", 25, 26, &["carry", "move"]);
+	set_store(&mut world, c, 50);
+	let json = format!(r#"[{{"o":"{:024x}","n":"recycleCreep","d":{{"id":"{:024x}"}}}}]"#, spawn, c);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let room = &world.rooms["W5N8"];
+	assert!(!room.objects.contains_key(&c), "回收后单位应消失");
+	let tomb = room
+		.objects
+		.values()
+		.find(|o| o.obj_type == "tombstone")
+		.expect("应留下墓碑");
+	// 携带 50 + 身体 2×min(125,50×1.0)=100
+	assert_eq!(tomb.store.get("energy").copied().unwrap_or(0), 150);
+}
+
+/// issue#1 §4.12: tower.repair 按官方功率修血并扣 10 能
+#[test]
+fn tower_repair_spends_energy() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let tower = add_structure(&mut world, "W5N8", "tower", 20, 20);
+	set_store(&mut world, tower, 100);
+	let wall = add_structure(&mut world, "W5N8", "constructedWall", 20, 22);
+	{
+		let w = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&wall).unwrap();
+		w.hits = 1000;
+		w.hits_max = constants::WALL_HITS_MAX;
+	}
+	let json = format!(r#"[{{"o":"{:024x}","n":"repair","d":{{"id":"{:024x}"}}}}]"#, tower, wall);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let room = &world.rooms["W5N8"];
+	assert_eq!(store_of(&world, tower), 90, "tower 每次消耗 10 能量");
+	assert_eq!(room.objects[&wall].hits, 1800, "range 2 无衰减, 修 800");
+}
+
+/// issue#1 §4.12: link.transferEnergy 带 3% 损耗与冷却
+#[test]
+fn link_transfer_energy_with_loss_and_cooldown() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let a = add_structure(&mut world, "W5N8", "link", 10, 10);
+	let b = add_structure(&mut world, "W5N8", "link", 12, 10);
+	set_store(&mut world, a, 500);
+	let json = format!(
+		r#"[{{"o":"{:024x}","n":"transferEnergy","d":{{"id":"{:024x}","amount":200}}}}]"#,
+		a, b
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let room = &world.rooms["W5N8"];
+	assert_eq!(store_of(&world, a), 300, "源 link 扣 200");
+	assert_eq!(store_of(&world, b), 194, "目标 link 收 200 - ceil(200*0.03)=194");
+	assert_eq!(room.objects[&a].cooldown, 1, "冷却 = 1×距离2 再经当 tick 减 1");
 }

@@ -97,6 +97,7 @@ const C = {
 	CREEP_CLAIM_LIFE_TIME: 600,
 	CREEP_SPAWN_TIME: 3,
 	CREEP_CORPSE_RATE: 0.2,
+	SPAWN_RENEW_RATIO: 1.2,
 	MAX_CREEP_SIZE: 50,
 	MAX_CONSTRUCTION_SITES: 100,
 
@@ -371,9 +372,40 @@ let __intents = [];
 let __consoleLines = [];
 /** 本 tick 已创建的 creep 名 (官方 createdCreepNames), 每 tick 重建 */
 let __createdCreepNames = new Set();
+/** 本 tick 已创建的工地数 (官方把同 tick 新建计入 100 上限) */
+let __createdSiteCount = 0;
+
+/** 意图的 CPU 计价 (官方 driver lib/runtime/runtime.js: intentCpu = 0.2) */
+const INTENT_CPU = 0.2;
+/** 免计价的意图 (官方 freeMethods: say / pull) */
+const FREE_INTENT_METHODS = { say: true, pull: true };
+/** 本 tick 已计入 CPU 的 (对象, 意图) 组合 —— 官方 intents.set 只对首次出现计价 */
+let __intentKeys = new Set();
+let __intentCpu = 0;
 
 function intent(objId, name, data) {
-	__intents.push({ o: typeof objId === "string" ? objId : String(objId), n: name, d: data });
+	const o = typeof objId === "string" ? objId : String(objId);
+	__intents.push({ o, n: name, d: data });
+	// 官方: 同一对象同一意图重复提交不重复计价 (intents.set 语义)
+	if (!FREE_INTENT_METHODS[name]) {
+		const key = o + "|" + name;
+		if (!__intentKeys.has(key)) {
+			__intentKeys.add(key);
+			__intentCpu += INTENT_CPU;
+		}
+	}
+}
+
+/** 未实现 API 的统一错误 (issue #1: 战斗/claim 等未覆盖链路, 明确报错而不是 TypeError) */
+function unimplemented(name) {
+	return new Error(`${name} 未实现: 本模拟器仅覆盖经济链路 (采集/搬运/建造/修理/升级/孵化)`);
+}
+
+/** 官方 utils.calcCreepCost: 身体部件总造价 */
+function creepCost(body) {
+	let sum = 0;
+	for (const p of body) sum += C.BODYPART_COST[p.type] || 0;
+	return sum;
 }
 
 // ═══════════════════════════ 基础工具 ═══════════════════════════
@@ -637,19 +669,19 @@ class Creep extends RoomObject {
 	moveByPath(path) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
-		if (Array.isArray(path) && path.length > 0) {
-			if (path[0] instanceof RoomPosition) {
-				let idx = path.findIndex((p) => p.isEqualTo(this.pos));
-				if (idx === -1 && !path[0].isNearTo(this.pos)) return C.ERR_NOT_FOUND;
-				if (idx >= 0) idx++;
-				if (idx >= path.length) return C.ERR_NOT_FOUND;
-				return this.move(this.pos.getDirectionTo(path[idx]));
-			}
-			const cur = path.find((i) => i.x - i.dx === this.pos.x && i.y - i.dy === this.pos.y);
-			if (!cur) return C.ERR_NOT_FOUND;
-			return this.move(cur.direction);
+		if (Array.isArray(path) && path.length > 0 && path[0] instanceof RoomPosition) {
+			let idx = path.findIndex((p) => p.isEqualTo(this.pos));
+			if (idx === -1 && !path[0].isNearTo(this.pos)) return C.ERR_NOT_FOUND;
+			idx++;
+			if (idx >= path.length) return C.ERR_NOT_FOUND;
+			return this.move(this.pos.getDirectionTo(path[idx]));
 		}
-		return this.move(path); // 序列化路径 = 单方向
+		// 官方 E/game/creeps.js:305-330: 字符串先反序列化, 非数组返回 ERR_INVALID_ARGS
+		if (typeof path === "string") path = deserializePath(path);
+		if (!Array.isArray(path)) return C.ERR_INVALID_ARGS;
+		const cur = path.find((i) => i.x - i.dx === this.pos.x && i.y - i.dy === this.pos.y);
+		if (!cur) return C.ERR_NOT_FOUND;
+		return this.move(cur.direction);
 	}
 	moveTo(firstArg, secondArg, opts) {
 		if (!this.my) return C.ERR_NOT_OWNER;
@@ -678,7 +710,8 @@ class Creep extends RoomObject {
 				delete this.memory._move;
 			} else if (_move.dest.room === roomName && _move.dest.x === x && _move.dest.y === y) {
 				let path = typeof _move.path === "string" ? deserializePath(_move.path) : _move.path;
-				const idx = path.findIndex((p) => p.x === this.pos.x && p.y === this.pos.y && p.roomName === this.pos.roomName);
+				// 官方 rooms.js moveTo: 只按 (x,y) 匹配缓存步, 序列化步没有 roomName
+				const idx = path.findIndex((p) => p.x === this.pos.x && p.y === this.pos.y);
 				if (idx !== -1) {
 					path = path.slice(idx + 1);
 					_move.path = opts.serializeMemory ? serializePath(path) : path;
@@ -772,20 +805,27 @@ class Creep extends RoomObject {
 	build(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
-		if (!this.store.energy) return C.ERR_NOT_ENOUGH_ENERGY;
 		if (!this.getActiveBodyparts("work")) return C.ERR_NO_BODYPART;
+		if (!this.store.energy) return C.ERR_NOT_ENOUGH_ENERGY;
 		if (!target || !(target instanceof ConstructionSite)) return C.ERR_INVALID_TARGET;
 		if (!this.pos.inRangeTo(target.pos, 3)) return C.ERR_NOT_IN_RANGE;
+		// 官方 creeps.js build: 障碍类建筑的格子上有 creep 或其他障碍 → ERR_INVALID_TARGET
+		if (C.OBSTACLE_OBJECT_TYPES.includes(target.structureType)) {
+			const cell = this.room.__occupied.get(`${target.pos.x},${target.pos.y}`) || [];
+			const blocked = cell.some(
+				(o) => !(o instanceof ConstructionSite) && (o instanceof Creep || C.OBSTACLE_OBJECT_TYPES.includes(o.structureType))
+			);
+			if (blocked) return C.ERR_INVALID_TARGET;
+		}
 		intent(this.id, "build", { id: target.id });
 		return C.OK;
 	}
 	repair(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
-		if (!this.store.energy) return C.ERR_NOT_ENOUGH_ENERGY;
 		if (!this.getActiveBodyparts("work")) return C.ERR_NO_BODYPART;
+		if (!this.store.energy) return C.ERR_NOT_ENOUGH_ENERGY;
 		if (!target || !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
-		if (target.hits >= target.hitsMax) return C.ERR_INVALID_TARGET;
 		if (!this.pos.inRangeTo(target.pos, 3)) return C.ERR_NOT_IN_RANGE;
 		intent(this.id, "repair", { id: target.id });
 		return C.OK;
@@ -793,8 +833,8 @@ class Creep extends RoomObject {
 	upgradeController(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
-		if (!this.store.energy) return C.ERR_NOT_ENOUGH_ENERGY;
 		if (!this.getActiveBodyparts("work")) return C.ERR_NO_BODYPART;
+		if (!this.store.energy) return C.ERR_NOT_ENOUGH_ENERGY;
 		if (!target || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
 		if (!this.pos.inRangeTo(target.pos, 3)) return C.ERR_NOT_IN_RANGE;
 		intent(this.id, "upgradeController", { id: target.id });
@@ -807,6 +847,18 @@ class Creep extends RoomObject {
 		intent(this.id, "say", { message: message.substr(0, 10), isPublic: !!toPublic });
 		return C.OK;
 	}
+	// ── 未实现的战斗/claim 方法: 明确抛错而不是 TypeError (issue #1 第四节) ──
+	attack() { throw unimplemented("Creep.attack"); }
+	rangedAttack() { throw unimplemented("Creep.rangedAttack"); }
+	rangedMassAttack() { throw unimplemented("Creep.rangedMassAttack"); }
+	heal() { throw unimplemented("Creep.heal"); }
+	rangedHeal() { throw unimplemented("Creep.rangedHeal"); }
+	dismantle() { throw unimplemented("Creep.dismantle"); }
+	attackController() { throw unimplemented("Creep.attackController"); }
+	claimController() { throw unimplemented("Creep.claimController"); }
+	reserveController() { throw unimplemented("Creep.reserveController"); }
+	signController() { throw unimplemented("Creep.signController"); }
+	pull() { throw unimplemented("Creep.pull"); }
 	suicide() {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
@@ -900,7 +952,13 @@ class Structure extends RoomObject {
 	}
 }
 
-class OwnedStructure extends Structure { }
+class OwnedStructure extends Structure {
+	constructor(raw) {
+		super(raw);
+		// 官方 E/game/structures.js:135-140: OwnedStructure 有 owner: {username}
+		this.owner = this.my ? { username: "Nexus" } : undefined;
+	}
+}
 class StructureSpawn extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
@@ -956,8 +1014,31 @@ class StructureSpawn extends OwnedStructure {
 	canCreateCreep() {
 		return this.spawning ? C.ERR_BUSY : C.OK;
 	}
-	recycleCreep() { return C.OK; }
-	renewCreep() { return C.OK; }
+	/** 官方 E/game/structures.js:1237-1266 */
+	renewCreep(target) {
+		if (this.spawning) return C.ERR_BUSY;
+		if (!target || !target.id || !(target instanceof Creep) || target.spawning) return C.ERR_INVALID_TARGET;
+		if (!this.my || !target.my) return C.ERR_NOT_OWNER;
+		if (this.__off) return C.ERR_RCL_NOT_ENOUGH;
+		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
+		const len = target.body.length;
+		const cost = Math.ceil((C.SPAWN_RENEW_RATIO * creepCost(target.body)) / C.CREEP_SPAWN_TIME / len);
+		if (this.room.energyAvailable < cost) return C.ERR_NOT_ENOUGH_ENERGY;
+		const effect = Math.floor((C.SPAWN_RENEW_RATIO * C.CREEP_LIFE_TIME) / C.CREEP_SPAWN_TIME / len);
+		if (target.ticksToLive + effect > C.CREEP_LIFE_TIME) return C.ERR_FULL;
+		intent(this.id, "renewCreep", { id: target.id });
+		return C.OK;
+	}
+	/** 官方 E/game/structures.js:1269-1290: 回收单位, 资源 100% 掉落 */
+	recycleCreep(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (!target || !target.id || !(target instanceof Creep) || target.spawning) return C.ERR_INVALID_TARGET;
+		if (this.__off) return C.ERR_RCL_NOT_ENOUGH;
+		if (!target.my) return C.ERR_NOT_OWNER;
+		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "recycleCreep", { id: target.id });
+		return C.OK;
+	}
 	toString() {
 		return `[spawn ${this.name}]`;
 	}
@@ -1012,18 +1093,53 @@ class StructureTower extends OwnedStructure {
 		this.energy = raw.store ? raw.store.energy || 0 : 0;
 		this.energyCapacity = raw.energyCapacity;
 	}
-	attack() { return C.ERR_NOT_ENOUGH_ENERGY; }
-	heal() { return C.ERR_NOT_ENOUGH_ENERGY; }
-	repair() { return C.ERR_NOT_ENOUGH_ENERGY; }
+	/** 官方 E/game/structures.js:766-785 */
+	attack(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (!target || !target.id || !(target instanceof Creep) && !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
+		if (!this.store || this.store.energy < C.TOWER_ENERGY_COST) return C.ERR_NOT_ENOUGH_ENERGY;
+		intent(this.id, "attack", { id: target.id });
+		return C.OK;
+	}
+	/** 官方 E/game/structures.js:786-805 */
+	heal(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (!target || !target.id || !(target instanceof Creep)) return C.ERR_INVALID_TARGET;
+		if (!this.store || this.store.energy < C.TOWER_ENERGY_COST) return C.ERR_NOT_ENOUGH_ENERGY;
+		intent(this.id, "heal", { id: target.id });
+		return C.OK;
+	}
+	/** 官方 E/game/structures.js:806-828 */
+	repair(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (!target || !target.id || !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
+		if (!this.store || this.store.energy < C.TOWER_ENERGY_COST) return C.ERR_NOT_ENOUGH_ENERGY;
+		intent(this.id, "repair", { id: target.id });
+		return C.OK;
+	}
 }
 class StructureLink extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
 		this.energy = raw.store ? raw.store.energy || 0 : 0;
 		this.energyCapacity = raw.energyCapacity;
-		this.cooldown = 0;
+		this.cooldown = raw.cooldown || 0;
 	}
-	transferEnergy() { return C.ERR_INVALID_ARGS; }
+	/** 官方 E/game/structures.js:488-540 */
+	transferEnergy(target, amount) {
+		if (amount < 0) return C.ERR_INVALID_ARGS;
+		if (!target || !target.id || !(target instanceof Structure) || target === this || target.structureType !== C.STRUCTURE_LINK) {
+			return C.ERR_INVALID_TARGET;
+		}
+		if (!target.my) return C.ERR_NOT_OWNER;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		if (!this.room.controller) return C.ERR_RCL_NOT_ENOUGH;
+		if (!this.store || !this.store.energy) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (!amount) amount = Math.min(this.store.energy, (target.energyCapacity || 0) - (target.energy || 0));
+		if (this.store.energy < amount) return C.ERR_NOT_ENOUGH_ENERGY;
+		intent(this.id, "transferEnergy", { id: target.id, amount });
+		return C.OK;
+	}
 }
 class StructureLab extends OwnedStructure { }
 class StructureNuker extends OwnedStructure { }
@@ -1144,9 +1260,10 @@ class Room {
 			cell.push(obj);
 			if (obj instanceof Structure) this.__byType[obj.structureType].push(obj);
 			else if (this.__byType[rawObj.type]) this.__byType[rawObj.type].push(obj);
-			if (obj instanceof StructureController && obj.my) this.controller = obj;
-			if (obj instanceof StructureStorage && obj.my) this.storage = obj;
-			if (obj instanceof StructureTerminal && obj.my) this.terminal = obj;
+			// 官方 E/game/structures.js:45-55: 任何控制器/storage/terminal 都挂到房间上 (不限归属)
+			if (obj instanceof StructureController) this.controller = obj;
+			if (obj instanceof StructureStorage) this.storage = obj;
+			if (obj instanceof StructureTerminal) this.terminal = obj;
 		}
 		this.energyAvailable = raw.energyAvailable;
 		this.energyCapacityAvailable = raw.energyCapacityAvailable;
@@ -1198,6 +1315,38 @@ class Room {
 		}
 		return out;
 	}
+	/** 官方 Room.lookAtArea(top, left, bottom, right, [asArray]) */
+	lookAtArea(top, left, bottom, right, asArray) {
+		const out = asArray ? [] : {};
+		for (let y = top; y <= bottom; y++) {
+			for (let x = left; x <= right; x++) {
+				const entries = this.lookAt(x, y);
+				if (asArray) {
+					for (const e of entries) out.push({ x, y, ...e });
+				} else {
+					if (!out[y]) out[y] = {};
+					out[y][x] = entries;
+				}
+			}
+		}
+		return out;
+	}
+	/** 官方 Room.lookForAtArea(type, top, left, bottom, right, [asArray]) */
+	lookForAtArea(type, top, left, bottom, right, asArray) {
+		const out = asArray ? [] : {};
+		for (let y = top; y <= bottom; y++) {
+			for (let x = left; x <= right; x++) {
+				const entries = this.lookForAt(type, x, y);
+				if (asArray) {
+					for (const e of entries) out.push({ x, y, [type]: e });
+				} else {
+					if (!out[y]) out[y] = {};
+					out[y][x] = entries;
+				}
+			}
+		}
+		return out;
+	}
 	createConstructionSite(firstArg, secondArg, structureType, name) {
 		let x, y;
 		if (typeof secondArg === "number") [x, y] = [firstArg, secondArg];
@@ -1213,7 +1362,7 @@ class Room {
 				.length + this.find(FIND_CONSTRUCTION_SITES, { filter: (s) => s.structureType === structureType }).length;
 			if (existing >= limits[structureType]) return C.ERR_RCL_NOT_ENOUGH;
 		}
-		if (Game.constructionSites && Object.keys(Game.constructionSites).length >= C.MAX_CONSTRUCTION_SITES) return C.ERR_FULL;
+		if (Game.constructionSites && Object.keys(Game.constructionSites).length + __createdSiteCount >= C.MAX_CONSTRUCTION_SITES) return C.ERR_FULL;
 		// 占位检查
 		const cell = this.__occupied.get(`${x},${y}`) || [];
 		const blocking = cell.some((o) => {
@@ -1227,11 +1376,13 @@ class Room {
 			return false;
 		});
 		if (blocking) return C.ERR_INVALID_TARGET;
-		if (structureType !== "road" && structureType !== "extractor" && structureType !== "container") {
+		// 官方只豁免 road/extractor: 容器不允许建在墙上
+		if (structureType !== "road" && structureType !== "extractor") {
 			const t = terrainOf(this.name)[y * 50 + x];
 			if (t & C.TERRAIN_MASK_WALL) return C.ERR_INVALID_TARGET;
 		}
 		intent("room", "createConstructionSite", { room: this.name, x, y, structureType, name });
+		__createdSiteCount++;
 		return C.OK;
 	}
 	createFlag(firstArg, secondArg, name, color, secondaryColor) {
@@ -1250,12 +1401,6 @@ class Room {
 		Game.flags[name] = new Flag(name, color, secondaryColor, this.name, x, y);
 		return name;
 	}
-	serializePath(path) {
-		return serializePath(path);
-	}
-	deserializePath(path) {
-		return deserializePath(path);
-	}
 	findPath(fromPos, toPos, opts) {
 		return roomFindPathImpl(this.name, fromPos, toPos, opts);
 	}
@@ -1273,6 +1418,13 @@ class Room {
 	}
 }
 Room.Terrain = Terrain;
+// 官方 E/game/rooms.js:528-534: 静态方法 (此前误做成实例方法)
+Room.serializePath = function (path) {
+	return serializePath(path);
+};
+Room.deserializePath = function (str) {
+	return deserializePath(str);
+};
 
 function wrapObject(room, raw) {
 	raw.roomName = room.name;
@@ -1282,6 +1434,11 @@ function wrapObject(room, raw) {
 		case "energy": return new Resource(raw);
 		case "constructionSite": return new ConstructionSite(raw);
 		case "tombstone": return new Tombstone(raw);
+		case "mineral": return new Mineral(raw);
+		case "deposit": return new Deposit(raw);
+		case "ruin": return new Ruin(raw);
+		case "nuke": return new Nuke(raw);
+		case "powerCreep": return new PowerCreep(raw);
 		default: {
 			const cls = STRUCTURE_CLASSES[raw.type];
 			if (!cls) return null;
@@ -1392,7 +1549,8 @@ function buildMoveSearchOpts(roomName, opts) {
 /** 官方 makePathfindingGrid2: 障碍 255, 路 1 (沼泽交给 swampCost) */
 const matrixCache = new Map();
 function buildPathMatrix(roomName, opts) {
-	if (!Game.rooms[roomName]) return false;
+	// 无视野房间: 官方用只有地形的空 CostMatrix (E/game/rooms.js:200-202), 不是不可走
+	if (!Game.rooms[roomName]) return new CostMatrix();
 	const room = Game.rooms[roomName];
 	const cacheKey = `${roomName}|${!!opts.ignoreCreeps}|${!!opts.ignoreDestructibleStructures}|${!!opts.ignoreRoads}|${Game.time}`;
 	if (matrixCache.has(cacheKey)) return matrixCache.get(cacheKey);
@@ -1424,17 +1582,33 @@ function buildPathMatrix(roomName, opts) {
 }
 
 // ═══════════════════════════ 序列化路径 ═══════════════════════════
+// 官方 E/utils.js:555-613: "XXYY" (两位 x + 两位 y) 后接每一步的 direction 单字符。
 
 function serializePath(path) {
-	return path.map((i) => `${i.x}.${i.y}.${i.direction}`).join("_");
+	if (!Array.isArray(path)) throw new Error("path is not an array");
+	let result = "";
+	if (!path.length) return result;
+	if (path[0].x < 0 || path[0].y < 0) throw new Error("path coordinates cannot be negative");
+	result += path[0].x > 9 ? path[0].x : "0" + path[0].x;
+	result += path[0].y > 9 ? path[0].y : "0" + path[0].y;
+	for (let i = 0; i < path.length; i++) result += path[i].direction;
+	return result;
 }
 function deserializePath(str) {
-	if (!str) return [];
-	return str.split("_").map((chunk) => {
-		const [x, y, direction] = chunk.split(".");
-		const dx = OFFSETS[+direction][0], dy = OFFSETS[+direction][1];
-		return { x: +x, y: +y, dx, dy, direction: +direction };
-	});
+	if (typeof str !== "string") throw new Error("`path` is not a string");
+	const result = [];
+	if (!str.length) return result;
+	let x = parseInt(str.substring(0, 2));
+	let y = parseInt(str.substring(2, 4));
+	if (isNaN(x) || isNaN(y)) throw new Error("`path` is not a valid serialized path string");
+	for (let i = 4; i < str.length; i++) {
+		const direction = parseInt(str.charAt(i));
+		if (!OFFSETS[direction]) throw new Error("`path` is not a valid serialized path string");
+		const dx = OFFSETS[direction][0], dy = OFFSETS[direction][1];
+		if (i > 4) { x += dx; y += dy; }
+		result.push({ x, y, dx, dy, direction });
+	}
+	return result;
 }
 
 /** Room.findPath / findPathTo 的共享实现 (官方 _findPath2 语义) */
@@ -1473,29 +1647,36 @@ function roomFindPathImpl(roomName, fromPos, toPos, opts) {
 // ═══════════════════════════ PathFinder ═══════════════════════════
 
 class CostMatrix {
-	constructor(data) {
-		this.__bits = data ? Uint8Array.from(data) : new Uint8Array(2500);
+	constructor() {
+		// 官方 E/game/path-finder.js:19-31: 内部为列优先 x*50+y 的 Uint8Array(2500)
+		this.__bits = new Uint8Array(2500);
 	}
 	set(x, y, value) {
-		if (x < 0 || x > 49 || y < 0 || y > 49) return this;
-		this.__bits[y * 50 + x] = value;
+		x = x | 0;
+		y = y | 0;
+		// 官方 clamp 到 [0,255]: set(256) → 255 (不再是溢出成 0)
+		this.__bits[x * 50 + y] = Math.min(Math.max(0, value), 255);
 		return this;
 	}
 	get(x, y) {
-		if (x < 0 || x > 49 || y < 0 || y > 49) return 0xff;
-		return this.__bits[y * 50 + x];
+		x = x | 0;
+		y = y | 0;
+		return this.__bits[x * 50 + y];
 	}
 	clone() {
-		return new CostMatrix(this.__bits);
+		const m = new CostMatrix();
+		m.__bits = new Uint8Array(this.__bits);
+		return m;
 	}
+	/** 官方 serialize: 返回 Uint32Array(625) 的普通数组 (即 2500 字节的视图) */
 	serialize() {
-		return Array.from(this.__bits).join(",");
+		return Array.prototype.slice.call(new Uint32Array(this.__bits.buffer));
 	}
-	static deserialize(str) {
-		const parts = str.split(",");
-		const bits = new Uint8Array(2500);
-		for (let i = 0; i < 2500; i++) bits[i] = +parts[i] || 0;
-		return new CostMatrix(bits);
+	/** 官方 deserialize(array): 接受 serialize() 的数组 (此前误实现为按逗号拆字符串) */
+	static deserialize(data) {
+		const m = new CostMatrix();
+		m.__bits = new Uint8Array(new Uint32Array(data).buffer);
+		return m;
 	}
 }
 
@@ -1564,6 +1745,7 @@ function pathFinderSearch(origin, goal, opts) {
 	const maxOps = opts.maxOps || OP_LIMIT_OPS;
 	const maxCost = opts.maxCost || Infinity;
 	const hw = opts.heuristicWeight === undefined ? 1.2 : opts.heuristicWeight;
+	const flee = !!opts.flee;
 
 	// 房间注册表
 	const roomIndex = new Map(); // name → idx
@@ -1589,7 +1771,8 @@ function pathFinderSearch(origin, goal, opts) {
 	const oRoom = roomData[originIdx];
 
 	function tileCost(room, x, y) {
-		const m = room.matrix ? room.matrix[y * 50 + x] : 0;
+		// CostMatrix 内部列优先 x*50+y (官方 path-finder.js)
+		const m = room.matrix ? room.matrix[x * 50 + y] : 0;
 		if (m === 0xff) return 0xffff;
 		if (m > 0) return m;
 		const t = room.terrain[y * 50 + x];
@@ -1623,6 +1806,17 @@ function pathFinderSearch(origin, goal, opts) {
 		}
 		return false;
 	}
+	// flee: 目标是要远离的东西, 评分 = 到最近 goal 的切比雪夫世界距离 (越大越好)
+	function fleeScore(roomIdx, x, y) {
+		const room = roomData[roomIdx];
+		const wx = room.rx * 50 + x, wy = room.ry * 50 + y;
+		let best = Infinity;
+		for (const a of goalAnchors) {
+			const d = Math.max(Math.abs(wx - a.wx), Math.abs(wy - a.wy)) - a.range;
+			if (d < best) best = d;
+		}
+		return best;
+	}
 
 	// 状态数组: 每房间 2500 格
 	const gCost = [], closed = [], parent = [];
@@ -1640,9 +1834,12 @@ function pathFinderSearch(origin, goal, opts) {
 	// 官方: 搜索不完整时返回通往启发值最低节点的部分路径
 	let bestNode = null;
 	let bestH = Infinity;
-	if (inGoal(originIdx, origin.x, origin.y)) found = { room: originIdx, x: origin.x, y: origin.y };
+	// flee 模式: 记录 "离目标最远" 的节点 (评分最高, 同分取路径最短)
+	let bestFlee = -Infinity;
+	let bestFleeG = Infinity;
+	if (!flee && inGoal(originIdx, origin.x, origin.y)) found = { room: originIdx, x: origin.x, y: origin.y };
 
-	while (!found && heap.size && ops < maxOps) {
+	while ((flee || !found) && heap.size && ops < maxOps) {
 		const node = heap.pop();
 		ops++;
 		const { room: ridx, x, y } = node;
@@ -1650,12 +1847,21 @@ function pathFinderSearch(origin, goal, opts) {
 		if (closed[ridx][ci]) continue;
 		closed[ridx][ci] = 1;
 		if (node.g > gCost[ridx][ci]) continue;
-		const h = heuristic(ridx, x, y);
-		if (h < bestH) {
-			bestH = h;
-			bestNode = { room: ridx, x, y };
+		if (flee) {
+			const s = fleeScore(ridx, x, y);
+			if (s > bestFlee || (s === bestFlee && node.g < bestFleeG)) {
+				bestFlee = s;
+				bestFleeG = node.g;
+				bestNode = { room: ridx, x, y };
+			}
+		} else {
+			const h = heuristic(ridx, x, y);
+			if (h < bestH) {
+				bestH = h;
+				bestNode = { room: ridx, x, y };
+			}
+			if (inGoal(ridx, x, y)) { found = { room: ridx, x, y }; break; }
 		}
-		if (inGoal(ridx, x, y)) { found = { room: ridx, x, y }; break; }
 
 		const room = roomData[ridx];
 		for (let dir = 1; dir <= 8; dir++) {
@@ -1704,7 +1910,7 @@ function pathFinderSearch(origin, goal, opts) {
 
 	const path = [];
 	let cost = 0;
-	const end = found || bestNode;
+	const end = flee ? bestNode : found || bestNode;
 	if (end) {
 		let { room: ridx, x, y } = end;
 		cost = gCost[ridx][y * 50 + x];
@@ -1725,7 +1931,7 @@ function pathFinderSearch(origin, goal, opts) {
 		const oi = path.findIndex((p) => p.isEqualTo(origin));
 		if (oi > 0) path.splice(0, oi);
 	}
-	return { path, ops, cost, incomplete: !found };
+	return { path, ops, cost, incomplete: flee ? ops >= maxOps : !found };
 }
 
 const PathFinder = {
@@ -1761,6 +1967,7 @@ var Memory = null;
 function buildGame() {
 	byId = new Map();
 	__createdCreepNames = new Set();
+	__createdSiteCount = 0;
 	Game = {
 		time: __W.time,
 		rooms: {},
@@ -1795,7 +2002,8 @@ function buildGame() {
 			byId.set(obj.id, obj);
 			if (obj instanceof Creep && obj.my) Game.creeps[obj.name] = obj;
 			if (obj instanceof StructureSpawn && obj.my) Game.spawns[obj.name] = obj;
-			if (obj instanceof Structure && obj.id) Game.structures[obj.id] = obj;
+			// 官方 E/game/game.js:302-305: Game.structures 只含自己的 OwnedStructure
+			if (obj instanceof OwnedStructure && obj.my) Game.structures[obj.id] = obj;
 			if (obj instanceof ConstructionSite && obj.my) Game.constructionSites[obj.id] = obj;
 		}
 	}
@@ -1824,7 +2032,7 @@ function makeCpu(raw) {
 		shardLimits: { shard0: raw.limit },
 		unlocked: false,
 		unlockedTime: undefined,
-		getUsed() { return nowMs() - start; },
+		getUsed() { return nowMs() - start + __intentCpu; },
 		getHeapStatistics() {
 			return { total_heap_size: 0, used_heap_size: 0, heap_size_limit: 0, externally_allocated_size: 0 };
 		},
@@ -1871,18 +2079,16 @@ function makeMap() {
 				}
 				if (cur === null || cur === to) break;
 				visited.add(cur);
-				const [rx, ry] = roomNameToXY(cur);
 				for (const [dir, name] of Object.entries(this.describeExits(cur) || {})) {
+					// 官方: Number(cb(roomName, fromRoomName)) || 1; 返回 Infinity 表示不可进入
 					let cost = 1;
-					if (cb) cost = cb(name, cur);
-					if (cost === Infinity || cost === false || cost === undefined) continue;
+					if (cb) cost = Number(cb(name, cur)) || 1;
 					const nd = curD + cost;
 					if (nd < (dist.get(name) ?? Infinity)) {
 						dist.set(name, nd);
 						prev.set(name, { from: cur, exit: +dir });
 					}
 				}
-				const _ = [rx, ry]; void _;
 			}
 			if (!dist.has(to)) return C.ERR_NO_PATH;
 			const route = [];
@@ -1904,14 +2110,18 @@ function makeMap() {
 			return new Terrain(roomName);
 		},
 		getTerrainAt(x, y, roomName) {
-			return new Terrain(roomName).get(x, y);
+			// 支持 (x, y, roomName) 与 (pos) 两种重载; 返回 'wall'/'swamp'/'plain' (官方为字符串)
+			if (typeof x === "object" && x !== null) { roomName = x.roomName; y = x.y; x = x.x; }
+			const t = new Terrain(roomName).get(x, y);
+			return t & C.TERRAIN_MASK_WALL ? "wall" : t & C.TERRAIN_MASK_SWAMP ? "swamp" : "plain";
 		},
 		isRoomAvailable(roomName) {
 			return __W.roomNames.includes(roomName);
 		},
 		getRoomStatus(roomName) {
-			if (!__W.roomNames.includes(roomName)) return null;
-			return { status: "normal", timestamp: 0 };
+			// 官方恒返回 {status, timestamp}; 场景外房间也一样 (此前返回 null)
+			if (typeof roomName !== "string" || !/^([WE])\d+([NS])\d+$/.test(roomName)) return null;
+			return { status: "normal", timestamp: null };
 		},
 		visual: new RoomVisual("map"),
 	};
@@ -1937,11 +2147,19 @@ function seedRandom(seed) {
 }
 
 const console = {
-	log: (...args) => __consoleLines.push(args.map(fmt).join(" ")),
-	info: (...args) => __consoleLines.push(args.map(fmt).join(" ")),
-	warn: (...args) => __consoleLines.push(args.map(fmt).join(" ")),
-	error: (...args) => __consoleLines.push(args.map(fmt).join(" ")),
+	log: (...args) => __consoleLine(args),
+	info: (...args) => __consoleLine(args),
+	warn: (...args) => __consoleLine(args),
+	error: (...args) => __consoleLine(args),
 };
+/** 控制台输出: 同时写本地缓冲 (正常路径) 与宿主缓冲 (CPU 中断后仍可见日志) */
+function __consoleLine(args) {
+	const line = args.map(fmt).join(" ");
+	__consoleLines.push(line);
+	if (__ops && __ops.op_sim_console) {
+		__ops.op_sim_console(line);
+	}
+}
 globalThis.console = console;
 function fmt(v) {
 	if (typeof v === "string") return v;
@@ -1951,22 +2169,118 @@ function fmt(v) {
 // ═══════════════════════════ RawMemory / 全局暴露 ═══════════════════════════
 
 let rawMemoryData = "";
+/** 本 tick 可读写的内存段 (宿主注入) */
+let __activeSegments = [];
+/** 本 tick setActiveSegments 指定的"下一 tick 激活列表" (官方: 不调用即全部停用) */
+let __nextActiveSegments = null;
+let __publicSegments = null;
+let __defaultPublicSegment = null;
+let __activeForeignSegment = null;
+
+const MAX_MEMORY_SEGMENTS = 10;
+const SEGMENT_MAX_LENGTH = 100 * 1024;
+const RAW_MEMORY_MAX_LENGTH = 2 * 1024 * 1024;
+
+/** 段 ID 校验 (官方 runtime.js: 0..99, 否则抛错) */
+function __segmentId(id) {
+	const n = parseInt(id);
+	if (isNaN(n) || n < 0 || n > 99) {
+		throw new Error(`"${id}" is not a valid segment ID`);
+	}
+	return n;
+}
+
 const RawMemory = {
 	get() { return rawMemoryData; },
-	set(value) { rawMemoryData = value; return C.OK; },
+	set(value) {
+		// 官方: 非字符串 / 超过 2MB 直接抛错
+		if (typeof value !== "string") throw new Error("Raw memory value is not a string");
+		if (value.length > RAW_MEMORY_MAX_LENGTH) throw new Error("Raw memory length exceeded 2 MB limit");
+		rawMemoryData = value;
+		// 官方 Memory 是 rawMemory 的惰性解析视图: set 之后立即反映新内容
+		try {
+			Memory = value ? JSON.parse(value) : {};
+		} catch {
+			Memory = {};
+		}
+		globalThis.Memory = Memory;
+	},
 	segments: {},
 	foreignSegment: null,
-	interShardSegment: null,
-	setActiveSegments() {},
-	setActiveForeignSegment() {},
-	setDefaultPublicSegment() {},
-	setPublicSegments() {},
+	interShardSegment: "",
+	setActiveSegments(ids) {
+		if (!Array.isArray(ids)) throw new Error(`"${ids}" is not an array`);
+		if (ids.length > MAX_MEMORY_SEGMENTS) {
+			throw new Error("Only 10 memory segments can be active at the same time");
+		}
+		__nextActiveSegments = ids.map(__segmentId);
+	},
+	setPublicSegments(ids) {
+		if (!Array.isArray(ids)) throw new Error(`"${ids}" is not an array`);
+		__publicSegments = ids.map(__segmentId);
+	},
+	setDefaultPublicSegment(id) {
+		__defaultPublicSegment = id === null ? null : __segmentId(id);
+	},
+	setActiveForeignSegment(username, id) {
+		if (username === null) {
+			__activeForeignSegment = null;
+			return;
+		}
+		__activeForeignSegment = { username, id: id === undefined ? undefined : __segmentId(id) };
+	},
 };
 const InterShardMemory = {
 	getLocal() { return ""; },
 	setLocal() {},
 	getRemote() { return ""; },
 };
+
+// ── 独立类型 (此前都别名为 RoomObject, 导致 `x instanceof Mineral` 恒为真) ──
+class Mineral extends RoomObject {
+	constructor(raw) {
+		super(raw);
+		this.mineralType = raw.mineralType;
+		this.mineralAmount = raw.mineralAmount;
+		this.density = raw.density;
+		this.ticksToRegeneration = raw.ticksToRegeneration;
+	}
+}
+class Deposit extends RoomObject {
+	constructor(raw) {
+		super(raw);
+		this.depositType = raw.depositType;
+		this.cooldown = raw.cooldown || 0;
+		this.ticksToDecay = raw.ticksToDecay;
+	}
+}
+class Ruin extends RoomObject {
+	constructor(raw) {
+		super(raw);
+		this.store = makeStore(raw.store, Infinity, null);
+		this.structure = raw.structureType ? { structureType: raw.structureType } : undefined;
+		this.ticksToDecay = raw.ticksToDecay;
+	}
+}
+class Nuke extends RoomObject {
+	constructor(raw) {
+		super(raw);
+		this.timeToLand = raw.timeToLand;
+		this.launchRoomName = raw.launchRoomName;
+	}
+}
+class PowerCreep extends RoomObject {
+	constructor(raw) {
+		super(raw);
+		this.name = raw.name;
+		this.my = raw.my !== false;
+		this.owner = { username: "Nexus" };
+		this.store = makeStore(raw.store, Infinity, null);
+		this.hits = raw.hits;
+		this.hitsMax = raw.hitsMax;
+		this.ticksToLive = raw.ticksToLive;
+	}
+}
 
 /** 全局类导出: 真实实现的直接挂载, 未实现的挂占位基类 */
 const GLOBAL_CLASSES = {
@@ -1976,7 +2290,7 @@ const GLOBAL_CLASSES = {
 	StructureContainer, StructureTerminal, StructureTower, StructureLink, StructureLab,
 	StructureNuker, StructureObserver, StructurePowerSpawn, StructureExtractor,
 	StructureFactory, StructureRoad, StructureWall, StructureRampart,
-	Ruin: RoomObject, Mineral: RoomObject, Deposit: RoomObject, Nuke: RoomObject, PowerCreep: RoomObject,
+	Ruin, Mineral, Deposit, Nuke, PowerCreep,
 };
 for (const [name, cls] of Object.entries(GLOBAL_CLASSES)) {
 	globalThis[name] = cls;
@@ -2035,6 +2349,8 @@ function __runTick() {
 	const errors = [];
 	let cpuUsed = 0;
 	__intents = [];
+	__intentKeys = new Set();
+	__intentCpu = 0;
 	__consoleLines = [];
 	try {
 		__W = JSON.parse(__ops.op_sim_get_snapshot());
@@ -2044,6 +2360,21 @@ function __runTick() {
 			Memory = rawMemoryData ? JSON.parse(rawMemoryData) : {};
 		} catch {
 			Memory = {};
+		}
+		// 内存段: 宿主注入本 tick 激活的段 (官方 driver 的 data.memorySegments)
+		__nextActiveSegments = null;
+		__publicSegments = null;
+		__defaultPublicSegment = null;
+		__activeForeignSegment = null;
+		RawMemory.segments = {};
+		try {
+			const rt = JSON.parse((__ops.op_sim_get_runtime && __ops.op_sim_get_runtime()) || "{}");
+			__activeSegments = rt.activeSegments || [];
+			for (const id of __activeSegments) {
+				RawMemory.segments[id] = (rt.segments || {})[id] || "";
+			}
+		} catch {
+			__activeSegments = [];
 		}
 		globalThis.Game = Game;
 		globalThis.Memory = Memory;
@@ -2056,7 +2387,8 @@ function __runTick() {
 			} catch (e) {
 				errors.push(e && e.stack ? String(e.stack) : String(e));
 			}
-			cpuUsed = nowMs() - t0;
+			// 官方 usedTime = ceil(nowCpuTime() - startTime + intents.cpu): 意图计价计入本 tick CPU
+			cpuUsed = Math.ceil(nowMs() - t0 + __intentCpu);
 		} else {
 			errors.push("bot bundle 未导出 loop 函数");
 		}
@@ -2069,12 +2401,51 @@ function __runTick() {
 	} catch {
 		memoryOut = "{}";
 	}
+	// 官方 saveUserMemory: 序列化后超过 2MB 拒绝保存 (memory 置 null → 宿主保留上一 tick 的值)
+	if (memoryOut.length > RAW_MEMORY_MAX_LENGTH) {
+		errors.push("Script execution has been terminated: memory allocation limit reached");
+		memoryOut = null;
+	}
+	// 内存段写回 + 校验 (官方 runtime.js 结尾: ≤10 段 / id 0..99 / 必须字符串 / ≤100KB)
+	let memorySegments;
+	const segKeys = Object.keys(RawMemory.segments);
+	if (segKeys.length > 0) {
+		if (segKeys.length > MAX_MEMORY_SEGMENTS) {
+			errors.push("Cannot save more than 10 memory segments on the same tick");
+		} else {
+			const out = {};
+			for (const k of segKeys) {
+				const key = parseInt(k);
+				const value = RawMemory.segments[k];
+				if (isNaN(key) || key < 0 || key > 99) {
+					errors.push(`"${k}" is not a valid memory segment ID`);
+					break;
+				}
+				if (typeof value !== "string") {
+					errors.push(`Memory segment #${k} is not a string`);
+					break;
+				}
+				if (value.length > SEGMENT_MAX_LENGTH) {
+					errors.push(`Memory segment #${k} has exceeded 100 KB length limit`);
+					break;
+				}
+				out[key] = value;
+			}
+			if (Object.keys(out).length === segKeys.length) memorySegments = out;
+		}
+	}
 	const result = JSON.stringify({
 		intents: __intents,
 		memory: memoryOut,
 		cpuUsed,
 		errors,
 		console: __consoleLines.slice(0, 50),
+		memorySegments,
+		// 官方: 本 tick 未调用 setActiveSegments 即视为下一 tick 无激活段
+		activeSegments: __nextActiveSegments || [],
+		publicSegments: __publicSegments,
+		defaultPublicSegment: __defaultPublicSegment,
+		activeForeignSegment: __activeForeignSegment,
 	});
 	__ops.op_sim_result(result);
 	return result;

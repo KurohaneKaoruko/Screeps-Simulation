@@ -1,0 +1,172 @@
+//! 运行框架语义: 全局重置 (isolate 重建、全局变量丢失、Memory 保留) 与场景加载校验。
+
+use nexus_sim::engine::scenario::{build_world, Scenario};
+use nexus_sim::engine::snapshot::{build_snapshot, CpuView, SnapshotOptions};
+use nexus_sim::engine::world::World;
+use nexus_sim::runtime::BotRuntime;
+
+const ROOM: &str = r#"{
+	"name": "t",
+	"seed": 1,
+	"rooms": [
+		{ "name": "W5N8", "terrain": { "kind": "flat" },
+		  "sources": { "positions": [[18, 22]] },
+		  "controller": { "level": 1, "pos": [28, 27] },
+		  "structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 }] }
+	]
+}"#;
+
+fn in_tokio<F: FnOnce()>(f: F) {
+	let rt = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.expect("tokio runtime");
+	rt.block_on(async { f() });
+}
+
+fn snapshot(world: &World) -> String {
+	let snap = build_snapshot(
+		world,
+		&SnapshotOptions {
+			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
+			always_visible: false,
+		},
+	);
+	serde_json::to_string(&snap).unwrap()
+}
+
+fn console_json(r: &nexus_sim::runtime::TickResult) -> serde_json::Value {
+	serde_json::from_str(r.console.first().map(String::as_str).unwrap_or("{}")).unwrap()
+}
+
+/// 全局重置: 全局变量清零, Memory 与内存段保留 (官方 global reset 语义)
+#[test]
+fn global_reset_clears_globals_but_keeps_memory_and_segments() {
+	in_tokio(|| {
+		let scenario = Scenario::from_json(ROOM).unwrap();
+		let world = build_world(&scenario).unwrap();
+		let bundle = r#"
+			exports.loop = function() {
+				globalThis.__g = (globalThis.__g || 0) + 1;
+				Memory.runs = (Memory.runs || 0) + 1;
+				RawMemory.segments[7] = "seg" + Memory.runs;
+				RawMemory.setActiveSegments([7]);
+				console.log(JSON.stringify({ g: globalThis.__g, mem: Memory.runs }));
+			};
+		"#;
+		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let snap = snapshot(&world);
+		let mut memory = String::from("{}");
+
+		let r1 = bot.run_tick(&snap, &memory).unwrap();
+		assert_eq!(console_json(&r1)["g"], 1);
+		assert_eq!(console_json(&r1)["mem"], 1);
+		memory = r1.memory.clone();
+
+		let r2 = bot.run_tick(&snap, &memory).unwrap();
+		assert_eq!(console_json(&r2)["g"], 2, "未重置时全局变量应跨 tick 累加");
+		assert_eq!(console_json(&r2)["mem"], 2, "Memory 应跨 tick 往返");
+		memory = r2.memory.clone();
+
+		bot.reset_global().unwrap();
+
+		let r3 = bot.run_tick(&snap, &memory).unwrap();
+		assert_eq!(console_json(&r3)["g"], 1, "重置后全局变量应从零开始");
+		assert_eq!(console_json(&r3)["mem"], 3, "Memory 必须跨全局重置保留");
+		assert_eq!(bot.segments().get(&7).map(String::as_str), Some("seg3"), "内存段也应保留");
+	});
+}
+
+/// 场景校验: 各类非法输入都应在加载阶段报错 (带定位信息)
+#[test]
+fn scenario_validation_rejects_bad_input() {
+	let cases: Vec<(&str, String, &str)> = vec![
+		("空 rooms", r#"{"name":"x","rooms":[]}"#.to_string(), "rooms 不能为空"),
+		("空 name", r#"{"name":"  ","rooms":[{"name":"W5N8"}]}"#.to_string(), "name 不能为空"),
+		(
+			"非法房名",
+			r#"{"name":"x","rooms":[{"name":"W5N8x"}]}"#.to_string(),
+			"非法房名",
+		),
+		(
+			"重复房间",
+			r#"{"name":"x","rooms":[{"name":"W5N8"},{"name":"W5N8"}]}"#.to_string(),
+			"重复定义",
+		),
+		(
+			"坐标越界",
+			r#"{"name":"x","rooms":[{"name":"W5N8","controller":{"level":1,"pos":[60,10]}}]}"#
+				.to_string(),
+			"超出 0..49",
+		),
+		(
+			"等级越界",
+			r#"{"name":"x","rooms":[{"name":"W5N8","controller":{"level":9}}]}"#.to_string(),
+			"超出 0..8",
+		),
+		(
+			"未知部件",
+			r#"{"name":"x","rooms":[{"name":"W5N8","creeps":[{"name":"a","body":["fly"],"pos":[1,1]}]}]}"#
+				.to_string(),
+			"未知部件",
+		),
+		(
+			"单位重名",
+			r#"{"name":"x","rooms":[{"name":"W5N8","creeps":[{"name":"a","body":["move"],"pos":[1,1]},{"name":"a","body":["move"],"pos":[2,2]}]}]}"#
+				.to_string(),
+			"重复",
+		),
+		(
+			"未知结构",
+			r#"{"name":"x","rooms":[{"name":"W5N8","structures":[{"type":"ufo","pos":[1,1]}]}]}"#
+				.to_string(),
+			"未知结构类型",
+		),
+		(
+			"ticks=0",
+			r#"{"name":"x","ticks":0,"rooms":[{"name":"W5N8"}]}"#.to_string(),
+			"ticks 必须 > 0",
+		),
+		(
+			"cpu.limit=0",
+			r#"{"name":"x","cpu":{"limit":0},"rooms":[{"name":"W5N8"}]}"#.to_string(),
+			"cpu.limit 必须 > 0",
+		),
+		(
+			"globalResetEvery=0",
+			r#"{"name":"x","globalResetEvery":0,"rooms":[{"name":"W5N8"}]}"#.to_string(),
+			"globalResetEvery 必须 > 0",
+		),
+		(
+			"terrain.raw 长度",
+			r#"{"name":"x","rooms":[{"name":"W5N8","terrain":{"kind":"raw","data":"123"}}]}"#
+				.to_string(),
+			"terrain.raw 长度应为 2500",
+		),
+	];
+	for (label, json, expect) in cases {
+		let err = Scenario::from_json(&json).expect_err(&format!("{label} 应被拒绝"));
+		assert!(err.contains(expect), "{label}: 期望含 {expect:?}, 实际 {err:?}");
+	}
+}
+
+/// 合法场景 (含全局重置与 CPU 强制) 应能正常加载
+#[test]
+fn scenario_validation_accepts_valid_input() {
+	let json = r#"{
+		"name": "ok",
+		"ticks": 100,
+		"cpu": { "limit": 20, "bucket": 500, "enforce": true },
+		"globalResetEvery": 500,
+		"rooms": [
+			{ "name": "W5N8", "terrain": { "kind": "flat" },
+			  "controller": { "level": 8, "pos": [0, 49] },
+			  "creeps": [{ "name": "a", "body": ["move", "carry", "work"], "pos": [49, 0] }],
+			  "structures": [{ "type": "constructedWall", "pos": [1, 1] }] }
+		]
+	}"#;
+	let s = Scenario::from_json(json).unwrap();
+	assert!(s.cpu_enforce());
+	assert_eq!(s.global_reset_every(), Some(500));
+	assert_eq!(s.cpu_limit(), 20.0);
+}

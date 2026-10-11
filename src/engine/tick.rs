@@ -7,7 +7,7 @@ use crate::engine::intents::{self, IntentList, TickEffects};
 use crate::engine::movement::{self, Movement};
 use crate::engine::objects;
 use crate::engine::terrain::ROOM_SIZE;
-use crate::engine::world::{alloc_id, World};
+use crate::engine::world::World;
 use serde_json::json;
 
 pub struct TickOutcome {
@@ -40,14 +40,14 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
             if let Some(obj) = room.objects.get(id) {
                 let nx = (obj.x as i32 + dx) as u8;
                 let ny = (obj.y as i32 + dy) as u8;
-                movement.add(*id, nx, ny, *old_fatigue);
+                movement.add(room_name, *id, nx, ny, *old_fatigue);
             }
         }
     }
 
-    // 2) 每房间移动仲裁
-    for room in world.rooms.values() {
-        movement.check(room);
+    // 2) 每房间移动仲裁 (官方 processor.js:225,324: 每房间各自 movement.check)
+    for (room_name, room) in &world.rooms {
+        movement.check(room_name, room);
     }
 
     // 3) 逐对象 tick (id 序)
@@ -65,6 +65,7 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
         tick_spawns(world, room_name, &mut movement);
         tick_controllers(world, room_name);
         tick_decay_structures(world, room_name);
+        tick_cooldowns(world, room_name);
         tick_tombstones(world, room_name);
     }
     apply_crossings(world, &mut pending_crossings);
@@ -82,36 +83,9 @@ fn apply_suicides(world: &mut World, effects: &TickEffects) {
             .and_then(|r| r.objects.remove(id));
         if let Some(obj) = removed {
             world.creeps_lost += 1;
-            bury_creep(world, room_name, obj);
+            intents::bury_creep(world, room_name, obj, constants::CREEP_CORPSE_RATE);
         }
     }
-}
-
-/// 单位死亡: 携带资源先装入同格容器, 装不下的部分进入墓碑 (官方 _die.js:37-91)。
-/// 自杀与自然死亡共用。
-fn bury_creep(world: &mut World, room_name: &str, obj: objects::Obj) {
-    let room = world.rooms.get_mut(room_name).unwrap();
-    let mut remain = objects::Store::new();
-    for (resource, amount) in &obj.store {
-        if *amount == 0 {
-            continue;
-        }
-        let left = intents::fill_container(room, obj.x, obj.y, resource, *amount);
-        if left > 0 {
-            remain.insert(resource.clone(), left);
-        }
-    }
-    let tomb_id = alloc_id(&mut world.next_id);
-    let decay = world.tick + obj.body.len() as u64 * constants::TOMBSTONE_DECAY_PER_PART;
-    let mut tomb = objects::tombstone(
-        tomb_id,
-        obj.x,
-        obj.y,
-        obj.name.as_deref().unwrap_or(""),
-        decay,
-    );
-    tomb.store = remain;
-    room.objects.insert(tomb_id, tomb);
 }
 
 /// 掉落能量: 每 tick ceil(amount / 1000) 衰减
@@ -221,7 +195,7 @@ fn tick_creeps(
                 .unwrap();
             world.creeps_lost += 1;
             deaths.push(name);
-            bury_creep(world, room_name, dead);
+            intents::bury_creep(world, room_name, dead, constants::CREEP_CORPSE_RATE);
             continue;
         }
 
@@ -370,17 +344,18 @@ fn controller_levels(level: u8) -> u32 {
         .unwrap_or(u32::MAX)
 }
 
-/// 道路/容器衰减
+/// 道路/容器/rampart 衰减
 fn tick_decay_structures(world: &mut World, room_name: &str) {
     let tick = world.tick;
     let owned = world.rooms[room_name]
         .controller()
         .map(|c| c.mine && c.level > 0)
         .unwrap_or(false);
+    let rcl = world.rooms[room_name].rcl();
     let ids: Vec<u64> = world.rooms[room_name]
         .objects
         .values()
-        .filter(|o| o.obj_type == "road" || o.obj_type == "container")
+        .filter(|o| o.obj_type == "road" || o.obj_type == "container" || o.obj_type == "rampart")
         .map(|o| o.id)
         .collect();
     for id in ids {
@@ -393,14 +368,23 @@ fn tick_decay_structures(world: &mut World, room_name: &str) {
         if !due {
             continue;
         }
-        let decay_amount = if obj.obj_type == "road" {
-            let mut amount = constants::ROAD_DECAY_AMOUNT as u32;
-            if room.terrain.is_swamp(obj.x as usize, obj.y as usize) {
-                amount *= constants::CONSTRUCTION_COST_ROAD_SWAMP_RATIO;
+        let decay_amount = match obj.obj_type.as_str() {
+            "road" => {
+                // 官方 roads/tick.js:16-19: 沼泽 ×5, 墙 ×150
+                let mut amount = constants::ROAD_DECAY_AMOUNT as u32;
+                if room.terrain.is_wall(obj.x as usize, obj.y as usize) {
+                    amount *= constants::CONSTRUCTION_COST_ROAD_WALL_RATIO;
+                } else if room.terrain.is_swamp(obj.x as usize, obj.y as usize) {
+                    amount *= constants::CONSTRUCTION_COST_ROAD_SWAMP_RATIO;
+                }
+                amount
             }
-            amount
-        } else {
-            constants::CONTAINER_DECAY
+            "rampart" => {
+                // 官方 ramparts/tick.js:19-40: 每 100t 减 300, hitsMax 按 RCL
+                obj.hits_max = constants::rampart_hits_max(rcl);
+                constants::RAMPART_DECAY_AMOUNT
+            }
+            _ => constants::CONTAINER_DECAY,
         };
         obj.hits = obj.hits.saturating_sub(decay_amount);
         if obj.hits == 0 {
@@ -415,14 +399,23 @@ fn tick_decay_structures(world: &mut World, room_name: &str) {
                 }
             }
         } else {
-            let interval = if obj.obj_type == "road" {
-                constants::ROAD_DECAY_TIME
-            } else if owned {
-                constants::CONTAINER_DECAY_TIME_OWNED
-            } else {
-                constants::CONTAINER_DECAY_TIME
+            let interval = match obj.obj_type.as_str() {
+                "road" => constants::ROAD_DECAY_TIME,
+                "rampart" => constants::RAMPART_DECAY_TIME,
+                _ if owned => constants::CONTAINER_DECAY_TIME_OWNED,
+                _ => constants::CONTAINER_DECAY_TIME,
             };
             obj.next_decay_time = Some(tick + interval);
+        }
+    }
+}
+
+/// link 冷却: 每 tick 减 1 (官方 links/tick.js, 在意图结算之后执行)
+fn tick_cooldowns(world: &mut World, room_name: &str) {
+    let room = world.rooms.get_mut(room_name).unwrap();
+    for o in room.objects.values_mut() {
+        if o.cooldown > 0 {
+            o.cooldown -= 1;
         }
     }
 }

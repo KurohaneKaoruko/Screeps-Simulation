@@ -162,6 +162,9 @@ fn object_json(obj: &Obj, world: &World) -> Value {
                 extra.insert("energy".into(), json!(energy));
                 extra.insert("energyCapacity".into(), json!(obj.energy_capacity));
             }
+            if obj.obj_type == "link" {
+                extra.insert("cooldown".into(), json!(obj.cooldown));
+            }
             if obj.obj_type == "container" || obj.obj_type == "storage" {
                 if let Some(t) = obj.next_decay_time {
                     extra.insert("ticksToDecay".into(), json!(t.saturating_sub(world.tick)));

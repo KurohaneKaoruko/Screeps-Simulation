@@ -155,6 +155,10 @@ pub struct Scenario {
     /// 用确定性 Math.random (复现实验)
     #[serde(default = "default_true")]
     pub deterministic_random: bool,
+    /// 每 N tick 重建 isolate 做一次"全局重置"(官方由 isolate 堆占用触发, 这里提供确定性开关)。
+    /// 全局变量丢失、Memory 与内存段保留。
+    #[serde(default, rename = "globalResetEvery")]
+    pub global_reset_every: Option<u64>,
     #[serde(default)]
     pub rooms: Vec<RoomSpec>,
     #[serde(default)]
@@ -166,8 +170,101 @@ fn default_true() -> bool {
 }
 
 impl Scenario {
+    /// 解析 + 校验场景 (校验在构建世界之前, 错误信息带房间/字段定位)
     pub fn from_json(text: &str) -> Result<Scenario, String> {
-        serde_json::from_str(text).map_err(|e| format!("场景解析失败: {e}"))
+        let scenario: Scenario =
+            serde_json::from_str(text).map_err(|e| format!("场景解析失败: {e}"))?;
+        scenario.validate()?;
+        Ok(scenario)
+    }
+
+    /// 场景校验: 房名/坐标/等级/结构类型/部件名/重复定义/数值范围
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("场景 name 不能为空".into());
+        }
+        if self.rooms.is_empty() {
+            return Err("场景 rooms 不能为空".into());
+        }
+        if self.ticks == Some(0) {
+            return Err("ticks 必须 > 0".into());
+        }
+        if self.cpu_limit() <= 0.0 {
+            return Err(format!("cpu.limit 必须 > 0 (当前 {})", self.cpu_limit()));
+        }
+        if self.cpu_bucket() < 0.0 {
+            return Err(format!("cpu.bucket 不能为负 (当前 {})", self.cpu_bucket()));
+        }
+        if let Some(n) = self.global_reset_every {
+            if n == 0 {
+                return Err("globalResetEvery 必须 > 0 (不设置表示不重置)".into());
+            }
+        }
+        let mut rooms = std::collections::BTreeSet::new();
+        for room in &self.rooms {
+            if !is_valid_room_name(&room.name) {
+                return Err(format!("非法房名 {:?} (应形如 W5N8 / E12S3)", room.name));
+            }
+            if !rooms.insert(room.name.clone()) {
+                return Err(format!("房间 {} 重复定义", room.name));
+            }
+            if let Some(ctrl) = &room.controller {
+                if ctrl.level > 8 {
+                    return Err(format!("{} 控制器等级 {} 超出 0..8", room.name, ctrl.level));
+                }
+                if let Some(pos) = ctrl.pos {
+                    check_pos(&room.name, "controller", pos)?;
+                }
+            }
+            if let Some(SourcesSpec::Explicit { positions }) = &room.sources {
+                if positions.is_empty() {
+                    return Err(format!("{} sources.positions 不能为空", room.name));
+                }
+                for pos in positions {
+                    check_pos(&room.name, "source", *pos)?;
+                }
+            }
+            let mut creeps = std::collections::BTreeSet::new();
+            for cr in &room.creeps {
+                check_pos(&room.name, "creep", cr.pos)?;
+                if cr.body.is_empty() {
+                    return Err(format!("{} 单位 {} 身体不能为空", room.name, cr.name));
+                }
+                if cr.body.len() > constants::MAX_CREEP_SIZE {
+                    return Err(format!(
+                        "{} 单位 {} 部件数 {} 超过 {}",
+                        room.name,
+                        cr.name,
+                        cr.body.len(),
+                        constants::MAX_CREEP_SIZE
+                    ));
+                }
+                for part in &cr.body {
+                    if !constants::is_known_bodypart(part) {
+                        return Err(format!("{} 单位 {} 含未知部件 {:?}", room.name, cr.name, part));
+                    }
+                }
+                if !creeps.insert(cr.name.clone()) {
+                    return Err(format!("{} 单位名 {} 重复", room.name, cr.name));
+                }
+            }
+            for st in &room.structures {
+                check_pos(&room.name, "structure", st.pos)?;
+                if !constants::is_known_structure_type(&st.structure_type) {
+                    return Err(format!("{} 未知结构类型 {:?}", room.name, st.structure_type));
+                }
+            }
+            if let Some(TerrainSpec::Raw { data }) = &room.terrain {
+                if data.len() != 2500 {
+                    return Err(format!(
+                        "{} terrain.raw 长度应为 2500, 实际 {}",
+                        room.name,
+                        data.len()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn cpu_limit(&self) -> f64 {
@@ -189,6 +286,34 @@ impl Scenario {
     pub fn cpu_enforce(&self) -> bool {
         self.cpu.as_ref().map(|c| c.enforce).unwrap_or(false)
     }
+
+    /// 全局重置间隔 (None / 0 表示不重置)
+    pub fn global_reset_every(&self) -> Option<u64> {
+        self.global_reset_every.filter(|n| *n > 0)
+    }
+}
+
+/// 坐标必须落在 50×50 房间内
+fn check_pos(room: &str, what: &str, pos: [u8; 2]) -> Result<(), String> {
+    if pos[0] > 49 || pos[1] > 49 {
+        return Err(format!("{} {} 坐标 [{}, {}] 超出 0..49", room, what, pos[0], pos[1]));
+    }
+    Ok(())
+}
+
+/// 房名形如 W5N8 / E12S3 (与引擎 apply_crossings 的解析保持一致)
+fn is_valid_room_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(horiz) = chars.next() else { return false };
+    if horiz != 'W' && horiz != 'E' {
+        return false;
+    }
+    let rest: String = chars.collect();
+    let Some((x, y)) = rest.split_once(['N', 'S']) else { return false };
+    if x.is_empty() || y.is_empty() || x.len() > 3 || y.len() > 3 {
+        return false;
+    }
+    x.chars().all(|c| c.is_ascii_digit()) && y.chars().all(|c| c.is_ascii_digit())
 }
 
 /// 场景 → 世界: 放置地形/Source/控制器/结构/单位
@@ -260,7 +385,13 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
         let mut spawn_index = 0u32;
         for st in &spec.structures {
             let id = alloc_id(&mut world.next_id);
-            let mut obj = objects::structure(id, &st.structure_type, st.pos[0], st.pos[1], true);
+            let mut obj = objects::structure(
+                id,
+                &st.structure_type,
+                st.pos[0],
+                st.pos[1],
+                constants::is_owned_structure(&st.structure_type),
+            );
             if let Some(e) = st.energy {
                 obj.store.insert("energy".into(), e);
             }

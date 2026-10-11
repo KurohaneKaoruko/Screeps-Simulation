@@ -10,12 +10,13 @@ use std::collections::BTreeMap;
 
 #[derive(Default)]
 pub struct Movement {
-    /// 目标格 → 想要进入的对象 (登记顺序)
-    matrix: BTreeMap<(u8, u8), Vec<u64>>,
-    /// 仲裁后每个对象的落点
+    /// (房名, 目标格) → 想要进入的对象 (登记顺序)。按房名隔离,
+    /// 否则多房间同坐标会互相冲突, 且后处理房间会取消前面房间的移动。
+    matrix: BTreeMap<(String, u8, u8), Vec<u64>>,
+    /// 仲裁后每个对象的落点 (对象 id 全局唯一, 无需按房隔离)
     resolved: BTreeMap<u64, (u8, u8)>,
-    /// 各格竞争计数 (受压优先仲裁用)
-    affected_cnt: BTreeMap<(u8, u8), usize>,
+    /// (房名, 格) 竞争计数 (受压优先仲裁用)
+    affected_cnt: BTreeMap<(String, u8, u8), usize>,
     /// move 意图提交时的疲劳快照 (engine: _oldFatigue, 提交时疲劳非 0 则不可动)
     old_fatigue: BTreeMap<u64, u32>,
 }
@@ -28,16 +29,16 @@ impl Movement {
         self.old_fatigue.clear();
     }
 
-    pub fn add(&mut self, id: u64, x: u8, y: u8, old_fatigue: u32) {
-        let key = (x, y);
-        self.matrix.entry(key).or_default().push(id);
+    pub fn add(&mut self, room_name: &str, id: u64, x: u8, y: u8, old_fatigue: u32) {
+        let key = (room_name.to_string(), x, y);
+        self.matrix.entry(key.clone()).or_default().push(id);
         *self.affected_cnt.entry(key).or_insert(0) += 1;
         self.old_fatigue.insert(id, old_fatigue);
     }
 
     /// 目标格是否有对象正在进入 (出生放置用)
-    pub fn is_tile_busy(&self, x: u8, y: u8) -> bool {
-        self.matrix.contains_key(&(x, y))
+    pub fn is_tile_busy(&self, room_name: &str, x: u8, y: u8) -> bool {
+        self.matrix.contains_key(&(room_name.to_string(), x, y))
     }
 
     fn can_move(&self, id: u64, obj: &Obj) -> bool {
@@ -76,25 +77,40 @@ impl Movement {
         room.terrain.is_wall(x, y) && !has_road
     }
 
-    /// 碰撞仲裁: 官方 rate1(原格受压)→rate2(被拉)→rate3(拉人)→rate4(移动比) 排序取每格胜者,
+    /// 碰撞仲裁: 官方 rate1(交换对象)→rate2(被拉)→rate3(拉人)→rate4(移动比) 排序取每格胜者,
     /// 败者与被阻挡者不移动, 且连锁取消要进入其原格的对象。
-    pub fn check(&mut self, room: &Room) {
+    /// 只处理 `room_name` 房间的登记; 每个房间各自 `check` (官方 processor.js:225,324)。
+    pub fn check(&mut self, room_name: &str, room: &Room) {
+        let rn = room_name.to_string();
         // 第一轮: 每个目标格选出胜者
-        for (&key, candidates) in &self.matrix {
+        for ((mrn, kx, ky), candidates) in &self.matrix {
+            if mrn != &rn {
+                continue;
+            }
+            let key = (*kx, *ky);
             let winner = if candidates.len() > 1 {
                 let mut rated: Vec<(u32, u32, u32, f64, u64)> = candidates
                     .iter()
                     .filter_map(|id| room.objects.get(id).map(|obj| (*id, obj)))
                     .map(|(id, obj)| {
+                        let origin = (obj.x, obj.y);
+                        // rate1: 交换对象 —— matrix[我的起点] 里有正站在争夺格 (key) 上的 creep,
+                        // 即对方要进我的起点、我要进对方的格子 (官方 movement.js:124-128)
                         let rate1 = if self
                             .matrix
-                            .get(&(obj.x, obj.y))
-                            .is_some_and(|arr| arr.contains(&id))
+                            .get(&(rn.clone(), origin.0, origin.1))
+                            .is_some_and(|arr| {
+                                arr.iter().any(|&other| {
+                                    room.objects
+                                        .get(&other)
+                                        .is_some_and(|o| o.x == key.0 && o.y == key.1)
+                                })
+                            })
                         {
                             100
                         } else {
                             self.affected_cnt
-                                .get(&(obj.x, obj.y))
+                                .get(&(rn.clone(), origin.0, origin.1))
                                 .copied()
                                 .unwrap_or(0) as u32
                         };
@@ -117,24 +133,21 @@ impl Movement {
             }
         }
 
-        // 第二轮: 不可动 / 目标被占 → 移除并连锁
-        let keys: Vec<(u8, u8)> = self.resolved.values().copied().collect();
-        for key in keys {
-            if !self.resolved.values().any(|&k| k == key) {
-                continue;
-            }
-            let blocked = self
-                .resolved
-                .iter()
-                .find(|(_, &k)| k == key)
-                .map(|(&id, _)| {
-                    room.objects
-                        .get(&id)
-                        .map(|obj| {
-                            !self.can_move(id, obj)
-                                || Self::check_obstacle_at(room, key.0 as usize, key.1 as usize, &self.resolved)
-                        })
-                        .unwrap_or(true)
+        // 第二轮: 不可动 / 目标被占 → 移除并连锁 (只处理本房间的已决移动)
+        let ids: Vec<u64> = self
+            .resolved
+            .keys()
+            .filter(|id| room.objects.contains_key(id))
+            .copied()
+            .collect();
+        for id in ids {
+            let Some(&key) = self.resolved.get(&id) else { continue };
+            let blocked = room
+                .objects
+                .get(&id)
+                .map(|obj| {
+                    !self.can_move(id, obj)
+                        || Self::check_obstacle_at(room, key.0 as usize, key.1 as usize, &self.resolved)
                 })
                 .unwrap_or(true);
             if blocked {
@@ -285,7 +298,7 @@ pub fn find_birth_tile(
         if room.terrain.is_wall(nx as usize, ny as usize) {
             continue;
         }
-        if movement.is_tile_busy(nx, ny) {
+        if movement.is_tile_busy(&room.name, nx, ny) {
             continue;
         }
         let blocked = room.objects.values().any(|o| {

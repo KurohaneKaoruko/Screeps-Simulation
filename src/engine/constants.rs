@@ -22,6 +22,39 @@ pub fn bodypart_cost(part: &str) -> u32 {
         .unwrap_or(0)
 }
 
+/// 合法身体部件名 (官方 BODYPART_COST 的键集合)
+pub fn is_known_bodypart(part: &str) -> bool {
+    BODYPART_COST.iter().any(|(p, _)| *p == part)
+}
+
+/// 场景可放置的结构类型 (structure_hits 覆盖的集合 + 控制器/传送门等特殊类型)
+pub fn is_known_structure_type(t: &str) -> bool {
+    matches!(
+        t,
+        "spawn"
+            | "extension"
+            | "road"
+            | "constructedWall"
+            | "rampart"
+            | "link"
+            | "storage"
+            | "tower"
+            | "observer"
+            | "powerSpawn"
+            | "extractor"
+            | "lab"
+            | "terminal"
+            | "container"
+            | "nuker"
+            | "factory"
+            | "keeperLair"
+            | "powerBank"
+            | "portal"
+            | "controller"
+            | "invaderCore"
+    )
+}
+
 pub const MAX_CREEP_SIZE: usize = 50;
 
 /// 生命周期与功率
@@ -42,6 +75,20 @@ pub const SPAWN_HITS: u32 = 5000;
 pub const SPAWN_ENERGY_START: u32 = 300;
 pub const SPAWN_ENERGY_CAPACITY: u32 = 300;
 pub const CREEP_SPAWN_TIME: u64 = 3;
+/// 官方 SPAWN_RENEW_RATIO: renew 的寿命恢复/能量消耗系数
+pub const SPAWN_RENEW_RATIO: f64 = 1.2;
+
+/// Tower (官方 TOWER_*)
+pub const TOWER_ENERGY_COST: u32 = 10;
+pub const TOWER_POWER_ATTACK: f64 = 600.0;
+pub const TOWER_POWER_HEAL: f64 = 400.0;
+pub const TOWER_POWER_REPAIR: f64 = 800.0;
+pub const TOWER_OPTIMAL_RANGE: f64 = 5.0;
+pub const TOWER_FALLOFF_RANGE: f64 = 20.0;
+pub const TOWER_FALLOFF: f64 = 0.75;
+
+/// Link (官方 LINK_*)
+pub const LINK_COOLDOWN: u32 = 1;
 
 /// Source / 掉落能量
 pub const SOURCE_ENERGY_CAPACITY: u32 = 3000;
@@ -178,8 +225,7 @@ pub fn structure_energy_capacity(structure_type: &str, rcl: u8) -> u32 {
 }
 
 /// 阻挡移动的对象类型 (OBSTACLE_OBJECT_TYPES, 官方驱动常量)
-pub const OBSTACLE_OBJECT_TYPES: &[&str] = &[
-    "spawn",
+pub const OBSTACLE_OBJECT_TYPES: &[&str] = &[    "spawn",
     "creep",
     "powerCreep",
     "source",
@@ -200,6 +246,28 @@ pub const OBSTACLE_OBJECT_TYPES: &[&str] = &[
     "factory",
     "invaderCore",
 ];
+
+/// 属于 `OwnedStructure` 的结构类型 (官方 API: 只有这些有 `owner`, 才带 `user`)。
+/// 路 / 容器 / 墙 / 敌方对象不在其列 —— 它们不产生房间可见性 (官方 D/runtime/data.js:113-123)。
+pub fn is_owned_structure(structure_type: &str) -> bool {
+    matches!(
+        structure_type,
+        "spawn"
+            | "extension"
+            | "rampart"
+            | "link"
+            | "storage"
+            | "tower"
+            | "observer"
+            | "powerSpawn"
+            | "extractor"
+            | "lab"
+            | "terminal"
+            | "nuker"
+            | "factory"
+            | "controller"
+    )
+}
 
 /// 结构耐久
 pub fn structure_hits(structure_type: &str) -> u32 {
@@ -240,6 +308,24 @@ pub const CONSTRUCTION_COST_ROAD_WALL_RATIO: u32 = 150;
 pub const CONTAINER_DECAY: u32 = 5000;
 pub const CONTAINER_DECAY_TIME: u64 = 100;
 pub const CONTAINER_DECAY_TIME_OWNED: u64 = 500;
+
+/// rampart 衰减: 每 RAMPART_DECAY_TIME 掉 RAMPART_DECAY_AMOUNT 血
+pub const RAMPART_DECAY_AMOUNT: u32 = 300;
+pub const RAMPART_DECAY_TIME: u64 = 100;
+
+/// rampart 血量上限按 RCL (官方 RAMPART_HITS_MAX)
+pub fn rampart_hits_max(rcl: u8) -> u32 {
+    match rcl {
+        0 | 1 => 0,
+        2 => 300_000,
+        3 => 1_000_000,
+        4 => 3_000_000,
+        5 => 10_000_000,
+        6 => 30_000_000,
+        7 => 100_000_000,
+        _ => 300_000_000,
+    }
+}
 
 /// 道路衰减: 每 1000t 掉 100 血 (沼泽路 ×5)
 pub const ROAD_DECAY_AMOUNT: u32 = 100;

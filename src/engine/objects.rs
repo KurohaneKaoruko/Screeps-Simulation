@@ -55,6 +55,8 @@ pub struct Obj {
     pub spawn_job: Option<SpawnJob>,
     /// 超出 RCL 上限而被停用的 spawn/extension (官方 _calc_spawns 的 off 标记)
     pub off: bool,
+    /// link 传输冷却 (官方 cooldown, 每 tick 减 1)
+    pub cooldown: u32,
 }
 
 /// 孵化任务: name=目标单位名, need_time=总时长, spawn_time=完成 tick
@@ -154,6 +156,7 @@ pub fn structure(id: u64, structure_type: &str, x: u8, y: u8, mine: bool) -> Obj
         creep_name: None,
         spawn_job: None,
         off: false,
+        cooldown: 0,
     }
 }
 
@@ -202,6 +205,7 @@ pub fn creep_obj(id: u64, name: &str, x: u8, y: u8, body: Vec<BodyPart>) -> Obj 
         creep_name: None,
         spawn_job: None,
         off: false,
+        cooldown: 0,
     }
 }
 

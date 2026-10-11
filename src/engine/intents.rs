@@ -5,11 +5,14 @@ use crate::engine::constants;
 use crate::engine::objects::{self, BodyPart};
 use crate::engine::world::{alloc_id, Room, World};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// 官方 EVENT_* 常量 (common/lib/constants.js)
+pub const EVENT_ATTACK: u32 = 1;
 pub const EVENT_OBJECT_DESTROYED: u32 = 2;
 pub const EVENT_BUILD: u32 = 4;
 pub const EVENT_HARVEST: u32 = 5;
+pub const EVENT_HEAL: u32 = 6;
 pub const EVENT_REPAIR: u32 = 7;
 pub const EVENT_UPGRADE_CONTROLLER: u32 = 9;
 pub const EVENT_EXIT: u32 = 10;
@@ -336,19 +339,36 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     }
                     _ => continue,
                 };
-                let Some(site) = room.objects.get_mut(&target_id) else { continue };
-                if site.obj_type != "constructionSite" {
+                let (sx, sy, st, remaining) = match room.objects.get(&target_id) {
+                    Some(s) if s.obj_type == "constructionSite" => (
+                        s.x,
+                        s.y,
+                        s.structure_type.clone().unwrap_or_default(),
+                        s.progress_total.saturating_sub(s.progress),
+                    ),
+                    _ => continue,
+                };
+                if (sx as i32 - ox as i32).abs() > 3 || (sy as i32 - oy as i32).abs() > 3 {
                     continue;
                 }
-                if (site.x as i32 - ox as i32).abs() > 3 || (site.y as i32 - oy as i32).abs() > 3 {
-                    continue;
+                // 官方 creeps/build.js:46-60: 障碍类建筑的格子上有 creep 或其他障碍时, 整次建造不执行
+                if constants::OBSTACLE_OBJECT_TYPES.contains(&st.as_str()) {
+                    let blocked = room.objects.values().any(|o| {
+                        o.x == sx
+                            && o.y == sy
+                            && o.id != target_id
+                            && (o.obj_type == "creep"
+                                || constants::OBSTACLE_OBJECT_TYPES.contains(&o.obj_type.as_str()))
+                    });
+                    if blocked {
+                        continue;
+                    }
                 }
-                let remaining = site.progress_total - site.progress;
                 let effect = work.min(remaining).min(energy);
                 if effect == 0 {
                     continue;
                 }
-                site.progress += effect;
+                room.objects.get_mut(&target_id).unwrap().progress += effect;
                 let obj = room.objects.get_mut(&id).unwrap();
                 let left = obj.store.get("energy").copied().unwrap_or(0) - effect;
                 obj.store.insert("energy".into(), left);
@@ -358,8 +378,11 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     json!({ "amount": effect, "energySpent": effect, "targetId": World::id_string(target_id) }),
                 );
                 world.energy_built += effect as u64;
-                let complete = room.objects.get(&target_id).unwrap().progress
-                    >= room.objects.get(&target_id).unwrap().progress_total;
+                let complete = room
+                    .objects
+                    .get(&target_id)
+                    .map(|s| s.progress >= s.progress_total)
+                    .unwrap_or(false);
                 if complete {
                     complete_site(world, &room_name, target_id);
                 }
@@ -542,6 +565,234 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     }
                 }
             }
+            ("spawn", "renewCreep") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                // 官方 structures.js:1237-1266 / spawns/renew-creep.js
+                let (sx, sy) = match room.objects.get(&id) {
+                    Some(s) if s.mine && s.is_active() && s.spawn_job.is_none() => (s.x, s.y),
+                    _ => continue,
+                };
+                let (tx, ty, body_len, has_claim, age_time, body_cost) = match room.objects.get(&target_id) {
+                    Some(c) if c.obj_type == "creep" && !c.spawning && c.mine => (
+                        c.x,
+                        c.y,
+                        c.body.len() as u32,
+                        c.body.iter().any(|p| p.part_type == "claim"),
+                        c.age_time,
+                        c.body.iter().map(|p| constants::bodypart_cost(&p.part_type)).sum::<u32>(),
+                    ),
+                    _ => continue,
+                };
+                if has_claim || body_len == 0 {
+                    continue;
+                }
+                if (tx as i32 - sx as i32).abs() > 1 || (ty as i32 - sy as i32).abs() > 1 {
+                    continue;
+                }
+                let effect = (constants::SPAWN_RENEW_RATIO * constants::CREEP_LIFE_TIME as f64
+                    / constants::CREEP_SPAWN_TIME as f64
+                    / body_len as f64)
+                    .floor() as u64;
+                // 已满寿命: 不再恢复 (官方 ERR_FULL 分支)
+                if age_time.map(|a| a + effect > world.tick + constants::CREEP_LIFE_TIME).unwrap_or(false) {
+                    continue;
+                }
+                let cost = (constants::SPAWN_RENEW_RATIO * body_cost as f64
+                    / constants::CREEP_SPAWN_TIME as f64
+                    / body_len as f64)
+                    .ceil() as u32;
+                if !charge_spawn_energy(room, id, cost, &[]) {
+                    continue;
+                }
+                if let Some(c) = room.objects.get_mut(&target_id) {
+                    if let Some(a) = c.age_time.as_mut() {
+                        *a += effect;
+                    }
+                }
+                world.energy_spawned += cost as u64;
+            }
+            ("spawn", "recycleCreep") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                // 官方 structures.js:1269-1290 / spawns/recycle-creep.js: 回收 = 100% 掉落
+                let (sx, sy) = match room.objects.get(&id) {
+                    Some(s) if s.mine && s.is_active() => (s.x, s.y),
+                    _ => continue,
+                };
+                let (tx, ty) = match room.objects.get(&target_id) {
+                    Some(c) if c.obj_type == "creep" && !c.spawning && c.mine => (c.x, c.y),
+                    _ => continue,
+                };
+                if (tx as i32 - sx as i32).abs() > 1 || (ty as i32 - sy as i32).abs() > 1 {
+                    continue;
+                }
+                if let Some(obj) = room.objects.remove(&target_id) {
+                    world.creeps_lost += 1;
+                    bury_creep(world, &room_name, obj, 1.0);
+                }
+            }
+            ("tower", "repair") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let (ox, oy) = match room.objects.get(&id) {
+                    Some(t)
+                        if t.mine
+                            && t.store.get("energy").copied().unwrap_or(0) >= constants::TOWER_ENERGY_COST =>
+                    {
+                        (t.x, t.y)
+                    }
+                    _ => continue,
+                };
+                let (tx, ty, repairable, full) = match room.objects.get(&target_id) {
+                    Some(o) => (
+                        o.x,
+                        o.y,
+                        constants::construction_cost(&o.obj_type).is_some(),
+                        o.hits >= o.hits_max,
+                    ),
+                    None => continue,
+                };
+                if !repairable || full {
+                    continue;
+                }
+                let amount = tower_power(constants::TOWER_POWER_REPAIR, ox, oy, tx, ty);
+                if amount == 0 {
+                    continue;
+                }
+                {
+                    let t = room.objects.get_mut(&target_id).unwrap();
+                    t.hits = (t.hits + amount).min(t.hits_max);
+                }
+                let tower = room.objects.get_mut(&id).unwrap();
+                let e = tower.store.get("energy").copied().unwrap_or(0) - constants::TOWER_ENERGY_COST;
+                tower.store.insert("energy".into(), e);
+                room.push_event(
+                    EVENT_REPAIR,
+                    id,
+                    json!({ "targetId": World::id_string(target_id), "amount": amount, "energySpent": constants::TOWER_ENERGY_COST }),
+                );
+            }
+            ("tower", "heal") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let (ox, oy) = match room.objects.get(&id) {
+                    Some(t)
+                        if t.mine
+                            && t.store.get("energy").copied().unwrap_or(0) >= constants::TOWER_ENERGY_COST =>
+                    {
+                        (t.x, t.y)
+                    }
+                    _ => continue,
+                };
+                let (tx, ty) = match room.objects.get(&target_id) {
+                    Some(c) if c.obj_type == "creep" && !c.spawning => (c.x, c.y),
+                    _ => continue,
+                };
+                let amount = tower_power(constants::TOWER_POWER_HEAL, ox, oy, tx, ty);
+                if amount == 0 {
+                    continue;
+                }
+                {
+                    let c = room.objects.get_mut(&target_id).unwrap();
+                    c.hits = (c.hits + amount).min(c.hits_max);
+                }
+                let tower = room.objects.get_mut(&id).unwrap();
+                let e = tower.store.get("energy").copied().unwrap_or(0) - constants::TOWER_ENERGY_COST;
+                tower.store.insert("energy".into(), e);
+                room.push_event(
+                    EVENT_HEAL,
+                    id,
+                    json!({ "targetId": World::id_string(target_id), "amount": amount }),
+                );
+            }
+            ("tower", "attack") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let (ox, oy) = match room.objects.get(&id) {
+                    Some(t)
+                        if t.mine
+                            && t.store.get("energy").copied().unwrap_or(0) >= constants::TOWER_ENERGY_COST =>
+                    {
+                        (t.x, t.y)
+                    }
+                    _ => continue,
+                };
+                let (tx, ty, hits) = match room.objects.get(&target_id) {
+                    Some(o) if o.id != id && o.hits > 0 && o.obj_type != "controller" => (o.x, o.y, o.hits),
+                    _ => continue,
+                };
+                let amount = tower_power(constants::TOWER_POWER_ATTACK, ox, oy, tx, ty);
+                if amount == 0 {
+                    continue;
+                }
+                let new_hits = hits.saturating_sub(amount);
+                {
+                    let t = room.objects.get_mut(&target_id).unwrap();
+                    t.hits = new_hits;
+                }
+                let tower = room.objects.get_mut(&id).unwrap();
+                let e = tower.store.get("energy").copied().unwrap_or(0) - constants::TOWER_ENERGY_COST;
+                tower.store.insert("energy".into(), e);
+                room.push_event(
+                    EVENT_ATTACK,
+                    id,
+                    json!({ "targetId": World::id_string(target_id), "amount": amount, "attackType": 2 }),
+                );
+                if new_hits == 0 {
+                    let removed = room.objects.remove(&target_id).unwrap();
+                    let type_name = removed.obj_type.clone();
+                    room.push_event(EVENT_OBJECT_DESTROYED, target_id, json!({ "type": type_name }));
+                    if removed.obj_type == "creep" {
+                        world.creeps_lost += 1;
+                        bury_creep(world, &room_name, removed, constants::CREEP_CORPSE_RATE);
+                    } else {
+                        for (resource, amt) in removed.store {
+                            if amt > 0 {
+                                create_dropped(world, &room_name, tx, ty, &resource, amt);
+                            }
+                        }
+                    }
+                }
+            }
+            ("link", "transferEnergy") => {
+                let Some(target_id) = id_of(data, "id") else { continue };
+                let amount_req = data.get("amount").and_then(Value::as_u64).unwrap_or(0) as u32;
+                // 官方 links/transfer.js: 同房 link 间转移, 有冷却与 3% 损耗
+                let (ox, oy, have, cooldown) = match room.objects.get(&id) {
+                    Some(l) if l.mine && l.obj_type == "link" => {
+                        (l.x, l.y, l.store.get("energy").copied().unwrap_or(0), l.cooldown)
+                    }
+                    _ => continue,
+                };
+                if target_id == id || cooldown > 0 || amount_req == 0 || have < amount_req {
+                    continue;
+                }
+                let (tx, ty, target_energy) = match room.objects.get(&target_id) {
+                    Some(t) if t.obj_type == "link" && t.mine => {
+                        (t.x, t.y, t.store.get("energy").copied().unwrap_or(0))
+                    }
+                    _ => continue,
+                };
+                let cap = constants::LINK_CAPACITY;
+                if target_energy >= cap {
+                    continue;
+                }
+                let amount = amount_req.min(cap - target_energy).min(have);
+                if amount == 0 {
+                    continue;
+                }
+                let loss = (amount as f64 * constants::LINK_LOSS_RATIO).ceil() as u32;
+                {
+                    let t = room.objects.get_mut(&target_id).unwrap();
+                    let te = t.store.get("energy").copied().unwrap_or(0) + amount;
+                    t.store.insert("energy".into(), te.saturating_sub(loss));
+                }
+                let dist = (ox as i32 - tx as i32).abs().max((oy as i32 - ty as i32).abs()) as u32;
+                let l = room.objects.get_mut(&id).unwrap();
+                l.store.insert("energy".into(), have - amount);
+                l.cooldown += constants::LINK_COOLDOWN * dist.max(1);
+                room.push_event(
+                    EVENT_TRANSFER,
+                    id,
+                    json!({ "targetId": World::id_string(target_id), "resourceType": "energy", "amount": amount }),
+                );
+            }
             _ => {}
         }
     }
@@ -564,8 +815,8 @@ fn apply_room_intent(world: &mut World, room_name: &str, name: &str, data: &Valu
             if st != "road" && room.count_of_type(st) >= limit {
                 return;
             }
-            // 地形与占位检查
-            if st != "road" && st != "extractor" && st != "container" && room.terrain.is_wall(x as usize, y as usize) {
+            // 地形与占位检查 (官方只豁免 road/extractor; 容器不能建在墙上)
+            if st != "road" && st != "extractor" && room.terrain.is_wall(x as usize, y as usize) {
                 return;
             }
             if st != "container" && room.site_blocked(st, x, y) {
@@ -591,8 +842,13 @@ fn apply_room_intent(world: &mut World, room_name: &str, name: &str, data: &Valu
                 }
             }
             let mut progress_total = base_cost;
-            if st == "road" && room.terrain.is_swamp(x as usize, y as usize) {
-                progress_total *= constants::CONSTRUCTION_COST_ROAD_SWAMP_RATIO;
+            if st == "road" {
+                // 官方 room/create-construction-site.js:42-45: 沼泽 ×5, 墙 ×150
+                if room.terrain.is_wall(x as usize, y as usize) {
+                    progress_total *= constants::CONSTRUCTION_COST_ROAD_WALL_RATIO;
+                } else if room.terrain.is_swamp(x as usize, y as usize) {
+                    progress_total *= constants::CONSTRUCTION_COST_ROAD_SWAMP_RATIO;
+                }
             }
             let id = alloc_id(&mut world.next_id);
             let site = objects::construction_site(id, st, x, y, progress_total);
@@ -605,11 +861,25 @@ fn apply_room_intent(world: &mut World, room_name: &str, name: &str, data: &Valu
                     .structure_type
                     .clone()
                     .unwrap_or_else(|| removed.obj_type.clone());
-                room.push_event(
-                    EVENT_OBJECT_DESTROYED,
-                    target_id,
-                    json!({ "type": type_name }),
-                );
+                // 官方 room/remove-construction-site.js:17-19: 拆除工地掉落 floor(progress/2) 能量
+                if removed.obj_type == "constructionSite" {
+                    let refund = removed.progress / 2;
+                    let (x, y) = (removed.x, removed.y);
+                    room.push_event(
+                        EVENT_OBJECT_DESTROYED,
+                        target_id,
+                        json!({ "type": type_name }),
+                    );
+                    if refund > 0 {
+                        create_dropped(world, room_name, x, y, "energy", refund);
+                    }
+                } else {
+                    room.push_event(
+                        EVENT_OBJECT_DESTROYED,
+                        target_id,
+                        json!({ "type": type_name }),
+                    );
+                }
             }
         }
         "createFlag" => {
@@ -763,6 +1033,74 @@ pub fn fill_container(room: &mut Room, x: u8, y: u8, resource: &str, amount: u32
     amount - put
 }
 
+/// 塔的功率随距离衰减 (官方 towers/*.js: 超出 TOWER_OPTIMAL_RANGE 后线性衰减)
+fn tower_power(base: f64, ox: u8, oy: u8, tx: u8, ty: u8) -> u32 {
+    let mut range = (ox as i32 - tx as i32).abs().max((oy as i32 - ty as i32).abs()) as f64;
+    let mut amount = base;
+    if range > constants::TOWER_OPTIMAL_RANGE {
+        if range > constants::TOWER_FALLOFF_RANGE {
+            range = constants::TOWER_FALLOFF_RANGE;
+        }
+        amount -= amount * constants::TOWER_FALLOFF * (range - constants::TOWER_OPTIMAL_RANGE)
+            / (constants::TOWER_FALLOFF_RANGE - constants::TOWER_OPTIMAL_RANGE);
+    }
+    amount.floor().max(0.0) as u32
+}
+
+/// 单位死亡/回收: 身体资源按剩余寿命比例回收 (官方 _die.js:39-91), 携带资源全额;
+/// 先装入同格容器, 装不下的进墓碑。`drop_rate`: 自然死亡/自杀 = CREEP_CORPSE_RATE, 回收 = 1.0。
+pub fn bury_creep(world: &mut World, room_name: &str, obj: objects::Obj, drop_rate: f64) {
+    let tick = world.tick;
+    let life_time = if obj.body.iter().any(|p| p.part_type == "claim") {
+        constants::CREEP_CLAIM_LIFE_TIME
+    } else {
+        constants::CREEP_LIFE_TIME
+    };
+    let ticks_to_live = obj.age_time.map(|a| a.saturating_sub(tick)).unwrap_or(0);
+    let life_rate = drop_rate * ticks_to_live as f64 / life_time as f64;
+
+    // 身体资源 (官方: 每部件 min(CREEP_PART_MAX_ENERGY, BODYPART_COST * lifeRate), 累计后取整)
+    let mut body_res: BTreeMap<String, f64> = BTreeMap::new();
+    for part in &obj.body {
+        let cost = constants::bodypart_cost(&part.part_type) as f64;
+        let e = (cost * life_rate).min(constants::CREEP_PART_MAX_ENERGY as f64);
+        *body_res.entry("energy".into()).or_insert(0.0) += e;
+    }
+
+    let mut remain: objects::Store = objects::Store::new();
+    let room = world.rooms.get_mut(room_name).unwrap();
+    for (resource, amount) in body_res {
+        let amount = amount.floor() as u32;
+        if amount > 0 {
+            let left = fill_container(room, obj.x, obj.y, &resource, amount);
+            if left > 0 {
+                // 官方 tombstone.store[type] = (已有 || 0) + amount: 身体资源与携带资源同种时累加
+                *remain.entry(resource).or_insert(0) += left;
+            }
+        }
+    }
+    for (resource, amount) in &obj.store {
+        if *amount > 0 {
+            let left = fill_container(room, obj.x, obj.y, resource, *amount);
+            if left > 0 {
+                *remain.entry(resource.clone()).or_insert(0) += left;
+            }
+        }
+    }
+
+    let tomb_id = alloc_id(&mut world.next_id);
+    let decay = tick + obj.body.len() as u64 * constants::TOMBSTONE_DECAY_PER_PART;
+    let mut tomb = objects::tombstone(
+        tomb_id,
+        obj.x,
+        obj.y,
+        obj.name.as_deref().unwrap_or(""),
+        decay,
+    );
+    tomb.store = remain;
+    room.objects.insert(tomb_id, tomb);
+}
+
 /// 资源落地: 先装入同格容器, 装不下的部分才成为地上的堆 (官方 _create-energy.js)
 pub fn create_dropped(world: &mut World, room_name: &str, x: u8, y: u8, resource: &str, amount: u32) {
     if amount == 0 {
@@ -803,7 +1141,8 @@ fn complete_site(world: &mut World, room_name: &str, site_id: u64) {
     let room = world.rooms.get_mut(room_name).unwrap();
     room.objects.remove(&site_id);
     let id = alloc_id(&mut world.next_id);
-    let mut obj = objects::structure(id, &st, x, y, true);
+    // 路 / 容器 / 墙没有 owner (官方 OwnedStructure 之外), 不参与房间可见性
+    let mut obj = objects::structure(id, &st, x, y, constants::is_owned_structure(&st));
     match st.as_str() {
         "spawn" => {
             obj.energy_capacity = constants::SPAWN_ENERGY_CAPACITY;
@@ -814,14 +1153,18 @@ fn complete_site(world: &mut World, room_name: &str, site_id: u64) {
         "storage" => obj.energy_capacity = constants::STORAGE_CAPACITY,
         "container" => {
             obj.energy_capacity = constants::CONTAINER_CAPACITY;
-            obj.next_decay_time = Some(world.tick + constants::CONTAINER_DECAY_TIME_OWNED);
+            // 官方 creeps/build.js:261: 新建容器首次衰减计时为 +CONTAINER_DECAY_TIME (100)
+            obj.next_decay_time = Some(world.tick + constants::CONTAINER_DECAY_TIME);
         }
         "tower" => obj.energy_capacity = constants::TOWER_CAPACITY,
         "terminal" => obj.energy_capacity = constants::TERMINAL_CAPACITY,
         "link" => obj.energy_capacity = constants::LINK_CAPACITY,
         "road" => {
             let mut hits = constants::ROAD_HITS;
-            if room.terrain.is_swamp(x as usize, y as usize) {
+            // 官方: 墙上路 ×150, 沼泽路 ×5
+            if room.terrain.is_wall(x as usize, y as usize) {
+                hits *= constants::CONSTRUCTION_COST_ROAD_WALL_RATIO;
+            } else if room.terrain.is_swamp(x as usize, y as usize) {
                 hits *= constants::CONSTRUCTION_COST_ROAD_SWAMP_RATIO;
             }
             obj.hits = hits;
@@ -830,8 +1173,8 @@ fn complete_site(world: &mut World, room_name: &str, site_id: u64) {
         }
         "rampart" => {
             obj.hits = 1;
-            obj.hits_max = 300_000;
-            obj.next_decay_time = Some(world.tick + 100);
+            obj.hits_max = constants::rampart_hits_max(room.rcl());
+            obj.next_decay_time = Some(world.tick + constants::RAMPART_DECAY_TIME);
         }
         "constructedWall" => {
             obj.hits = 1;

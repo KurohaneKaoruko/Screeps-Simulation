@@ -107,12 +107,18 @@ impl Room {
         }
     }
 
-    /// 我方单位或自有结构在场 → 可见
+    /// 我方单位/自有结构/工地在场 → 可见。
+    /// 官方可见性来自带 `user` 的对象: 只有 creep、controller、OwnedStructure、自己的工地算数;
+    /// 路 / 容器 / 墙 / 墓碑没有 user, 不能单独让房间可见。
     pub fn visible(&self) -> bool {
-        self.objects.values().any(|o| match o.obj_type.as_str() {
-            "creep" => o.mine,
-            "controller" => o.mine,
-            other => o.mine && constants::construction_cost(other).is_some(),
+        self.objects.values().any(|o| {
+            if !o.mine {
+                return false;
+            }
+            match o.obj_type.as_str() {
+                "creep" | "controller" | "constructionSite" => true,
+                t => constants::is_owned_structure(t),
+            }
         })
     }
 
@@ -282,10 +288,14 @@ pub fn prime_world(world: &mut World) {
                     }
                     o.upgraded_this_tick = 0;
                 }
-                "road" | "container" => {
+                "road" | "container" | "rampart" => {
                     if o.next_decay_time.is_none() {
-                        o.next_decay_time =
-                            Some(tick + constants::ROAD_DECAY_TIME);
+                        let interval = match o.obj_type.as_str() {
+                            "road" => constants::ROAD_DECAY_TIME,
+                            "rampart" => constants::RAMPART_DECAY_TIME,
+                            _ => constants::CONTAINER_DECAY_TIME,
+                        };
+                        o.next_decay_time = Some(tick + interval);
                     }
                     if o.obj_type == "container" && o.energy_capacity == 0 {
                         o.energy_capacity = constants::CONTAINER_CAPACITY;
@@ -293,6 +303,12 @@ pub fn prime_world(world: &mut World) {
                     if o.obj_type == "road" && o.hits == 0 {
                         o.hits = constants::ROAD_HITS;
                         o.hits_max = constants::ROAD_HITS;
+                    }
+                    if o.obj_type == "rampart" {
+                        o.hits_max = constants::rampart_hits_max(rcl);
+                        if o.hits == 0 {
+                            o.hits = 1;
+                        }
                     }
                 }
                 "storage" => {
@@ -337,7 +353,7 @@ pub fn place_structure(
     hits: Option<u32>,
 ) -> u64 {
     let id = world.alloc_id();
-    let mut obj = objects::structure(id, structure_type, x, y, true);
+    let mut obj = objects::structure(id, structure_type, x, y, constants::is_owned_structure(structure_type));
     obj.store.insert("energy".into(), energy);
     if let Some(h) = hits {
         obj.hits = h;

@@ -140,6 +140,10 @@ async fn async_main() {
     let mut bucket = scenario.cpu_bucket();
     let cpu_limit = scenario.cpu_limit();
     let tick_limit = scenario.cpu_tick_limit();
+    // CPU 强制中断: 官方 tickLimit 到期即终止脚本 ("Script execution timed out ungracefully")
+    let enforce_cpu = scenario.cpu_enforce();
+    // 全局重置周期 (官方由 isolate 堆占用触发)
+    let global_reset_every = scenario.global_reset_every();
 
     if !quiet {
         println!(
@@ -160,6 +164,18 @@ async fn async_main() {
     let (mut total_moves, mut total_moved) = (0usize, 0usize);
     let mut run = 0u64;
     while run < total_ticks {
+        // 0. 全局重置 (isolate 重建; 全局变量丢失、Memory/内存段保留)
+        if let Some(every) = global_reset_every {
+            if world.tick > 0 && world.tick % every == 0 {
+                if let Err(e) = bot.reset_global() {
+                    eprintln!("[tick {}] 全局重置失败: {e}", world.tick);
+                    break;
+                }
+                if !quiet {
+                    println!("  t{:<7} 全局重置 (isolate 重建, Memory 保留)", world.tick);
+                }
+            }
+        }
         // 1. 快照
         let snapshot_opts = SnapshotOptions {
             cpu: nexus_sim::engine::snapshot::CpuView {
@@ -171,8 +187,13 @@ async fn async_main() {
         };
         let snapshot = build_snapshot(&world, &snapshot_opts);
 
-        // 2. bot 执行
-        let tick_result = match bot.run_tick(&snapshot.to_string(), &memory_json) {
+        // 2. bot 执行 (enforce 时按当前 tickLimit 强制中断)
+        let tick_timeout = if enforce_cpu {
+            Some(bucket.max(cpu_limit).min(500.0).max(cpu_limit))
+        } else {
+            None
+        };
+        let tick_result = match bot.run_tick_limited(&snapshot.to_string(), &memory_json, tick_timeout) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[tick {}] 运行时致命错误: {e}", world.tick);
@@ -180,6 +201,12 @@ async fn async_main() {
             }
         };
         let cpu_used = tick_result.cpu_used;
+        if tick_result.timed_out {
+            eprintln!(
+                "[t{}] Script execution timed out ungracefully (tickLimit {:.0}ms): 本 tick 意图与 Memory 改动均丢弃",
+                world.tick, tick_limit
+            );
+        }
 
         // 3. 控制台与错误输出
         if verbose {
@@ -194,6 +221,9 @@ async fn async_main() {
             }
         }
         for err in &tick_result.errors {
+            if tick_result.timed_out {
+                continue; // 超时已在上方单独报告
+            }
             if !quiet || metrics.total_errors < 10 {
                 eprintln!("[t{}] bot 异常:\n{}", world.tick, err);
             }
@@ -231,7 +261,7 @@ async fn async_main() {
                 console_lines: tick_result.console.len(),
             },
             tick_result.memory.len(),
-            cpu_used > tick_limit,
+            tick_result.timed_out || cpu_used > tick_limit,
         );
         memory_json = tick_result.memory;
 
