@@ -76,19 +76,178 @@
 | 全局重置触发条件 | 官方按 isolate 堆占用触发；这里用场景的 `globalResetEvery` 固定周期模拟（语义一致：全局变量丢失、Memory 保留） |
 | 内存段校验失败的后果 | 官方在 tick 末尾 `throw` 使整个 tick 结果作废；这里改为记入 `errors` 并丢弃该次段写入，其余 tick 结果照常提交 |
 
-## 使用
+## 快速开始
 
 ```bash
-# 构建 (Cargo.toml 在仓库根目录; 首次会自动下载 V8 预编译库, 若失败见下方说明)
+# 构建 Rust 引擎 (首次约 1 分钟, 会自动下载 V8 预编译库, 失败见下方说明)
 cargo build --release
 
-# 先构建 bot bundle
-npm run build
+# 自测 (不依赖真实 bot, 用 examples/fixtures/min-bot.js 陪跑)
+npm test
+```
 
-# 跑场景 (dist/main.js 是真实上传的产物)
-./target/release/nexus-sim \
+## 编写 .sim.ts 模拟测试 (推荐)
+
+像写单元测试一样定义场景 + 断言, runner 逐用例运行并汇总, 失败退出码非 0 —— 可直接进 CI:
+
+```ts
+// sim/boot.sim.ts
+import { defineSim } from 'screeps-sim'
+
+export default defineSim({
+  name: 'boot-from-scratch',
+  seed: 42,                       // 确定性随机 (地形 / Math.random)
+  ticks: 20000,
+  cpu: { limit: 100, bucket: 10000 },
+  rooms: [{
+    name: 'W5N8',
+    terrain: { kind: 'flat' },    // flat | generated{seed} | rows | raw
+    sources: { positions: [[18, 22], [32, 30]] },
+    controller: { level: 1, pos: [28, 27] },
+    mineral: { pos: [38, 38], type: 'H', amount: 30000 },
+    structures: [{ type: 'spawn', pos: [25, 25], energy: 300 }],
+    creeps: [],
+  }],
+  asserts: [
+    { kind: 'rclReachedBy', value: 2, tick: 5000 },
+    { kind: 'noErrors' },
+  ],
+})
+```
+
+```bash
+# 跑当前目录下所有 *.sim.ts (自动跳过 node_modules/target/dist 等)
+screeps-sim test --bundle dist/main.js
+
+# 指定文件 / 目录 / 通配符
+screeps-sim test sim/boot.sim.ts
+screeps-sim test sim/                 # 目录递归
+screeps-sim test 'sim/**/*.sim.ts'    # 通配符
+
+# 只列出用例 / 快速冒烟 (覆盖 tick 数) / 显示 bot console
+screeps-sim test --list
+screeps-sim test --bundle dist/main.js --ticks 500
+screeps-sim test -v
+```
+
+输出形如:
+
+```
+sim/boot.sim.ts
+  ✓ boot-from-scratch  20000 ticks  ·  36.2s  ·  552 t/s  ·  RCL L1@0 L2@669  ·  cpu p95 3.0ms
+  ✗ rcl-sprint  50000 ticks  ·  ...
+      · 断言 rclReachedBy: RCL4 达成于 None, 要求 ≤40000
+
+存在失败  ·  1/2 通过  ·  总用时 40.1s
+```
+
+规则与约定:
+
+- **一个文件多个用例**: `default` 导出一个, 其余具名导出 (返回值"长得像场景"即被识别);
+  `skip: true` 的用例只列出、不运行。
+- **bundle 解析顺序**: `--bundle` > 用例内 `bundle` 字段 (相对 `.sim.ts` 文件) >
+  项目 `package.json` 的 `"screeps-sim".bundle` > 自动探测 `dist/main.js` 等常见布局。
+- **字段风格**: TS 里写 camelCase (`alwaysVisible` / `cpu.tickLimit` / `mineral.type`),
+  runner 负责映射到引擎 JSON; 未知字段原样透传, 所以直接写 wire 字段名也可以。
+- **类型**: `import { defineSim } from 'screeps-sim'` 自带完整类型提示 (见 `index.d.ts`),
+  需要 Node ≥ 22.6 (原生加载 TS); 旧 Node 可改用 `.sim.mjs` / `.sim.js`。
+- 完整示例见 `examples/` (smoke 自包含可跑; boot-from-scratch / rcl-sprint 需真实 bundle)。
+
+### 模拟前静态检查 (编译器式诊断)
+
+`screeps-sim check` 与 `test` 的预检会在**引擎启动前**指出能静态发现的问题:
+
+```bash
+screeps-sim check                      # 检查所有场景定义 (跳过的用例也检查)
+screeps-sim check sim/boot.sim.ts      # 指定文件
+screeps-sim check --bundle dist/main.js # 只检查 bot bundle
+screeps-sim check --strict             # 警告也计为失败 (CI 用)
+```
+
+**场景检查** (`check.mjs`, 错误 → 模拟必失败; 警告 → 可疑但合法):
+
+- 硬错误: 房名格式/重复、坐标越界、controller 等级、部件名/数量、结构类型、
+  单位重名(全游戏唯一)、terrain rows/raw 规格、非法 JSON memory、未知断言类型、
+  不可能达成的断言 (`rclReachedBy.tick > ticks`) 等
+- 警告: RCL 超限结构 (引擎会标 off)、同格多结构、墙上对象、**房间不连通**(房名拼写错误的典型症状)、
+  `seed=0` 不可复现、`alwaysVisible` 调试残留、无断言场景等
+
+**bot bundle 检查** (`bundle-check.mjs`, 基于 435 个官方常量 + 模拟器覆盖度表):
+
+- 错误: **常量拼写错误** (`ERR_NOT_IN_RANG` → 运行时 undefined, 比较永远失败)、
+  **参数顺序颠倒** (`transfer(RESOURCE_ENERGY, target)` / `spawnCreep('name', body)`)、
+  **node 泄漏** (`process.` / `require(` / `Buffer.` —— 官方同样会炸)、
+  调用模拟器未实现的方法 (`runReaction` / `boostCreep` / `launchNuke` / `terminal.send` → TypeError)
+- 警告: `setTimeout` 等运行时缺失的 API、`WebAssembly.instantiate` 跨 tick 异步必死、
+  **模拟覆盖度** (`Game.market` no-op、powerCreeps 恒空 —— 提示哪些行为不会被模拟)
+
+常量表从 `src/js/screeps.js` 自动提取 (`node runner/gen-constants.mjs`), `npm test` 校验同步。
+`test` 运行时自动做两层预检: 场景错误 → 用例秒失败; bundle 错误 → 使用该 bundle 的用例全部秒失败,
+警告打印一次 —— 烂代码不再烧几万 tick 才发现。
+
+### 编程 API
+
+```js
+import { defineSim, runSim } from 'screeps-sim'
+const report = runSim(myScenario, { bundle: 'dist/main.js', ticks: 1000 })
+console.log(report.rclTimeline, report.asserts)
+```
+
+## 给其他项目安装 (npm 包)
+
+本仓库本身就是一个 npm 包 (`screeps-sim`, 零运行时依赖), 在任意 bot 项目里:
+
+```bash
+# 本地路径安装 (开发期推荐, 源码改动即时生效)
+npm i -D path/to/Screeps-Simulation
+
+# 或 git 安装
+npm i -D github.com:KurohaneKaoruko/Screeps-Simulation
+```
+
+bot 项目一次性配置 (`package.json`):
+
+```jsonc
+{
+  "scripts": {
+    "sim": "screeps-sim test",              // npm run sim [-- --bundle ...]
+    "sim:ci": "screeps-sim test --ticks 500" // 进 CI, 断言失败即红
+  },
+  "screeps-sim": {
+    "bundle": "dist/main.js",   // 默认 bundle (相对项目根; 不配则自动探测 dist/main.js 等)
+    "include": ["sim"]          // 默认扫描范围 (不配则扫当前目录, 跳过 node_modules/target/dist)
+  }
+}
+```
+
+然后写 `sim/*.sim.ts` 即可。两种写法任选:
+
+```ts
+// ① 正规写法: import defineSim, 获得完整类型提示 (项目无需任何 TS 配置, Node ≥22.6 原生加载)
+import { defineSim } from 'screeps-sim'
+export default defineSim({ name: 'boot', rooms: [/* ... */], asserts: [/* ... */] })
+
+// ② 零依赖写法: 不装类型也能跑 —— 纯对象导出 (有 name + rooms 字段即被识别)
+export const myCase = { name: 'boot', rooms: [/* ... */] }
+```
+
+说明:
+
+- 一个文件可导出**多个用例** (`default` + 任意具名导出), `skip: true` 跳过;
+  用 TS 表达式共享房间模板/断言组合, 这是比 JSON 场景强得多的地方。
+- 需要 Node ≥ 22.6 (原生 TS 加载); CommonJS 项目也可用 —— Node 22+ 会按语法自动把
+  含 `import/export` 的 `.ts` 识别为 ESM (极旧环境可改 `.sim.mts`)。
+- 首次运行会自动 `cargo build --release` (需要 Rust 工具链); 已构建好的二进制可用
+  `SCREEPS_SIM_BIN` 环境变量指定。
+
+## 直跑单个场景 (CLI)
+
+不经 runner, 直接驱动引擎 (调试 / 临时实验):
+
+```bash
+./target/release/screeps-sim \
     --scenario scenarios/boot-from-scratch.json \
-    --bundle ../dist/main.js \
+    --bundle dist/main.js \
     --ticks 20000 \
     --csv /tmp/ticks.csv \
     --json-report /tmp/report.json
@@ -101,11 +260,11 @@ CLI 选项：
 
 | 选项 | 说明 |
 |---|---|
-| `-s, --scenario <json>` | 场景文件（必填） |
-| `-b, --bundle <js>` | bot bundle，默认 `../dist/main.js` |
+| `-s, --scenario <json\|->` | 场景文件 (必填); `-` 从 stdin 读 (runner 的管道协议) |
+| `-b, --bundle <js>` | bot bundle，默认 `dist/main.js` |
 | `-t, --ticks <n>` | 覆盖场景里的 tick 数 |
 | `--csv <path>` | 逐 tick 指标 CSV |
-| `--json-report <path>` | 汇总 JSON 报告 |
+| `--json-report <path\|->` | 汇总 JSON 报告 (含断言结果); `-` 写 stdout, 人类可读报告转 stderr |
 | `-q, --quiet` | 只输出报告 |
 | `-v, --verbose` | 打印全部 `console.log` |
 | `--dump-memory <path>` | 落盘最终 Memory |
@@ -133,7 +292,10 @@ cargo build --release
 修改该函数时请保留 clamp 写法并跑 `cargo test --release` 中的
 `damage_recalc_body_from_tail` 回归。
 
-## 场景格式
+## 场景格式 (wire JSON)
+
+`.sim.ts` 用 camelCase, runner 映射后得到下面的 wire JSON (`scenarios/*.json` 与
+`--scenario` 直跑用的就是这个格式, 字段一一对应):
 
 ```jsonc
 {
@@ -154,6 +316,7 @@ cargo build --release
     "terrain": { "kind": "flat" },            // flat | generated{seed} | rows | raw
     "sources": { "count": 2, "energy": 3000 },
     "controller": { "level": 1, "pos": [28, 27] },
+    "mineral": { "pos": [38, 38], "mineral_type": "H", "amount": 30000 },
     "structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 }],
     "creeps": [{ "name": "W1", "body": ["work","carry","move"], "pos": [26, 25] }]
   }],
@@ -215,7 +378,12 @@ src/
   js/screeps.js  Screeps API shim (bot 的直接运行环境)
   js/lodash.js   lodash 3.10.1 (MIT), 由宿主注入为全局 `_`
   runtime.rs     deno_core 宿主 (op 边界 + CPU 看门狗 + 内存段/全局重置)
-  main.rs        CLI
-scenarios/       场景文件
+  main.rs        CLI (含 stdin 场景 / stdout JSON 报告的管道协议)
+bin/             screeps-sim 命令入口 (test 子命令 → runner, 其余透传引擎)
+runner/          .sim.ts 测试 runner (发现/加载/运行/汇总, 零依赖)
+index.mjs        编程 API (defineSim / runSim)
+index.d.ts       .sim.ts 用例的完整类型定义
+examples/        示例用例 (smoke 自包含可跑) + fixtures/min-bot.js 陪跑 bundle
+scenarios/       wire JSON 场景 (--scenario 直跑用)
 tests/           回归测试 (engine_rules / shim_apis / cpu_watchdog / memory_segments / framework)
 ```
