@@ -8,6 +8,7 @@
 //! 唯一例外是控制台输出 —— 它在中断前已节流刷出, 便于排查 bot 卡死 (不影响任何游戏状态)。
 
 use deno_core::{extension, op2, v8, JsRuntime, RuntimeOptions};
+use crate::engine::intents::IntentList;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,12 +41,14 @@ fn op_sim_now() -> f32 {
 #[op2]
 #[string]
 fn op_sim_get_snapshot() -> String {
-    TICK_IO.with(|t| t.borrow().snapshot.clone())
+    // 每 tick 恰好被 shim 读一次 → take 转移所有权, 零拷贝
+    TICK_IO.with(|t| std::mem::take(&mut t.borrow_mut().snapshot))
 }
 
 #[op2]
 #[string]
 fn op_sim_get_memory() -> String {
+    // clone 保留底稿: memory 需要支持"本 tick 被拒绝保存 → 回退上一 tick"的语义
     TICK_IO.with(|t| t.borrow().memory.clone())
 }
 
@@ -64,7 +67,7 @@ fn op_sim_console(#[string] line: String) {
 #[op2]
 #[string]
 fn op_sim_get_runtime() -> String {
-    TICK_IO.with(|t| t.borrow().runtime_data.clone())
+    TICK_IO.with(|t| std::mem::take(&mut t.borrow_mut().runtime_data))
 }
 
 extension!(
@@ -79,8 +82,27 @@ extension!(
     ]
 );
 
+/// shim 回传的整 tick 结果 (只反序列化一次; 字段见 screeps.js __runTick 结尾)
+#[derive(serde::Deserialize)]
+struct TickOutcome {
+    #[serde(default)]
+    intents: Vec<crate::engine::intents::IntentEntry>,
+    memory: Option<String>,
+    #[serde(rename = "cpuUsed", default)]
+    cpu_used: f64,
+    #[serde(default)]
+    errors: Vec<String>,
+    #[serde(default)]
+    console: Vec<String>,
+    #[serde(default, rename = "memorySegments")]
+    memory_segments: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(rename = "activeSegments", default)]
+    active_segments: Vec<u32>,
+}
+
 pub struct TickResult {
-    pub intents_json: String,
+    /// 已解析的意图 (整个 tick 结果只反序列化一次)
+    pub intents: IntentList,
     pub memory: String,
     pub cpu_used: f64,
     pub errors: Vec<String>,
@@ -212,22 +234,22 @@ impl BotRuntime {
         self.runtime.as_mut().expect("isolate 已被销毁")
     }
 
-    /// 运行一个游戏 tick (不限制 CPU)
-    pub fn run_tick(&mut self, snapshot_json: &str, memory_json: &str) -> Result<TickResult, String> {
+    /// 运行一个游戏 tick (不限制 CPU)。快照/内存按值传入 (转移所有权, 避免边界拷贝)。
+    pub fn run_tick(&mut self, snapshot_json: String, memory_json: String) -> Result<TickResult, String> {
         self.run_tick_limited(snapshot_json, memory_json, None)
     }
 
     /// 运行一个游戏 tick; `timeout_ms` 为 Some 时启用 CPU 看门狗 (官方 tickLimit)。
     pub fn run_tick_limited(
         &mut self,
-        snapshot_json: &str,
-        memory_json: &str,
+        snapshot_json: String,
+        memory_json: String,
         timeout_ms: Option<f64>,
     ) -> Result<TickResult, String> {
         TICK_IO.with(|t| {
             let mut io = t.borrow_mut();
-            io.snapshot = snapshot_json.to_string();
-            io.memory = memory_json.to_string();
+            io.snapshot = snapshot_json;
+            io.memory = memory_json;
             io.runtime_data = self.runtime_data_json();
             io.result = None;
             io.flushed_console.clear();
@@ -255,9 +277,11 @@ impl BotRuntime {
             let console = TICK_IO.with(|t| {
                 t.borrow().flushed_console.iter().take(50).cloned().collect::<Vec<_>>()
             });
+            // memory 原样取回 (本 tick 的 JS 改动作废), 零拷贝
+            let memory = TICK_IO.with(|t| std::mem::take(&mut t.borrow_mut().memory));
             return Ok(TickResult {
-                intents_json: "[]".to_string(),
-                memory: memory_json.to_string(),
+                intents: IntentList::parse("[]"),
+                memory,
                 cpu_used: timeout_ms.unwrap_or(0.0),
                 errors: vec!["Script execution timed out ungracefully".to_string()],
                 console,
@@ -269,28 +293,20 @@ impl BotRuntime {
         let raw = TICK_IO
             .with(|t| t.borrow().result.clone())
             .ok_or_else(|| "__runTick 未提交结果".to_string())?;
-        let value: serde_json::Value =
+        // 整个结果只解析一次 (意图/内存/错误一次拿全, 不再二次 parse)
+        let outcome: TickOutcome =
             serde_json::from_str(&raw).map_err(|e| format!("tick 结果解析失败: {e}"))?;
-        self.apply_segments(&value);
+        self.apply_segments(&outcome.memory_segments, outcome.active_segments);
+        // 官方 saveUserMemory 超过 2MB 会拒绝保存 (memory 为 null) → 保留上一 tick 的 Memory
+        let memory = outcome.memory.unwrap_or_else(|| {
+            TICK_IO.with(|t| std::mem::take(&mut t.borrow_mut().memory))
+        });
         Ok(TickResult {
-            intents_json: value.get("intents").cloned().unwrap_or_default().to_string(),
-            // 官方 saveUserMemory 超过 2MB 会拒绝保存 → 保留上一 tick 的 Memory
-            memory: value
-                .get("memory")
-                .and_then(|m| m.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| memory_json.to_string()),
-            cpu_used: value.get("cpuUsed").and_then(|c| c.as_f64()).unwrap_or(0.0),
-            errors: value
-                .get("errors")
-                .and_then(|e| e.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default(),
-            console: value
-                .get("console")
-                .and_then(|c| c.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default(),
+            intents: IntentList::from_entries(outcome.intents),
+            memory,
+            cpu_used: outcome.cpu_used,
+            errors: outcome.errors,
+            console: outcome.console,
             timed_out: false,
         })
     }
@@ -312,24 +328,29 @@ impl BotRuntime {
 
     /// 应用 shim 回传的段写入与下一 tick 激活列表 (官方 outMessage.memorySegments / activeSegments)。
     /// 官方在 isolate 被中断时拿不到 outMessage, 因此超时 tick 不写段 (此处也不调用)。
-    fn apply_segments(&mut self, value: &serde_json::Value) {
-        if let Some(segs) = value.get("memorySegments").and_then(|v| v.as_object()) {
+    fn apply_segments(
+        &mut self,
+        segments: &Option<std::collections::BTreeMap<String, String>>,
+        active: Vec<u32>,
+    ) {
+        if let Some(segs) = segments {
             for (k, v) in segs {
-                if let (Ok(id), Some(s)) = (k.parse::<u32>(), v.as_str()) {
-                    self.segments.insert(id, s.to_string());
+                if let Ok(id) = k.parse::<u32>() {
+                    self.segments.insert(id, v.clone());
                 }
             }
         }
-        self.active_segments = value
-            .get("activeSegments")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect())
-            .unwrap_or_default();
+        self.active_segments = active;
     }
 
     /// 已存储的内存段 (测试/排查用)
     pub fn segments(&self) -> &std::collections::BTreeMap<u32, String> {
         &self.segments
+    }
+
+    /// 取回滞留在 IO 通道里的 memory (致命错误路径保全上一 tick 状态用)
+    pub fn pending_memory(&mut self) -> String {
+        TICK_IO.with(|t| std::mem::take(&mut t.borrow_mut().memory))
     }
 }
 

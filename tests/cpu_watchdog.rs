@@ -2,7 +2,6 @@
 //! 对齐官方语义: 中断的 tick 整 tick 丢弃 (意图不结算、Memory 改动不落盘), cpuUsed = tickLimit,
 //! 且 isolate 必须被清理干净以便继续跑后续 tick。
 
-use screeps_sim::engine::intents::IntentList;
 use screeps_sim::engine::scenario::{build_world, Scenario};
 use screeps_sim::engine::snapshot::{build_snapshot, CpuView, SnapshotOptions};
 use screeps_sim::engine::world::World;
@@ -58,10 +57,10 @@ fn cpu_timeout_aborts_tick_and_recovers() {
 		let mut bot = BotRuntime::new(bundle, 1).unwrap();
 		let snap = snapshot(&world);
 
-		let r1 = bot.run_tick_limited(&snap, "{}", Some(150.0)).unwrap();
+		let r1 = bot.run_tick_limited(snap.clone(), "{}".to_string(), Some(150.0)).unwrap();
 		assert!(r1.timed_out, "首 tick 应被 CPU 看门狗中断");
 		assert_eq!(r1.cpu_used, 150.0, "超时 tick 的 cpuUsed 应等于 tickLimit");
-		assert_eq!(r1.intents_json, "[]", "官方在 isolate 被终止时丢失整个 tick 的意图");
+		assert!(r1.intents.entries.is_empty(), "官方在 isolate 被终止时丢失整个 tick 的意图");
 		assert_eq!(r1.memory, "{}", "超时 tick 的 Memory 改动不落盘");
 		assert!(
 			r1.errors.iter().any(|e| e.contains("timed out ungracefully")),
@@ -75,13 +74,13 @@ fn cpu_timeout_aborts_tick_and_recovers() {
 		);
 
 		// 看门狗必须清除 v8 终止标志, 否则后续 tick 会立刻被中断
-		let r2 = bot.run_tick_limited(&snap, "{}", Some(5_000.0)).unwrap();
+		let r2 = bot.run_tick_limited(snap.clone(), "{}".to_string(), Some(5_000.0)).unwrap();
 		assert!(!r2.timed_out, "第二 tick 应正常完成 (isolate 已恢复)");
 		assert!(r2.memory.contains("touched"), "正常 tick 的 Memory 应落盘: {}", r2.memory);
 		assert!(
-			!r2.intents_json.is_empty() && r2.intents_json != "[]",
-			"正常 tick 应提交意图: {}",
-			r2.intents_json
+			!r2.intents.entries.is_empty(),
+			"正常 tick 应提交意图: {:?}",
+			r2.intents.entries
 		);
 	});
 }
@@ -98,10 +97,13 @@ fn cpu_no_timeout_when_under_limit() {
 			};
 		"#;
 		let mut bot = BotRuntime::new(bundle, 1).unwrap();
-		let r = bot.run_tick_limited(&snapshot(&world), "{}", Some(5_000.0)).unwrap();
+		let r = bot.run_tick_limited(snapshot(&world), "{}".to_string(), Some(5_000.0)).unwrap();
 		assert!(!r.timed_out, "轻量 tick 不应超时");
 		assert!(r.errors.is_empty(), "不应产生错误: {:?}", r.errors);
-		assert!(r.intents_json.contains("createConstructionSite"), "意图应正常提交");
+		assert!(
+			r.intents.entries.iter().any(|(_, n, _)| n == "createConstructionSite"),
+			"意图应正常提交"
+		);
 	});
 }
 
@@ -113,7 +115,7 @@ fn cpu_measure_only_without_timeout() {
 		let world = build_world(&scenario).unwrap();
 		let bundle = r#"exports.loop = function() { Memory.a = 1; };"#;
 		let mut bot = BotRuntime::new(bundle, 1).unwrap();
-		let r = bot.run_tick(&snapshot(&world), "{}").unwrap();
+		let r = bot.run_tick(snapshot(&world), "{}".to_string()).unwrap();
 		assert!(!r.timed_out);
 		assert!(r.memory.contains("\"a\":1"), "Memory 应落盘: {}", r.memory);
 	});
@@ -131,8 +133,8 @@ fn intent_cpu_is_charged() {
 				for (const c of Object.values(Game.creeps)) { c.move(1); c.move(3); }
 			};
 		"#;
-		let r = BotRuntime::new(bundle, 1).unwrap().run_tick(&snapshot(&world), "{}").unwrap();
-		assert_eq!(IntentList::parse(&r.intents_json).entries.len(), 80, "应提交 80 条 move 意图");
+		let r = BotRuntime::new(bundle, 1).unwrap().run_tick(snapshot(&world), "{}".to_string()).unwrap();
+		assert_eq!(r.intents.entries.len(), 80, "应提交 80 条 move 意图");
 		assert!(
 			r.cpu_used >= 8.0,
 			"40 个唯一 (对象, 意图) 组合应至少计 8 CPU, 实际 {}",

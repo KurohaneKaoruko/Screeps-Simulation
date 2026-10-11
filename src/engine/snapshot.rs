@@ -23,7 +23,8 @@ pub fn build_snapshot(world: &World, opts: &SnapshotOptions) -> Value {
     let mut room_names = Vec::new();
     for (name, room) in &world.rooms {
         room_names.push(name.clone());
-        terrain.insert(name.clone(), Value::String(room.terrain.to_string()));
+        // tick 期间地形不可变 → 使用构建期缓存, 避免每 tick 重算 2500 字符
+        terrain.insert(name.clone(), Value::String(room.terrain_json.clone()));
     }
 
     let mut rooms = Map::new();

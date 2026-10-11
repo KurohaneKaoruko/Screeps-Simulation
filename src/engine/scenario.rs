@@ -490,6 +490,10 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
 
         world.rooms.insert(spec.name.clone(), room);
     }
+    // 地形定稿: 构建期 clear_walls_around 等修改结束后, 刷新快照缓存 (tick 期间不再变)
+    for room in world.rooms.values_mut() {
+        room.refresh_terrain_cache();
+    }
     prime_world(&mut world);
     Ok(world)
 }

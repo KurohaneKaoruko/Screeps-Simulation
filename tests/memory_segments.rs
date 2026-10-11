@@ -55,12 +55,12 @@ fn memory_segments_persist_and_deactivate() {
 		let mut bot = BotRuntime::new(bundle, 1).unwrap();
 
 		// tick1: 段未激活 → 读不到, 写入 "t1", 激活 [0,1]
-		let r1 = bot.run_tick(&snap, "{}").unwrap();
+		let r1 = bot.run_tick(snap.clone(), "{}".to_string()).unwrap();
 		assert!(r1.console[0].contains("\"seg0\":null"), "首 tick 段未激活应读不到: {:?}", r1.console);
 		assert_eq!(bot.segments().get(&0).map(String::as_str), Some("t1"), "段 0 应写入宿主");
 
 		// tick2: 段已激活 → 读到 "t1", 追加为 "t1t2"
-		let r2 = bot.run_tick(&snap, "{}").unwrap();
+		let r2 = bot.run_tick(snap.clone(), "{}".to_string()).unwrap();
 		assert!(r2.console[0].contains("\"seg0\":\"t1\""), "次 tick 应读到上一 tick 写入: {:?}", r2.console);
 		assert_eq!(bot.segments().get(&0).map(String::as_str), Some("t1t2"));
 		assert_eq!(
@@ -91,11 +91,11 @@ fn segments_require_reactivation_each_tick() {
 			};
 		"#;
 		let mut bot = BotRuntime::new(bundle, 1).unwrap();
-		let r1 = bot.run_tick(&snap, "{}").unwrap();
+		let r1 = bot.run_tick(snap.clone(), "{}".to_string()).unwrap();
 		assert!(r1.console[0].contains("\"seg3\":null"), "tick1 未激活: {:?}", r1.console);
-		let r2 = bot.run_tick(&snap, "{}").unwrap();
+		let r2 = bot.run_tick(snap.clone(), "{}".to_string()).unwrap();
 		assert!(r2.console[0].contains("\"seg3\":\"hello\""), "tick2 已激活: {:?}", r2.console);
-		let r3 = bot.run_tick(&snap, "{}").unwrap();
+		let r3 = bot.run_tick(snap.clone(), "{}".to_string()).unwrap();
 		assert!(
 			r3.console[0].contains("\"seg3\":null"),
 			"tick3 未重新激活应读不到 (段内容仍保留在宿主): {:?}",
@@ -132,7 +132,7 @@ fn raw_memory_validation_matches_official() {
 			};
 		"#;
 		let mut bot = BotRuntime::new(bundle, 1).unwrap();
-		let r = bot.run_tick(&snap, "{}").unwrap();
+		let r = bot.run_tick(snap.clone(), "{}".to_string()).unwrap();
 		let info: serde_json::Value =
 			serde_json::from_str(r.console.first().map(String::as_str).unwrap_or("{}")).unwrap();
 		assert_eq!(info["notString"], "Raw memory value is not a string");
@@ -174,7 +174,7 @@ fn memory_is_configurable_and_survives_delete() {
 		let mut bot = BotRuntime::new(bundle, 1).unwrap();
 		let memory = String::from("{}");
 
-		let r1 = bot.run_tick(&snap, &memory).unwrap();
+		let r1 = bot.run_tick(snap.clone(), memory.clone()).unwrap();
 		let info: serde_json::Value =
 			serde_json::from_str(r1.console.first().map(String::as_str).unwrap_or("{}")).unwrap();
 		assert_eq!(info["configurable"], true, "Memory 必须是可配置属性: {info}");
@@ -186,7 +186,7 @@ fn memory_is_configurable_and_survives_delete() {
 			r1.memory
 		);
 
-		let r2 = bot.run_tick(&snap, &r1.memory).unwrap();
+		let r2 = bot.run_tick(snap.clone(), r1.memory.clone()).unwrap();
 		let info2: serde_json::Value =
 			serde_json::from_str(r2.console.first().map(String::as_str).unwrap_or("{}")).unwrap();
 		assert_eq!(info2["configurable"], true, "下一 tick 访问器应自动重建: {info2}");

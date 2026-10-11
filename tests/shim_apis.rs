@@ -37,8 +37,8 @@ fn run_once(bundle: &str, world: &mut screeps_sim::engine::world::World) -> (Vec
 		},
 	);
 	let mut bot = BotRuntime::new(bundle, 1).unwrap();
-	let result = bot.run_tick(&serde_json::to_string(&snapshot).unwrap(), "{}").unwrap();
-	(IntentList::parse(&result.intents_json).entries, result.console)
+	let result = bot.run_tick(serde_json::to_string(&snapshot).unwrap(), "{}".to_string()).unwrap();
+	(result.intents.entries, result.console)
 }
 
 /// PathFinder 跨房寻路: W5N8 (25,25) → W5N7 (25,25) 路径应跨过出口并到达目标房
@@ -151,7 +151,7 @@ fn moveto_end_to_end_inner() {
 			},
 		);
 		let result = bot
-			.run_tick(&serde_json::to_string(&snapshot).unwrap(), &memory)
+			.run_tick(serde_json::to_string(&snapshot).unwrap(), memory.clone())
 			.unwrap();
 		memory = result.memory.clone();
 		let info: serde_json::Value =
@@ -160,7 +160,7 @@ fn moveto_end_to_end_inner() {
 		// Memory 首 tick 写入后应跨 tick 保留 (此前每 tick 都新建 runtime 且传 "{}", 测不到)
 		assert_eq!(info["started"], 0, "Memory 应跨 tick 往返: {info}");
 
-		let intents = IntentList::parse(&result.intents_json);
+		let intents = result.intents;
 		tick::run_tick(&mut world, movement, &intents);
 		pos = (world.rooms["W5N8"].objects[&id].x, world.rooms["W5N8"].objects[&id].y);
 	}
@@ -402,7 +402,7 @@ fn loop_exception_keeps_intents_and_memory_inner() {
 	);
 	let mut bot = BotRuntime::new(bundle, 1).unwrap();
 	let result = bot
-		.run_tick(&serde_json::to_string(&snapshot).unwrap(), "{}")
+		.run_tick(serde_json::to_string(&snapshot).unwrap(), "{}".to_string())
 		.unwrap();
 	assert_eq!(result.errors.len(), 1, "异常应被捕获并上报 (不中断模拟)");
 	assert_eq!(result.errors[0].contains("boom"), true, "异常信息应包含原始消息");
@@ -411,7 +411,7 @@ fn loop_exception_keeps_intents_and_memory_inner() {
 		"异常前的 Memory 写入应保留: {}",
 		result.memory
 	);
-	let intents = IntentList::parse(&result.intents_json);
+	let intents = result.intents;
 	assert!(
 		intents.entries.iter().any(|(_, n, _)| n == "move"),
 		"异常前登记的意图不应丢弃"

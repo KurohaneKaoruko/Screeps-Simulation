@@ -58,19 +58,19 @@ fn global_reset_clears_globals_but_keeps_memory_and_segments() {
 		let snap = snapshot(&world);
 		let mut memory = String::from("{}");
 
-		let r1 = bot.run_tick(&snap, &memory).unwrap();
+		let r1 = bot.run_tick(snap.clone(), memory.clone()).unwrap();
 		assert_eq!(console_json(&r1)["g"], 1);
 		assert_eq!(console_json(&r1)["mem"], 1);
 		memory = r1.memory.clone();
 
-		let r2 = bot.run_tick(&snap, &memory).unwrap();
+		let r2 = bot.run_tick(snap.clone(), memory.clone()).unwrap();
 		assert_eq!(console_json(&r2)["g"], 2, "未重置时全局变量应跨 tick 累加");
 		assert_eq!(console_json(&r2)["mem"], 2, "Memory 应跨 tick 往返");
 		memory = r2.memory.clone();
 
 		bot.reset_global().unwrap();
 
-		let r3 = bot.run_tick(&snap, &memory).unwrap();
+		let r3 = bot.run_tick(snap.clone(), memory.clone()).unwrap();
 		assert_eq!(console_json(&r3)["g"], 1, "重置后全局变量应从零开始");
 		assert_eq!(console_json(&r3)["mem"], 3, "Memory 必须跨全局重置保留");
 		assert_eq!(bot.segments().get(&7).map(String::as_str), Some("seg3"), "内存段也应保留");
@@ -174,8 +174,8 @@ fn same_scenario_rerun_is_deterministic() {
 			let mut memory = String::from("{}");
 			for _ in 0..8 {
 				let snap = snapshot(&world);
-				let r = bot.run_tick(&snap, &memory).unwrap();
-				let intents = screeps_sim::engine::intents::IntentList::parse(&r.intents_json);
+				let r = bot.run_tick(snap.clone(), memory.clone()).unwrap();
+				let intents = r.intents;
 				screeps_sim::engine::tick::run_tick(&mut world, &mut movement, &intents);
 				memory = r.memory;
 			}
@@ -216,4 +216,60 @@ fn scenario_validation_accepts_valid_input() {
 	assert!(s.cpu_enforce());
 	assert_eq!(s.global_reset_every(), Some(500));
 	assert_eq!(s.cpu_limit(), 20.0);
+}
+
+/// 世界状态哈希黄金回归: 受控意图流跑 12 tick 后的 state_hash 必须恒定。
+/// 引擎任何结算顺序/数值变化都会改变哈希 —— 变化需有明确理由并更新此基线。
+/// (FNV-1a 手工实现, 跨 Rust 版本/平台稳定; 见 World::state_hash)
+#[test]
+fn world_state_hash_golden() {
+	const SCENE: &str = r#"{
+		"name": "hash-golden",
+		"seed": 1,
+		"rooms": [
+			{ "name": "W5N8", "terrain": { "kind": "flat" },
+			  "sources": { "positions": [[18, 22]] },
+			  "controller": { "level": 1, "pos": [28, 27] },
+			  "structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 }],
+			  "creeps": [{ "name": "w", "body": ["work", "move", "carry"], "pos": [24, 25] }] }
+		]
+	}"#;
+	let scenario = Scenario::from_json(SCENE).unwrap();
+	let run = || -> (u64, u64) {
+		let mut world = build_world(&scenario).unwrap();
+		let mut movement = screeps_sim::engine::movement::Movement::default();
+		// 受控意图流: 单位交替左移/采集 (不依赖 JS, 纯引擎确定性)
+		let creep_id = world
+			.rooms
+			.values()
+			.next()
+			.unwrap()
+			.objects
+			.values()
+			.find(|o| o.obj_type == "creep")
+			.map(|o| format!("{:024x}", o.id))
+			.unwrap();
+		for i in 0..12 {
+			let intents = if i % 3 == 2 {
+				screeps_sim::engine::intents::IntentList::parse(&format!(r#"[{{"o":"{creep_id}","n":"harvest"}}]"#))
+			} else {
+				screeps_sim::engine::intents::IntentList::parse(&format!(
+					r#"[{{"o":"{creep_id}","n":"move","d":{{"direction":7}}}}]"#
+				))
+			};
+			screeps_sim::engine::tick::run_tick(&mut world, &mut movement, &intents);
+		}
+		(world.tick, world.state_hash())
+	};
+	let (tick_a, hash_a) = run();
+	let (tick_b, hash_b) = run();
+	assert_eq!((tick_a, hash_a), (tick_b, hash_b), "同意图流两次运行哈希必须一致 (确定性)");
+	assert_eq!(tick_a, 12);
+	let golden = format!("0x{hash_a:016x}");
+	println!("state_hash = {golden}");
+	assert_eq!(
+		golden,
+		"0x886da1f4087983e9", // 黄金基线: 变更结算逻辑时有意更新
+		"世界状态哈希发生变化 —— 引擎数值/顺序回归或基线需要有意更新"
+	);
 }

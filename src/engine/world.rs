@@ -16,6 +16,8 @@ pub struct GameEvent {
 pub struct Room {
     pub name: String,
     pub terrain: Terrain,
+    /// terrain 的快照序列化缓存 (tick 期间地形不可变, 世界构建后刷新一次)
+    pub terrain_json: String,
     pub objects: BTreeMap<u64, Obj>,
     /// 本 tick 发生的事件 (每 tick 开始时清空, 经快照传给 bot)
     pub events: Vec<GameEvent>,
@@ -23,12 +25,19 @@ pub struct Room {
 
 impl Room {
     pub fn new(name: &str, terrain: Terrain) -> Room {
+        let terrain_json = terrain.to_string();
         Room {
             name: name.to_string(),
             terrain,
+            terrain_json,
             objects: BTreeMap::new(),
             events: Vec::new(),
         }
+    }
+
+    /// 世界构建期地形定稿后刷新缓存 (terrain 在 tick 期间不可变)
+    pub fn refresh_terrain_cache(&mut self) {
+        self.terrain_json = self.terrain.to_string();
     }
 
     /// 记录一条事件 (引擎结算期间调用)
@@ -241,6 +250,76 @@ impl World {
             }
         }
         None
+    }
+
+    /// 世界状态哈希 (FNV-1a 64)。用于黄金回归与确定性对拍:
+    /// 任何结算顺序/数值/字段的变化都会改变哈希。刻意不使用 std 的 Hasher
+    /// (其跨 Rust 版本不稳定)。覆盖: 全部对象的核心字段 + 房间能量 + 全局计数器。
+    pub fn state_hash(&self) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        fn mix(h: &mut u64, bytes: &[u8]) {
+            for &b in bytes {
+                *h ^= b as u64;
+                *h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        fn mix_str(h: &mut u64, s: &str) {
+            mix(h, s.as_bytes());
+            mix(h, b"\x1f");
+        }
+        fn mix_u64(h: &mut u64, v: u64) {
+            mix(h, &v.to_le_bytes());
+        }
+        mix_u64(&mut h, self.tick);
+        mix_u64(&mut h, self.next_id);
+        mix_u64(&mut h, self.gcl_progress);
+        mix_u64(&mut h, self.creeps_produced);
+        mix_u64(&mut h, self.creeps_lost);
+        mix_u64(&mut h, self.energy_harvested);
+        mix_u64(&mut h, self.energy_built);
+        mix_u64(&mut h, self.energy_control);
+        mix_u64(&mut h, self.energy_spawned);
+        for (level, t) in &self.rcl_timeline {
+            mix_u64(&mut h, *level as u64);
+            mix_u64(&mut h, *t);
+        }
+        for (name, room) in &self.rooms {
+            mix_str(&mut h, name);
+            mix_str(&mut h, &room.terrain_json);
+            mix_u64(&mut h, room.energy_available() as u64);
+            for obj in room.objects.values() {
+                mix_u64(&mut h, obj.id);
+                mix_str(&mut h, &obj.obj_type);
+                mix_u64(&mut h, obj.x as u64);
+                mix_u64(&mut h, obj.y as u64);
+                mix_u64(&mut h, obj.hits as u64);
+                mix_u64(&mut h, obj.mine as u64);
+                mix_u64(&mut h, obj.enemy as u64);
+                mix_u64(&mut h, obj.off as u64);
+                mix_u64(&mut h, obj.fatigue as u64);
+                mix_u64(&mut h, obj.spawning as u64);
+                mix_u64(&mut h, obj.age_time.unwrap_or(0));
+                mix_u64(&mut h, obj.progress as u64);
+                mix_u64(&mut h, obj.level as u64);
+                mix_u64(&mut h, obj.cooldown as u64);
+                mix_u64(&mut h, obj.next_regeneration_time.unwrap_or(0));
+                mix_u64(&mut h, obj.next_decay_time.unwrap_or(0));
+                mix_u64(&mut h, obj.damage_to_apply as u64);
+                mix_u64(&mut h, obj.heal_to_apply as u64);
+                if let Some(n) = &obj.name {
+                    mix_str(&mut h, n);
+                }
+                for (res, amount) in &obj.store {
+                    mix_str(&mut h, res);
+                    mix_u64(&mut h, *amount as u64);
+                }
+                for part in &obj.body {
+                    mix_str(&mut h, &part.part_type);
+                    mix_u64(&mut h, part.hits as u64);
+                }
+            }
+        }
+        h
     }
 }
 

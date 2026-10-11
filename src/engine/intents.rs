@@ -91,6 +91,15 @@ pub struct IntentList {
     pub entries: Vec<(String, String, Value)>,
 }
 
+/// shim 回传的原始意图条目 ({o: 对象id, n: 意图名, d: 数据})
+#[derive(serde::Deserialize)]
+pub struct IntentEntry {
+    pub o: String,
+    pub n: String,
+    #[serde(default)]
+    pub d: Option<Value>,
+}
+
 impl IntentList {
     pub fn parse(json: &str) -> IntentList {
         let mut entries = Vec::new();
@@ -107,6 +116,16 @@ impl IntentList {
             }
         }
         IntentList { entries }
+    }
+
+    /// 从整 tick 结果的一次性反序列化构造 (避免意图被解析两遍)
+    pub fn from_entries(entries: Vec<IntentEntry>) -> IntentList {
+        IntentList {
+            entries: entries
+                .into_iter()
+                .map(|e| (e.o, e.n, e.d.unwrap_or(Value::Null)))
+                .collect(),
+        }
     }
 }
 

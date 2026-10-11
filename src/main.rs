@@ -19,6 +19,28 @@ use screeps_sim::engine::world::World;
 use std::io::Write as _;
 use std::time::Instant;
 
+/// 分相耗时累计 (快照序列化 / JS 执行含结果解析 / 引擎结算)
+#[derive(Default)]
+struct PhaseTiming {
+    snapshot_us: u64,
+    js_us: u64,
+    engine_us: u64,
+}
+
+impl PhaseTiming {
+    fn summary(&self, ticks: u64) -> serde_json::Value {
+        let per = |us: u64| {
+            let us = us as f64 / ticks.max(1) as f64;
+            serde_json::json!({ "avgMs": (us / 1000.0 * 1000.0).round() / 1000.0 })
+        };
+        serde_json::json!({
+            "snapshot": per(self.snapshot_us),
+            "js": per(self.js_us),
+            "engine": per(self.engine_us),
+        })
+    }
+}
+
 fn main() {
     // deno_core 的 V8 isolate 需要 tokio 运行时上下文 (延迟任务调度)
     let tokio_rt = tokio::runtime::Builder::new_current_thread()
@@ -200,6 +222,8 @@ async fn async_main() {
     let (mut total_moves, mut total_moved) = (0usize, 0usize);
     let mut run = 0u64;
     let mut fatal_error = false;
+    // 分相耗时 (微秒累计): 定位模拟器自身开销 (P0 优化基线)
+    let mut phases = PhaseTiming::default();
     while run < total_ticks {
         // 0. 全局重置 (isolate 重建; 全局变量丢失、Memory/内存段保留)
         if let Some(every) = global_reset_every {
@@ -261,14 +285,19 @@ async fn async_main() {
             },
             always_visible: scenario.always_visible,
         };
-        let snapshot = build_snapshot(&world, &snapshot_opts);
+        let t_snap = Instant::now();
+        let snapshot = build_snapshot(&world, &snapshot_opts).to_string();
+        phases.snapshot_us += t_snap.elapsed().as_micros() as u64;
 
-        // 2. bot 执行 (enforce 时按当前 tickLimit 强制中断)
+        // 2. bot 执行 (enforce 时按当前 tickLimit 强制中断)。快照/内存按值转移, 避免边界拷贝。
         let tick_timeout = if enforce_cpu { Some(tick_limit) } else { None };
-        let tick_result = match bot.run_tick_limited(&snapshot.to_string(), &memory_json, tick_timeout) {
+        let t_js = Instant::now();
+        let tick_result = match bot.run_tick_limited(snapshot, std::mem::take(&mut memory_json), tick_timeout) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[tick {}] 运行时致命错误: {e}", world.tick);
+                // memory 已按值移交 runtime, 从 IO 通道取回上一 tick 状态 (dump-memory 用)
+                memory_json = bot.pending_memory();
                 // 致命错误计入统计: 断言基于完整事实, 不再"带着错误通过"
                 let (rcl, progress, progress_total, energy_available, storage_energy, creeps, spawning) =
                     summarize(&world);
@@ -294,6 +323,7 @@ async fn async_main() {
                 break;
             }
         };
+        phases.js_us += t_js.elapsed().as_micros() as u64;
         let cpu_used = tick_result.cpu_used;
         if tick_result.timed_out {
             eprintln!(
@@ -323,13 +353,15 @@ async fn async_main() {
             }
         }
 
-        // 4. 意图结算 + tick 推进
-        let intents = IntentList::parse(&tick_result.intents_json);
+        // 4. 意图结算 + tick 推进 (意图已在 runtime 单次解析)
+        let intents = tick_result.intents;
         let intent_count = intents.entries.len();
         for (_, name, _) in &intents.entries {
             *intent_histogram.entry(name.clone()).or_insert(0) += 1;
         }
+        let t_engine = Instant::now();
         let outcome = tick::run_tick(&mut world, &mut movement, &intents);
+        phases.engine_us += t_engine.elapsed().as_micros() as u64;
         total_moves += outcome.move_stats.0;
         total_moved += outcome.move_stats.1;
 
@@ -404,6 +436,7 @@ async fn async_main() {
             elapsed.as_secs_f64(),
             &assert_results,
             fatal_error,
+            phases.summary(actual_ticks),
         );
         if let Ok(text) = serde_json::to_string_pretty(&report) {
             if path == "-" {
@@ -460,6 +493,13 @@ async fn async_main() {
         total_moved,
         total_moves,
         100.0 * total_moved as f64 / total_moves.max(1) as f64
+    ));
+    say(format!(
+        "分相耗时/tick: 快照 {:.3}ms · JS {:.3}ms · 引擎 {:.3}ms (状态哈希 0x{:016x})",
+        phases.snapshot_us as f64 / 1000.0 / actual_ticks.max(1) as f64,
+        phases.js_us as f64 / 1000.0 / actual_ticks.max(1) as f64,
+        phases.engine_us as f64 / 1000.0 / actual_ticks.max(1) as f64,
+        world.state_hash()
     ));
 
     // ── 断言报告 ──
@@ -539,6 +579,7 @@ fn build_json_report(
     seconds: f64,
     asserts: &[screeps_sim::engine::metrics::AssertResult],
     fatal: bool,
+    profile: serde_json::Value,
 ) -> serde_json::Value {
     use serde_json::json;
     let rcl_timeline: serde_json::Value = world
@@ -578,6 +619,8 @@ fn build_json_report(
         "rclTimeline": rcl_timeline,
         "memoryPeakBytes": metrics.memory_peak,
         "totalErrors": metrics.total_errors,
+        "stateHash": format!("0x{:016x}", world.state_hash()),
+        "profile": profile,
         "asserts": asserts
             .iter()
             .map(|r| json!({
