@@ -1,0 +1,43 @@
+{
+	"name": "screeps-sim",
+	"version": "0.1.0",
+	"description": "Screeps 本地高速模拟器: Rust 结算引擎 + 内嵌 V8, .sim.ts 用例驱动",
+	"type": "module",
+	"license": "ISC",
+	"bin": {
+		"screeps-sim": "bin/screeps-sim.mjs"
+	},
+	"exports": {
+		".": {
+			"types": "./index.d.ts",
+			"default": "./index.mjs"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"bin",
+		"runner",
+		"index.mjs",
+		"index.d.ts",
+		"examples",
+		"src",
+		"tests",
+		"scenarios",
+		"Cargo.toml",
+		"Cargo.lock",
+		"README.md"
+	],
+	"scripts": {
+		"build": "cargo build --release",
+		"test": "node runner/selftest.mjs && node bin/screeps-sim.mjs test examples/smoke.sim.ts --bundle examples/fixtures/min-bot.js"
+	},
+	"engines": {
+		"node": ">=22.6"
+	},
+	"keywords": [
+		"screeps",
+		"simulation",
+		"bot",
+		"testing"
+	]
+}
