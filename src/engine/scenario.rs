@@ -284,11 +284,16 @@ impl Scenario {
         self.cpu.as_ref().and_then(|c| c.bucket).unwrap_or(10_000.0)
     }
 
+    /// 显式覆盖的 tickLimit (官方 `cpu.tick_limit`; None 表示按 bucket 逐 tick 计算)
+    pub fn cpu_tick_limit_override(&self) -> Option<f64> {
+        self.cpu.as_ref().and_then(|c| c.tick_limit).filter(|v| *v > 0.0)
+    }
+
+    /// tickLimit: 覆盖值优先, 否则按官方公式 `min(500, max(0, bucket) + limit)`
+    /// (官方 D/runtime/data.js:149-159)。
     pub fn cpu_tick_limit(&self) -> f64 {
-        self.cpu.as_ref().and_then(|c| c.tick_limit).unwrap_or_else(|| {
-            let limit = self.cpu_limit();
-            let bucket = self.cpu_bucket();
-            (limit + bucket).min(500.0).max(limit)
+        self.cpu_tick_limit_override().unwrap_or_else(|| {
+            crate::engine::cpu::CpuState::new(self.cpu_limit(), self.cpu_bucket()).tick_limit()
         })
     }
 

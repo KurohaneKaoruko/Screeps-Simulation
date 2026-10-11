@@ -2,6 +2,7 @@
 //! 只关心世界状态与意图, 不涉及 JS 执行 —— JS 宿主由 runtime.rs 提供。
 
 pub mod constants;
+pub mod cpu;
 pub mod intents;
 pub mod metrics;
 pub mod movement;

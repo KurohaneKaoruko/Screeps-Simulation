@@ -41,10 +41,14 @@
 - **多房间**：移动仲裁按房间独立（官方 `processor.js` 每房间各自 `check`），跨房移动不再互相取消；
   `rate1`（交换对象）优先于同格第三方抢位。
 - **运行框架**：CPU 计量含官方意图计价（每个「对象 + 意图」组合首次提交 0.2 CPU，重复不重复计），
-  `Game.cpu.tickLimit = min(500, limit + bucket)`；`cpu.enforce` 打开后由看门狗线程在 tickLimit
+  `Game.cpu.tickLimit = min(500, max(0, bucket) + limit)`、`Game.cpu.bucket` 显示 `max(0, raw)`；
+  bucket 按官方 `raw = min(10000, raw + limit − ceil(cpuUsed))` 结算，**可以为负** —— 为负时跳过该 tick
+  的用户执行（官方 "Script execution has been terminated: CPU bucket is empty"，世界照常推进，
+  跳过期间每 tick 回能 `limit`、下限 `-2×limit`）；`cpu.enforce` 打开后由看门狗线程在 tickLimit
   到期时中断 V8（官方 "Script execution timed out ungracefully"：整 tick 丢弃、`cpuUsed = tickLimit`）；
   `RawMemory` 段跨 tick 持久（≤10 段、0..99、≤100KB，未重新激活即停用）；`Memory` 超过 2MB 拒绝保存；
   可选 `globalResetEvery` 定期重建 isolate 模拟全局重置（全局变量丢失、Memory 与段保留）。
+  运行时致命错误会计入错误统计并以退出码 1 结束（不再"带着错误通过断言"）。
 - **JS shim** (`src/js/screeps.js`)：官方 runtime 语义的 API 层 —— 全局常量（对齐官方
   `constants.js`，含 `CONTROLLER_STRUCTURES` / `EVENT_*` / `TOWER_*` / `ROAD_*` 等）、
   类体系（可被 `Creep.prototype.move` 等原型补丁正常包装）、意图提交与返回码校验、
@@ -121,6 +125,14 @@ export RUSTY_V8_ARCHIVE=/tmp/librusty_v8.a.gz
 cargo build --release
 ```
 
+### rustc 已知问题
+
+本仓库当前工具链 rustc 1.95.0（发行版源码 tarball 构建）在 `--release`（opt-level 3）下会把
+`objects.rs::recalc_body` 中形如 `if hits > 100 { 100 } else { hits.max(0) as u32 }` 的表达式
+错误编译成不封顶的赋值（debug / opt-level 0 均正确）。已改用 `hits.clamp(0, 100)` 规避；
+修改该函数时请保留 clamp 写法并跑 `cargo test --release` 中的
+`damage_recalc_body_from_tail` 回归。
+
 ## 场景格式
 
 ```jsonc
@@ -131,7 +143,7 @@ cargo build --release
   "cpu": {
     "limit": 100,             // 每 tick CPU 上限 (ms)
     "bucket": 10000,          // 初始 bucket
-    "tick_limit": 500,        // 覆盖 tickLimit; 默认 min(500, bucket + limit)
+    "tick_limit": 500,        // 覆盖 tickLimit; 默认按官方公式 min(500, max(0, bucket) + limit) 逐 tick 计算
     "enforce": false          // true 时超 tickLimit 由看门狗强制中断当 tick (默认仅计量)
   },
   "globalResetEvery": 0,      // >0 时每 N tick 重建 isolate 做一次全局重置; 省略/0 表示不重置
@@ -168,7 +180,7 @@ cargo build --release
 ### 机制回归测试
 
 ```bash
-cargo test
+cargo test --release   # 推荐: 同时覆盖 release 优化后的代码生成 (见上方 rustc 已知问题)
 ```
 
 | 测试文件 | 覆盖 |
@@ -177,7 +189,8 @@ cargo test
 | `tests/shim_apis.rs` | 微型 bundle 驱动 V8：PathFinder 跨房、地图 API、`moveTo` 端到端闭环（含 Memory 往返与 `_move` 缓存） |
 | `tests/cpu_watchdog.rs` | CPU 看门狗中断与 isolate 恢复、超时 tick 的丢弃语义、未超时不误报、意图计价 0.2 CPU/组合 |
 | `tests/memory_segments.rs` | `RawMemory` 段跨 tick 持久、需每 tick 重新激活、ID/数量/类型/长度校验、`RawMemory.set` 语义 |
-| `tests/framework.rs` | 全局重置（全局变量丢失、Memory 与段保留）、场景加载校验的正/反用例 |
+| `tests/framework.rs` | 全局重置（全局变量丢失、Memory 与段保留）、场景加载校验的正/反用例、同场景同 seed 重放一致性（确定性） |
+| `tests/cli_cpu_bucket.rs` | CLI 级集成：bucket 耗尽跳过（官方 "CPU bucket is empty"）与 `noErrors` 失败退出码、正常场景退出码 0、tickLimit 公式与场景覆盖值 |
 
 ### 复现基准
 

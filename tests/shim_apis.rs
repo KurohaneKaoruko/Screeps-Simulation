@@ -363,3 +363,61 @@ fn claim_controller_via_js_inner() {
 	assert_eq!(ctrl.level, 1);
 }
 
+/// loop() 抛异常: 异常前已登记的意图与 Memory 写入照常保存并结算 (官方 runner.js 语义)
+#[test]
+fn loop_exception_keeps_intents_and_memory() {
+	in_tokio(|| loop_exception_keeps_intents_and_memory_inner());
+}
+
+fn loop_exception_keeps_intents_and_memory_inner() {
+	let scenario = Scenario::from_json(TWO_ROOMS).unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	use nexus_sim::engine::objects::{creep_obj, BodyPart};
+	let id = nexus_sim::engine::world::alloc_id(&mut world.next_id);
+	let body: Vec<BodyPart> = ["move"]
+		.iter()
+		.map(|p| BodyPart { part_type: p.to_string(), hits: 100 })
+		.collect();
+	world
+		.rooms
+		.get_mut("W5N8")
+		.unwrap()
+		.objects
+		.insert(id, creep_obj(id, "E1", 25, 25, body));
+
+	let bundle = r#"
+		exports.loop = function() {
+			Memory.before = true;
+			const creep = Object.values(Game.creeps)[0];
+			creep.move(RIGHT);
+			throw new Error("boom");
+		};
+	"#;
+	let snapshot = build_snapshot(
+		&world,
+		&SnapshotOptions {
+			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
+			always_visible: false,
+		},
+	);
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let result = bot
+		.run_tick(&serde_json::to_string(&snapshot).unwrap(), "{}")
+		.unwrap();
+	assert_eq!(result.errors.len(), 1, "异常应被捕获并上报 (不中断模拟)");
+	assert_eq!(result.errors[0].contains("boom"), true, "异常信息应包含原始消息");
+	assert!(
+		result.memory.contains("\"before\":true"),
+		"异常前的 Memory 写入应保留: {}",
+		result.memory
+	);
+	let intents = IntentList::parse(&result.intents_json);
+	assert!(
+		intents.entries.iter().any(|(_, n, _)| n == "move"),
+		"异常前登记的意图不应丢弃"
+	);
+	let movement = &mut Movement::default();
+	tick::run_tick(&mut world, movement, &intents);
+	assert_eq!(world.rooms["W5N8"].objects[&id].x, 26, "已登记意图应真实生效");
+}
+

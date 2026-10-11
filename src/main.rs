@@ -5,6 +5,7 @@
 //!            [--csv out.csv] [--json-report out.json] [--quiet]
 
 use nexus_sim::runtime::BotRuntime;
+use nexus_sim::engine::cpu::CpuState;
 use nexus_sim::engine::intents::IntentList;
 use nexus_sim::engine::metrics::{evaluate_asserts, MetricsCollector, TickMetrics};
 use nexus_sim::engine::movement::Movement;
@@ -137,9 +138,11 @@ async fn async_main() {
 
     let wall_start = Instant::now();
     let mut memory_json = scenario.memory.clone().unwrap_or_else(|| "{}".to_string());
-    let mut bucket = scenario.cpu_bucket();
     let cpu_limit = scenario.cpu_limit();
-    let tick_limit = scenario.cpu_tick_limit();
+    // 官方 bucket 语义 (driver make.js/data.js): 可为负、负数时跳过执行、显示值 max(0, raw)
+    let mut cpu = CpuState::new(cpu_limit, scenario.cpu_bucket());
+    // 显式覆盖 tickLimit 时不随 bucket 逐 tick 变化
+    let tick_limit_override = scenario.cpu_tick_limit_override();
     // CPU 强制中断: 官方 tickLimit 到期即终止脚本 ("Script execution timed out ungracefully")
     let enforce_cpu = scenario.cpu_enforce();
     // 全局重置周期 (官方由 isolate 堆占用触发)
@@ -163,12 +166,14 @@ async fn async_main() {
     let mut intent_histogram: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     let (mut total_moves, mut total_moved) = (0usize, 0usize);
     let mut run = 0u64;
+    let mut fatal_error = false;
     while run < total_ticks {
         // 0. 全局重置 (isolate 重建; 全局变量丢失、Memory/内存段保留)
         if let Some(every) = global_reset_every {
             if world.tick > 0 && world.tick % every == 0 {
                 if let Err(e) = bot.reset_global() {
                     eprintln!("[tick {}] 全局重置失败: {e}", world.tick);
+                    fatal_error = true;
                     break;
                 }
                 if !quiet {
@@ -176,27 +181,83 @@ async fn async_main() {
                 }
             }
         }
-        // 1. 快照
+        // 0.5. bucket 耗尽 → 跳过本 tick 的用户执行 (官方 make.js:72-83)。
+        //     游戏世界照常推进 (只有 bot 的意图缺席), 跳过期间每 tick 回能。
+        if cpu.should_skip() {
+            eprintln!(
+                "[t{}] Script execution has been terminated: CPU bucket is empty ({:.0})",
+                world.tick, cpu.raw_bucket
+            );
+            cpu.skip_tick();
+            let empty = IntentList::parse("[]");
+            tick::run_tick(&mut world, &mut movement, &empty);
+            let (rcl, progress, progress_total, energy_available, storage_energy, creeps, spawning) =
+                summarize(&world);
+            metrics.record(
+                TickMetrics {
+                    tick: world.tick,
+                    cpu_used: 0.0,
+                    intents: 0,
+                    creeps,
+                    spawning,
+                    energy_available,
+                    storage_energy,
+                    rcl,
+                    progress,
+                    controller_progress_total: progress_total,
+                    errors: 1,
+                    console_lines: 0,
+                },
+                memory_json.len(),
+                false,
+            );
+            if let Some(f) = csv_file.as_mut() {
+                let _ = writeln!(f, "{},{:.3},{},{},{},{},{},{},1", world.tick, 0.0, 0, creeps, energy_available, storage_energy, rcl, progress);
+            }
+            run += 1;
+            continue;
+        }
+
+        // 1. 快照 (Game.cpu.bucket 显示 max(0, raw); tickLimit = min(500, bucket + limit))
+        let tick_limit = tick_limit_override.unwrap_or_else(|| cpu.tick_limit());
         let snapshot_opts = SnapshotOptions {
             cpu: nexus_sim::engine::snapshot::CpuView {
                 limit: cpu_limit,
-                tick_limit: bucket.max(cpu_limit).min(500.0).max(cpu_limit),
-                bucket,
+                tick_limit,
+                bucket: cpu.displayed_bucket(),
             },
             always_visible: scenario.always_visible,
         };
         let snapshot = build_snapshot(&world, &snapshot_opts);
 
         // 2. bot 执行 (enforce 时按当前 tickLimit 强制中断)
-        let tick_timeout = if enforce_cpu {
-            Some(bucket.max(cpu_limit).min(500.0).max(cpu_limit))
-        } else {
-            None
-        };
+        let tick_timeout = if enforce_cpu { Some(tick_limit) } else { None };
         let tick_result = match bot.run_tick_limited(&snapshot.to_string(), &memory_json, tick_timeout) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[tick {}] 运行时致命错误: {e}", world.tick);
+                // 致命错误计入统计: 断言基于完整事实, 不再"带着错误通过"
+                let (rcl, progress, progress_total, energy_available, storage_energy, creeps, spawning) =
+                    summarize(&world);
+                metrics.record(
+                    TickMetrics {
+                        tick: world.tick,
+                        cpu_used: 0.0,
+                        intents: 0,
+                        creeps,
+                        spawning,
+                        energy_available,
+                        storage_energy,
+                        rcl,
+                        progress,
+                        controller_progress_total: progress_total,
+                        errors: 1,
+                        console_lines: 0,
+                    },
+                    memory_json.len(),
+                    false,
+                );
+                fatal_error = true;
                 break;
             }
         };
@@ -239,8 +300,8 @@ async fn async_main() {
         total_moves += outcome.move_stats.0;
         total_moved += outcome.move_stats.1;
 
-        // 5. bucket 结算
-        bucket = (bucket + (cpu_limit - cpu_used)).clamp(0.0, 10_000.0);
+        // 5. bucket 结算 (官方 make.js:193-198: raw = min(10000, raw + limit - cpuUsed), 可为负)
+        cpu.settle(cpu_used);
 
         // 6. 指标
         let (rcl, progress, progress_total, energy_available, storage_energy, creeps, spawning) =
@@ -290,11 +351,13 @@ async fn async_main() {
     }
 
     let elapsed = wall_start.elapsed();
-    let tps = total_ticks as f64 / elapsed.as_secs_f64().max(1e-9);
+    // tps 按实际运行的 tick 数计 (致命错误/提前退出时不再假装跑满)
+    let actual_ticks = run;
+    let tps = actual_ticks as f64 / elapsed.as_secs_f64().max(1e-9);
 
     // ── 报告 ──
     println!("\n══════════ 模拟报告 ══════════");
-    println!("场景: {}  tick: {}  用时: {:.2}s  ({:.0} tick/s)", scenario.name, total_ticks, elapsed.as_secs_f64(), tps);
+    println!("场景: {}  tick: {}/{}  用时: {:.2}s  ({:.0} tick/s)", scenario.name, actual_ticks, total_ticks, elapsed.as_secs_f64(), tps);
     println!("CPU: 均值 {:.3}ms  P50 {:.3}ms  P95 {:.3}ms  P99 {:.3}ms  超限 tick {}",
         metrics.cpu_avg(), metrics.cpu_percentile(0.50), metrics.cpu_percentile(0.95),
         metrics.cpu_percentile(0.99), metrics.cpu_over_limit_ticks);
@@ -353,6 +416,11 @@ async fn async_main() {
         }
     }
 
+    // 无断言 (或断言全过) 时, 致命错误仍必须以非零码退出 —— 模拟没有完整跑完
+    if fatal_error {
+        eprintln!("✗ 模拟因致命运行时错误提前终止 (退出码 1)");
+        std::process::exit(1);
+    }
 }
 
 fn summarize(world: &World) -> (u8, u32, u32, u32, u32, usize, usize) {

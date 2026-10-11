@@ -150,7 +150,10 @@ impl Obj {
     pub fn recalc_body(&mut self) {
         let mut hits = self.hits as i64;
         for part in self.body.iter_mut().rev() {
-            part.hits = if hits > 100 { 100 } else { hits.max(0) as u32 };
+            // 注: 本仓库所用 rustc 1.95 (distro tarball 构建) 在 opt-level 3 下会把
+            // `if hits > 100 { 100 } else { hits.max(0) as u32 }` 错误编译成不封顶的
+            // `hits as u32` (debug/opt0 均正确)。clamp 写法经验证不受影响。
+            part.hits = hits.clamp(0, 100) as u32;
             hits -= 100;
             if hits < 0 {
                 hits = 0;

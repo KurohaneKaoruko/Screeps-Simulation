@@ -150,6 +150,53 @@ fn scenario_validation_rejects_bad_input() {
 	}
 }
 
+/// 同一场景 + 同一 seed 跑两遍: 最终快照 / Memory / 能量统计完全一致 (确定性);
+/// 不同 seed 的随机轨迹应不同 (证明对比有效)。
+#[test]
+fn same_scenario_rerun_is_deterministic() {
+	in_tokio(|| {
+		let bundle = r#"
+			exports.loop = function() {
+				if (!Memory.r) Memory.r = [];
+				Memory.r.push(Math.random().toFixed(8));
+				const creep = Object.values(Game.creeps)[0];
+				if (creep) {
+					const src = creep.room.find(FIND_SOURCES)[0];
+					if (creep.harvest(src) === ERR_NOT_IN_RANGE) creep.moveTo(src);
+				}
+			};
+		"#;
+		let run_once = |seed: u64| -> (String, String, u64, u64) {
+			let scenario = Scenario::from_json(ROOM).unwrap();
+			let mut world = build_world(&scenario).unwrap();
+			let mut bot = BotRuntime::new(bundle, seed).unwrap();
+			let mut movement = nexus_sim::engine::movement::Movement::default();
+			let mut memory = String::from("{}");
+			for _ in 0..8 {
+				let snap = snapshot(&world);
+				let r = bot.run_tick(&snap, &memory).unwrap();
+				let intents = nexus_sim::engine::intents::IntentList::parse(&r.intents_json);
+				nexus_sim::engine::tick::run_tick(&mut world, &mut movement, &intents);
+				memory = r.memory;
+			}
+			(
+				snapshot(&world),
+				memory,
+				world.energy_harvested,
+				world.creeps_produced,
+			)
+		};
+		let (snap_a, mem_a, harvested_a, _) = run_once(1);
+		let (snap_b, mem_b, harvested_b, _) = run_once(1);
+		assert_eq!(snap_a, snap_b, "同 seed 两次运行的最终快照应完全一致");
+		assert_eq!(mem_a, mem_b, "同 seed 两次运行的 Memory 应完全一致");
+		assert_eq!(harvested_a, harvested_b);
+
+		let (_, mem_c, _, _) = run_once(99);
+		assert_ne!(mem_a, mem_c, "不同 seed 的随机轨迹应不同 (否则对比无意义)");
+	});
+}
+
 /// 合法场景 (含全局重置与 CPU 强制) 应能正常加载
 #[test]
 fn scenario_validation_accepts_valid_input() {

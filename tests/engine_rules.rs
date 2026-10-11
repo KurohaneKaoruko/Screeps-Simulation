@@ -1109,3 +1109,54 @@ fn combat_death_creates_tombstone() {
 		"战斗死亡留墓碑"
 	);
 }
+
+/// issue#1 §五: 孵化扣能顺序 — 先 spawn (就近优先), 再 extension (就近优先),
+/// 官方 _charge-energy 语义。RCL2 场景: spawn(30) + 近 ext(50) + 远 ext(50),
+/// body 成本 90 (attack 80 + tough 10) → spawn 清空、近 ext 清空、远 ext 剩 40。
+#[test]
+fn spawn_creep_charges_spawn_then_nearest_extensions() {
+	let scene = r#"{
+		"name": "charge",
+		"seed": 1,
+		"rooms": [
+			{ "name": "W5N8", "terrain": { "kind": "flat" },
+			  "controller": { "level": 2, "pos": [28, 27] },
+			  "structures": [
+			    { "type": "spawn", "pos": [25, 25], "energy": 30 },
+			    { "type": "extension", "pos": [26, 25], "energy": 50 },
+			    { "type": "extension", "pos": [40, 40], "energy": 50 }
+			  ] }
+		]
+	}"#;
+	let (mut world, mut movement) = setup(scene);
+	let spawn_id = world.rooms["W5N8"]
+		.objects
+		.values()
+		.find(|o| o.obj_type == "spawn")
+		.unwrap()
+		.id;
+	let energy_at = |world: &World, x: u8, y: u8| -> u32 {
+		world.rooms["W5N8"]
+			.objects
+			.values()
+			.find(|o| o.x == x && o.y == y && o.obj_type != "creep")
+			.map(|o| o.store.get("energy").copied().unwrap_or(0))
+			.unwrap_or(0)
+	};
+	let json = format!(
+		r#"[{{"o":"{:024x}","n":"spawnCreep","d":{{"body":["attack","tough"],"name":"B1"}}}}]"#,
+		spawn_id
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	// 孵化扣能后房间 energyAvailable=40 < 300 → 同 tick 触发 spawn 自动回能 +1 (官方 spawns/tick)
+	assert_eq!(energy_at(&world, 25, 25), 1, "spawn 应最先被扣空 (30 全部), 随后回能 +1");
+	assert_eq!(energy_at(&world, 26, 25), 0, "近 extension 其次 (50 全部)");
+	assert_eq!(energy_at(&world, 40, 40), 40, "远 extension 只补差额 10, 剩 40");
+	assert!(
+		world.rooms["W5N8"]
+			.objects
+			.values()
+			.any(|o| o.obj_type == "creep" && o.name.as_deref() == Some("B1") && o.spawning),
+		"孵化中的 B1 应已落位 (spawning)"
+	);
+}
