@@ -1,9 +1,9 @@
 //! 意图结算: JS shim 收集的意图按官方引擎语义应用。
 //! 顺序: 对象 id 序逐个应用 (官方 processor.js 按 roomObjects 迭代), 房间级意图最后。
 
-use crate::constants;
-use crate::objects::{self, BodyPart};
-use crate::world::{energy_store, World};
+use crate::engine::constants;
+use crate::engine::objects::{self, BodyPart};
+use crate::engine::world::{alloc_id, World};
 use serde_json::Value;
 
 pub struct IntentList {
@@ -30,6 +30,7 @@ impl IntentList {
     }
 }
 
+#[allow(dead_code)]
 pub struct TickEffects {
     /// 本 tick 移动意图 (roomName, objId, dx, dy, oldFatigue)
     pub moves: Vec<(String, u64, i32, i32, u32)>,
@@ -50,7 +51,7 @@ pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
     let mut room_intents: Vec<(String, String, Value)> = Vec::new();
     for (obj, name, data) in &intents.entries {
         if obj == "room" {
-            let room = data.get("room").and_then(Value::as_str).cloned().unwrap_or_default();
+            let room = data.get("room").and_then(Value::as_str).map(str::to_string).unwrap_or_default();
             if !room.is_empty() {
                 room_intents.push((room, name.clone(), data.clone()));
             }
@@ -149,13 +150,12 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
             ("creep", "harvest") => {
                 let target_id = id_of(data, "id");
                 let Some(target_id) = target_id else { continue };
-                let (obj_pos, power) = {
+                let ((ox, oy), power) = {
                     let Some(obj) = room.objects.get(&id) else { continue };
                     if obj.spawning {
                         continue;
                     }
-                    let p = obj.work_power(constants::HARVEST_POWER);
-                    ((obj.x, obj.y), p)
+                    ((obj.x, obj.y), obj.work_power(constants::HARVEST_POWER))
                 };
                 let Some(target) = room.objects.get_mut(&target_id) else {
                     continue;
@@ -163,9 +163,7 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 if target.obj_type != "source" {
                     continue;
                 }
-                if (target.x as i32 - obj_pos.0 as i32).abs() > 1
-                    || (target.y as i32 - obj_pos.1 as i32).abs() > 1
-                {
+                if (target.x as i32 - ox as i32).abs() > 1 || (target.y as i32 - oy as i32).abs() > 1 {
                     continue;
                 }
                 let available = target.store.get("energy").copied().unwrap_or(0);
@@ -185,7 +183,7 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 let Some(target_id) = id_of(data, "id") else { continue };
                 let resource = data.get("resourceType").and_then(Value::as_str).unwrap_or("energy").to_string();
                 let amount = data.get("amount").and_then(Value::as_u64).unwrap_or(0) as u32;
-                let obj_pos = match room.objects.get(&id) {
+                let (ox, oy) = match room.objects.get(&id) {
                     Some(o) if !o.spawning => (o.x, o.y),
                     _ => continue,
                 };
@@ -195,9 +193,7 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     }
                     _ => continue,
                 };
-                if (target_pos.0 as i32 - obj_pos.0 as i32).abs() > 1
-                    || (target_pos.1 as i32 - obj_pos.1 as i32).abs() > 1
-                {
+                if (target_pos.0 as i32 - ox as i32).abs() > 1 || (target_pos.1 as i32 - oy as i32).abs() > 1 {
                     continue;
                 }
                 let cap = if resource == "energy" { target_capacity } else { target_store_capacity };
@@ -227,14 +223,12 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 let Some(target_id) = id_of(data, "id") else { continue };
                 let resource = data.get("resourceType").and_then(Value::as_str).unwrap_or("energy").to_string();
                 let req = data.get("amount").and_then(Value::as_u64).unwrap_or(u32::MAX as u64) as u32;
-                let (obj_pos, obj_free) = match room.objects.get(&id) {
-                    Some(o) if !o.spawning => (o.x, o.y, o.store_capacity().saturating_sub(objects::store_sum(&o.store))),
+                let ((ox, oy), obj_free) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => ((o.x, o.y), o.store_capacity().saturating_sub(objects::store_sum(&o.store))),
                     _ => continue,
                 };
                 let Some(target) = room.objects.get(&target_id) else { continue };
-                if (target.x as i32 - obj_pos.0 as i32).abs() > 1
-                    || (target.y as i32 - obj_pos.1 as i32).abs() > 1
-                {
+                if (target.x as i32 - ox as i32).abs() > 1 || (target.y as i32 - oy as i32).abs() > 1 {
                     continue;
                 }
                 let available = target.store.get(&resource).copied().unwrap_or(0);
@@ -249,17 +243,15 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
             }
             ("creep", "pickup") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
-                let (obj_pos, obj_free) = match room.objects.get(&id) {
-                    Some(o) if !o.spawning => (o.x, o.y, o.store_capacity().saturating_sub(objects::store_sum(&o.store))),
+                let ((ox, oy), obj_free) = match room.objects.get(&id) {
+                    Some(o) if !o.spawning => ((o.x, o.y), o.store_capacity().saturating_sub(objects::store_sum(&o.store))),
                     _ => continue,
                 };
                 let Some(target) = room.objects.get(&target_id) else { continue };
                 if target.obj_type != "energy" {
                     continue;
                 }
-                if (target.x as i32 - obj_pos.0 as i32).abs() > 1
-                    || (target.y as i32 - obj_pos.1 as i32).abs() > 1
-                {
+                if (target.x as i32 - ox as i32).abs() > 1 || (target.y as i32 - oy as i32).abs() > 1 {
                     continue;
                 }
                 let amount = target.store.get("energy").copied().unwrap_or(0).min(obj_free);
@@ -297,9 +289,9 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
             }
             ("creep", "build") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
-                let (obj_pos, work, energy) = match room.objects.get(&id) {
+                let ((ox, oy), work, energy) = match room.objects.get(&id) {
                     Some(o) if !o.spawning && o.store.get("energy").copied().unwrap_or(0) > 0 => {
-                        (o.x, o.y, o.work_power(constants::BUILD_POWER), o.store.get("energy").copied().unwrap_or(0))
+                        ((o.x, o.y), o.work_power(constants::BUILD_POWER), o.store.get("energy").copied().unwrap_or(0))
                     }
                     _ => continue,
                 };
@@ -307,9 +299,7 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 if site.obj_type != "constructionSite" {
                     continue;
                 }
-                if (site.x as i32 - obj_pos.0 as i32).abs() > 3
-                    || (site.y as i32 - obj_pos.1 as i32).abs() > 3
-                {
+                if (site.x as i32 - ox as i32).abs() > 3 || (site.y as i32 - oy as i32).abs() > 3 {
                     continue;
                 }
                 let remaining = site.progress_total - site.progress;
@@ -330,9 +320,9 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
             }
             ("creep", "repair") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
-                let (obj_pos, power, energy) = match room.objects.get(&id) {
+                let ((ox, oy), power, energy) = match room.objects.get(&id) {
                     Some(o) if !o.spawning && o.store.get("energy").copied().unwrap_or(0) > 0 => {
-                        (o.x, o.y, o.work_power(constants::REPAIR_POWER), o.store.get("energy").copied().unwrap_or(0))
+                        ((o.x, o.y), o.work_power(constants::REPAIR_POWER), o.store.get("energy").copied().unwrap_or(0))
                     }
                     _ => continue,
                 };
@@ -340,9 +330,7 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 if target.obj_type == "controller" || target.obj_type == "constructionSite" {
                     continue;
                 }
-                if (target.x as i32 - obj_pos.0 as i32).abs() > 3
-                    || (target.y as i32 - obj_pos.1 as i32).abs() > 3
-                {
+                if (target.x as i32 - ox as i32).abs() > 3 || (target.y as i32 - oy as i32).abs() > 3 {
                     continue;
                 }
                 // 1 能量修 100 血 (REPAIR_COST 0.01)
@@ -358,9 +346,9 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
             }
             ("creep", "upgradeController") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
-                let (obj_pos, power, energy) = match room.objects.get(&id) {
+                let ((ox, oy), power, energy) = match room.objects.get(&id) {
                     Some(o) if !o.spawning && o.store.get("energy").copied().unwrap_or(0) > 0 => {
-                        (o.x, o.y, o.work_power(constants::UPGRADE_CONTROLLER_POWER), o.store.get("energy").copied().unwrap_or(0))
+                        ((o.x, o.y), o.work_power(constants::UPGRADE_CONTROLLER_POWER), o.store.get("energy").copied().unwrap_or(0))
                     }
                     _ => continue,
                 };
@@ -369,9 +357,7 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     Some(c) if c.obj_type == "controller" && c.mine && c.level > 0 => (c.level, (c.x, c.y)),
                     _ => continue,
                 };
-                if (ctrl_pos.0 as i32 - obj_pos.0 as i32).abs() > 3
-                    || (ctrl_pos.1 as i32 - obj_pos.1 as i32).abs() > 3
-                {
+                if (ctrl_pos.0 as i32 - ox as i32).abs() > 3 || (ctrl_pos.1 as i32 - oy as i32).abs() > 3 {
                     continue;
                 }
                 let (progress, upgraded, downgrade_time) = {
@@ -443,7 +429,7 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 }
                 let need_time = constants::CREEP_SPAWN_TIME * body_spec.len() as u64;
                 // 孵化中的 creep 对象立即落位 (engine: create-creep 插入 spawning:true)
-                let creep_id = world.alloc_id();
+                let creep_id = alloc_id(&mut world.next_id);
                 let body: Vec<BodyPart> = body_spec
                     .iter()
                     .map(|p| BodyPart { part_type: p.clone(), hits: 100 })
@@ -514,7 +500,7 @@ fn apply_room_intent(world: &mut World, room_name: &str, name: &str, data: &Valu
             if st == "road" && room.terrain.is_swamp(x as usize, y as usize) {
                 progress_total *= constants::CONSTRUCTION_COST_ROAD_SWAMP_RATIO;
             }
-            let id = world.alloc_id();
+            let id = alloc_id(&mut world.next_id);
             let site = objects::construction_site(id, st, x, y, progress_total);
             room.objects.insert(id, site);
         }
@@ -566,7 +552,7 @@ fn downgrade_for(level: u8) -> u64 {
 }
 
 /// spawn 能量扣费: 先就近 spawn, 再就近 extension (官方 _charge-energy 旧路径, 切比雪夫距离)
-fn charge_spawn_energy(room: &mut crate::world::Room, spawn_id: u64, mut cost: u32) -> bool {
+fn charge_spawn_energy(room: &mut crate::engine::world::Room, spawn_id: u64, mut cost: u32) -> bool {
     #[derive(Clone)]
     struct Src {
         id: u64,
@@ -646,7 +632,7 @@ pub fn create_dropped(world: &mut World, room_name: &str, x: u8, y: u8, resource
         let amt = obj.store.get(resource).copied().unwrap_or(0) + amount;
         obj.store.insert(resource.to_string(), amt);
     } else {
-        let id = world.alloc_id();
+        let id = alloc_id(&mut world.next_id);
         let mut pile = objects::dropped_energy(id, x, y, amount);
         if resource != "energy" {
             pile.store.remove("energy");
@@ -665,7 +651,7 @@ fn complete_site(world: &mut World, room_name: &str, site_id: u64) {
     };
     let room = world.rooms.get_mut(room_name).unwrap();
     room.objects.remove(&site_id);
-    let id = world.alloc_id();
+    let id = alloc_id(&mut world.next_id);
     let mut obj = objects::structure(id, &st, x, y, true);
     match st.as_str() {
         "spawn" => {

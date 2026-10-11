@@ -3,9 +3,9 @@
 //! 疲劳规则: (非 MOVE/CARRY 部件 + 按负载折算的 CARRY 件数) × 地形成本 (路1/平原2/沼泽10),
 //! 每 tick 恢复 2 × 活跃 MOVE。
 
-use crate::constants;
-use crate::objects::Obj;
-use crate::world::Room;
+use crate::engine::constants;
+use crate::engine::objects::Obj;
+use crate::engine::world::Room;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -210,7 +210,7 @@ impl Movement {
             for o in room.objects.values_mut() {
                 if o.obj_type == "road" && o.x as usize == nxi && o.y as usize == nyi {
                     if let Some(t) = o.next_decay_time {
-                        o.next_decay_time = Some(t.saturating_sub(parts_len));
+                        o.next_decay_time = Some(t.saturating_sub(parts_len as u64));
                     }
                     break;
                 }

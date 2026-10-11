@@ -1,7 +1,7 @@
 //! 房间地形: 50×50, 每格 0=平原 1=墙 2=沼泽。
 //! 支持场景显式给定 (每行字符串) 或种子生成 (简单噪声, 不追求复刻官方地图生成算法)。
 
-use crate::constants::{TERRAIN_MASK_SWAMP, TERRAIN_MASK_WALL};
+use crate::engine::constants::{TERRAIN_MASK_SWAMP, TERRAIN_MASK_WALL};
 
 pub const ROOM_SIZE: usize = 50;
 pub const TILES: usize = ROOM_SIZE * ROOM_SIZE;

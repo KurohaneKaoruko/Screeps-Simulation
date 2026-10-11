@@ -1,7 +1,7 @@
 //! 世界对象模型: 与官方引擎 roomObjects 对齐的运行时形态。
 //! 用 BTreeMap<u64, Obj> 保存, id 单调递增, 迭代顺序即官方引擎的对象处理顺序。
 
-use crate::constants;
+use crate::engine::constants;
 use std::collections::BTreeMap;
 
 pub type Store = BTreeMap<String, u32>;

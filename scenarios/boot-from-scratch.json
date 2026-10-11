@@ -1,0 +1,63 @@
+{
+	"name": "boot-from-scratch",
+	"description": "空房间从零启动: spawn 300 能量, 验证 bot 自举闭环与 RCL 爬升 (当前基线: RCL2 @ t≈17700)",
+	"seed": 42,
+	"ticks": 20000,
+	"cpu": {
+		"limit": 100,
+		"bucket": 10000
+	},
+	"deterministic_random": true,
+	"always_visible": false,
+	"rooms": [
+		{
+			"name": "W5N8",
+			"terrain": {
+				"kind": "flat"
+			},
+			"sources": {
+				"positions": [
+					[
+						18,
+						22
+					],
+					[
+						32,
+						30
+					]
+				]
+			},
+			"controller": {
+				"level": 1,
+				"pos": [
+					28,
+					27
+				]
+			},
+			"structures": [
+				{
+					"type": "spawn",
+					"pos": [
+						25,
+						25
+					],
+					"energy": 300
+				}
+			],
+			"creeps": []
+		}
+	],
+	"asserts": [
+		{
+			"kind": "rclAtLeast",
+			"value": 2
+		},
+		{
+			"kind": "creepCountAtLeast",
+			"value": 2
+		},
+		{
+			"kind": "noErrors"
+		}
+	]
+}

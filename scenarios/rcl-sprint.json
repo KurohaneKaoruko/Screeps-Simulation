@@ -1,0 +1,26 @@
+{
+	"name": "rcl-sprint",
+	"description": "种子地形冲级场景: 沼泽墙阻 + 双 source, 长跑验证经济与 CPU 曲线",
+	"seed": 7,
+	"ticks": 50000,
+	"cpu": { "limit": 100, "bucket": 10000 },
+	"deterministic_random": true,
+	"always_visible": false,
+	"rooms": [
+		{
+			"name": "W5N8",
+			"terrain": { "kind": "generated", "seed": 7 },
+			"sources": { "count": 2, "energy": 3000 },
+			"controller": { "level": 1, "pos": [28, 27] },
+			"structures": [
+				{ "type": "spawn", "pos": [25, 25], "energy": 300 }
+			],
+			"creeps": []
+		}
+	],
+	"asserts": [
+		{ "kind": "rclReachedBy", "value": 4, "tick": 40000 },
+		{ "kind": "cpuP95Below", "value": 20 },
+		{ "kind": "noErrors" }
+	]
+}

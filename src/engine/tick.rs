@@ -2,16 +2,17 @@
 //! 意图结算 → 移动仲裁 → 逐对象 tick (掉落衰减/Source 再生/creep 位移与寿命/
 //! spawn 出生与自回能/控制器降级/道路容器衰减/墓碑消散) → 时间前进。
 
-use crate::constants;
-use crate::intents::{self, IntentList, TickEffects};
-use crate::movement::{self, Movement};
-use crate::objects;
-use crate::terrain::ROOM_SIZE;
-use crate::world::World;
-use std::collections::BTreeMap;
+use crate::engine::constants;
+use crate::engine::intents::{self, IntentList, TickEffects};
+use crate::engine::movement::{self, Movement};
+use crate::engine::objects;
+use crate::engine::terrain::ROOM_SIZE;
+use crate::engine::world::{alloc_id, World};
 
 pub struct TickOutcome {
     pub creep_deaths: Vec<String>,
+    /// (提交的移动意图数, 实际位移数)
+    pub move_stats: (usize, usize),
 }
 
 pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList) -> TickOutcome {
@@ -48,6 +49,7 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
 
     // 3) 逐对象 tick (id 序)
     let mut deaths: Vec<String> = Vec::new();
+    let mut moved_count = 0usize;
     apply_suicides(world, &effects);
     let mut pending_crossings: Vec<(String, u64)> = Vec::new();
 
@@ -56,7 +58,7 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
         // 先按类型分层处理 (engine 逐对象 tick, 对象类型互不交叠, 分层等价且借用友好)
         tick_dropped_energy(world, room_name);
         tick_sources(world, room_name);
-        tick_creeps(world, room_name, &mut movement, &mut deaths, &mut pending_crossings);
+        moved_count += tick_creeps(world, room_name, &mut movement, &mut deaths, &mut pending_crossings);
         tick_spawns(world, room_name, &mut movement);
         tick_controllers(world, room_name);
         tick_decay_structures(world, room_name);
@@ -66,15 +68,16 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
 
     let _ = tick;
     world.tick += 1;
-    TickOutcome { creep_deaths: deaths }
+    TickOutcome { creep_deaths: deaths, move_stats: (effects.moves.len(), moved_count) }
 }
 
 fn apply_suicides(world: &mut World, effects: &TickEffects) {
     for (room_name, id) in &effects.deaths {
-        if let Some(room) = world.rooms.get_mut(room_name) {
-            if let Some(obj) = room.objects.remove(id) {
+        let room = world.rooms.get_mut(room_name).unwrap();
+        if let Some(obj) = room.objects.remove(id) {
+            {
                 world.creeps_lost += 1;
-                let tomb_id = world.alloc_id();
+                let tomb_id = alloc_id(&mut world.next_id);
                 let decay = world.tick + obj.body.len() as u64 * constants::TOMBSTONE_DECAY_PER_PART;
                 let mut tomb = objects::tombstone(tomb_id, obj.x, obj.y, obj.name.as_deref().unwrap_or(""), decay);
                 tomb.store = obj.store.clone();
@@ -148,7 +151,7 @@ fn tick_creeps(
     movement: &mut Movement,
     deaths: &mut Vec<String>,
     crossings: &mut Vec<(String, u64)>,
-) {
+) -> usize {
     let ids: Vec<u64> = world.rooms[room_name]
         .objects
         .values()
@@ -156,16 +159,19 @@ fn tick_creeps(
         .map(|o| o.id)
         .collect();
     let tick = world.tick;
+    let mut moved_count = 0usize;
     for id in ids {
         // 位移
-        movement.execute(world.rooms.get_mut(room_name).unwrap(), id);
+        if movement.execute(world.rooms.get_mut(room_name).unwrap(), id) {
+            moved_count += 1;
+        }
         let room = world.rooms.get_mut(room_name).unwrap();
         let Some(obj) = room.objects.get_mut(&id) else { continue };
 
         // 边缘格: 立即准备越房 (官方 interRoom; 无法停留于出口格)
         let at_edge = obj.x == 0 || obj.x == 49 || obj.y == 0 || obj.y == 49;
         if at_edge {
-            crossings.push((room_name.clone(), id));
+            crossings.push((room_name.to_string(), id));
         }
 
         // 寿命
@@ -193,7 +199,7 @@ fn tick_creeps(
             world.creeps_lost += 1;
             deaths.push(name.clone());
             // 墓碑: 携带资源 + 尸体部件返还 (corpse_rate × 剩余寿命比, 自然死亡≈0)
-            let tomb_id = world.alloc_id();
+            let tomb_id = alloc_id(&mut world.next_id);
             let decay = tick + body_len as u64 * constants::TOMBSTONE_DECAY_PER_PART;
             let mut tomb = objects::tombstone(tomb_id, x, y, &name, decay);
             tomb.store = store;
@@ -222,6 +228,7 @@ fn tick_creeps(
             world.rooms.get_mut(room_name).unwrap().objects.remove(&id);
         }
     }
+    moved_count
 }
 
 /// spawn: 出生结算 + 能量自动回复 (energyAvailable<300 时每 tick +1)
@@ -238,13 +245,13 @@ fn tick_spawns(world: &mut World, room_name: &str, movement: &mut Movement) {
         let job = world.rooms[room_name].objects[&spawn_id].spawn_job.clone();
         if let Some(job) = job {
             if tick >= job.spawn_time.saturating_sub(1) {
-                let (x, y) = {
+                let birth = {
                     let room = &world.rooms[room_name];
                     let spawn = &room.objects[&spawn_id];
                     movement::find_birth_tile(room, spawn, movement)
                 };
                 let room = world.rooms.get_mut(room_name).unwrap();
-                if let Some((x, y)) = x {
+                if let Some((x, y)) = birth {
                     // 找到孵化中的 creep 并落位
                     let creep_id = room
                         .objects
@@ -461,10 +468,10 @@ fn apply_crossings(world: &mut World, crossings: &mut Vec<(String, u64)>) {
         if !world.rooms.contains_key(&target_name) {
             continue; // 有限世界: 无相邻房间则停留在边缘格
         }
-        let obj = world.rooms.get_mut(&room_name).unwrap().objects.remove(&id).unwrap();
-        let target = world.rooms.get_mut(&target_name).unwrap();
+        let mut obj = world.rooms.get_mut(&room_name).unwrap().objects.remove(&id).unwrap();
         obj.x = nx;
         obj.y = ny;
+        let target = world.rooms.get_mut(&target_name).unwrap();
         target.objects.insert(id, obj);
     }
 }

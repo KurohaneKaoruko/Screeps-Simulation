@@ -1,8 +1,8 @@
 //! 世界与房间: 全部模拟状态的最终权威, 结算顺序对齐官方 processor.js。
 
-use crate::constants;
-use crate::objects::{self, Obj, Store};
-use crate::terrain::Terrain;
+use crate::engine::constants;
+use crate::engine::objects::{self, Obj, Store};
+use crate::engine::terrain::Terrain;
 use std::collections::BTreeMap;
 
 pub struct Room {
@@ -139,9 +139,7 @@ impl World {
     }
 
     pub fn alloc_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
+        alloc_id(&mut self.next_id)
     }
 
     /// 快照用 id 字符串 (对齐官方 24 位 hex 风格, 保证 JS 侧可用字符串比较)
@@ -188,6 +186,13 @@ impl Default for World {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 字段级拆分借用: 持有 world.rooms 可变借用时仍可分配 id
+pub fn alloc_id(next: &mut u64) -> u64 {
+    let id = *next;
+    *next += 1;
+    id
 }
 
 // ── 场景加载后的初始结算 ──

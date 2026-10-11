@@ -1,9 +1,9 @@
 //! 场景定义与加载: JSON → World 初始状态。
 
-use crate::constants;
-use crate::objects::{self, BodyPart};
-use crate::terrain::{self, Terrain};
-use crate::world::{prime_world, World};
+use crate::engine::constants;
+use crate::engine::objects::{self, BodyPart};
+use crate::engine::terrain::{self, Terrain};
+use crate::engine::world::{alloc_id, prime_world, World};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -161,7 +161,7 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
     let mut world = World::new();
     for spec in &scenario.rooms {
         let terrain = build_terrain(spec, seed)?;
-        let mut room = crate::world::Room::new(&spec.name, terrain);
+        let mut room = crate::engine::world::Room::new(&spec.name, terrain);
         // 保证关键位置可通行
         if let Some(ctrl) = &spec.controller {
             if let Some(pos) = ctrl.pos {
@@ -189,7 +189,17 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
         // Source
         let source_capacity = constants::SOURCE_ENERGY_CAPACITY;
         match &spec.sources {
-            None | Some(SourcesSpec::Auto { count, energy }) => {
+            None => {
+                let count = 2usize;
+                let energy = source_capacity;
+                let positions = auto_source_positions(&room, count);
+                for pos in positions {
+                    let id = alloc_id(&mut world.next_id);
+                    room.objects.insert(id, objects::source(id, pos[0], pos[1], energy));
+                    clear_walls_around(&mut room, pos[0], pos[1]);
+                }
+            }
+            Some(SourcesSpec::Auto { count, energy }) => {
                 let count = count.unwrap_or(2).min(3) as usize;
                 let energy = energy.unwrap_or(source_capacity);
                 let positions = auto_source_positions(&room, count);
@@ -203,7 +213,7 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
             Some(SourcesSpec::Explicit { positions }) => {
                 let energy = source_capacity;
                 for pos in positions {
-                    let id = world.alloc_id();
+                    let id = alloc_id(&mut world.next_id);
                     room.objects.insert(id, objects::source(id, pos[0], pos[1], energy));
                     clear_walls_around(&mut room, pos[0], pos[1]);
                 }
@@ -287,7 +297,7 @@ fn build_terrain(spec: &RoomSpec, seed: u64) -> Result<Terrain, String> {
 }
 
 /// 清理 (x,y) 周围 3×3 的墙 (保证关键点位可达)
-fn clear_walls_around(room: &mut crate::world::Room, x: u8, y: u8) {
+fn clear_walls_around(room: &mut crate::engine::world::Room, x: u8, y: u8) {
     for dy in -1i32..=1 {
         for dx in -1i32..=1 {
             let nx = x as i32 + dx;
@@ -302,7 +312,7 @@ fn clear_walls_around(room: &mut crate::world::Room, x: u8, y: u8) {
 }
 
 /// 自动放 source: 中线两侧对称搜索非墙格
-fn auto_source_positions(room: &crate::world::Room, count: usize) -> Vec<[u8; 2]> {
+fn auto_source_positions(room: &crate::engine::world::Room, count: usize) -> Vec<[u8; 2]> {
     let mut positions = Vec::new();
     let candidates = [
         ([10, 10], [10, 40]),
@@ -310,13 +320,13 @@ fn auto_source_positions(room: &crate::world::Room, count: usize) -> Vec<[u8; 2]
         ([25, 12], [25, 38]),
     ];
     'outer: for pair in candidates.iter().take(count) {
-        for base in pair {
+        for base in [pair.0, pair.1] {
             let mut found = None;
             for dy in 0..6i32 {
                 for dx in 0..6i32 {
                     let (x, y) = (base[0] as i32 + dx - 3, base[1] as i32 + dy - 3);
                     if (0..50).contains(&x) && (0..50).contains(&y) && !room.terrain.is_wall(x as usize, y as usize)
-                        && !positions.iter().any(|p| p[0] as i32 == x && p[1] as i32 == y)
+                        && !positions.iter().any(|p: &[u8; 2]| p[0] as i32 == x && p[1] as i32 == y)
                     {
                         found = Some([x as u8, y as u8]);
                         break;

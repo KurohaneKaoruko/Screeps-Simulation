@@ -1,5 +1,6 @@
 //! 官方常量表 (docs.screeps.com Constants + screeps/engine 驱动常量核对)。
 //! 数值即事实来源, 与线上服务器一致, 不得随意改动。
+#![allow(dead_code)]
 
 /// 部件成本
 pub const BODYPART_COST: &[(&str, u32)] = &[
@@ -138,10 +139,15 @@ pub fn controller_structure_limit(structure_type: &str, rcl: u8) -> u32 {
     }
 }
 
-/// 阻挡移动的对象类型 (OBSTACLE_OBJECT_TYPES)
+/// 阻挡移动的对象类型 (OBSTACLE_OBJECT_TYPES, 官方驱动常量)
 pub const OBSTACLE_OBJECT_TYPES: &[&str] = &[
     "spawn",
     "creep",
+    "powerCreep",
+    "source",
+    "mineral",
+    "deposit",
+    "controller",
     "constructedWall",
     "extension",
     "link",
@@ -149,13 +155,11 @@ pub const OBSTACLE_OBJECT_TYPES: &[&str] = &[
     "tower",
     "observer",
     "powerSpawn",
+    "powerBank",
     "lab",
-    "factory",
+    "terminal",
     "nuker",
-    "keeperLair",
-    "source",
-    "mineral",
-    "deposit",
+    "factory",
     "invaderCore",
 ];
 

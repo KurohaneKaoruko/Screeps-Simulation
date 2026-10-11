@@ -1,9 +1,9 @@
 //! 可见世界快照序列化: Rust 世界状态 → JSON (JS shim 据此重建 Game 全局)。
 //! 快照即事实, bot 侧一切读取都以快照为准 —— 与真实游戏"每 tick 重放快照"的模型一致。
 
-use crate::constants;
-use crate::objects::{Obj, Store};
-use crate::world::World;
+use crate::engine::constants;
+use crate::engine::objects::{Obj, Store};
+use crate::engine::world::World;
 use serde_json::{json, Map, Value};
 
 pub struct CpuView {
@@ -256,8 +256,13 @@ fn structure_common(obj: &Obj) -> Map<String, Value> {
 
 fn store_json(store: &Store) -> Value {
     let mut map = Map::new();
+    // energy 键必须恒存在 (含 0), 官方 Store 语义如此; 缺失会让 bot 侧算出 NaN
+    map.insert(
+        "energy".into(),
+        json!(store.get("energy").copied().unwrap_or(0)),
+    );
     for (k, v) in store {
-        if *v > 0 {
+        if *v > 0 && k != "energy" {
             map.insert(k.clone(), json!(v));
         }
     }

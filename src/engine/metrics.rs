@@ -1,9 +1,10 @@
 //! 指标采集与场景断言: 对应 docs/13 §13.3 回归基准。
 
-use crate::scenario::AssertSpec;
-use crate::world::World;
+use crate::engine::scenario::AssertSpec;
+use crate::engine::world::World;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct TickMetrics {
     pub tick: u64,
     pub cpu_used: f64,
