@@ -1,6 +1,6 @@
 # Screeps-Simulation
 
-Nexus-Bot 的本地高速模拟器：Rust 结算引擎 + 内嵌 V8（deno_core）运行 bot 的真实 bundle。
+本地高速模拟器：Rust 结算引擎 + 内嵌 V8（deno_core）运行 bot 的真实 bundle。
 用于在开发期以数千 tick/秒的速度验证 bot 行为，替代"上传到服务器等 4 万 tick"的验证回路。
 
 ## 架构
