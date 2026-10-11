@@ -2052,7 +2052,19 @@ class RoomVisual {
 // var 声明 (而非 let): 挂到 globalThis 属性, 避免全局词法绑定遮蔽 bot 侧同名全局
 var byId = new Map();
 var Game = null;
-var Memory = null;
+// Memory: 官方是 globalThis 上的**可配置**属性 (delete global.Memory 不抛错,
+// issue #1 §3.4)。var 创建的属性 configurable:false 且无法重定义, 故用访问器。
+var __memoryValue = null;
+Object.defineProperty(globalThis, "Memory", {
+	configurable: true,
+	enumerable: true,
+	get() {
+		return __memoryValue;
+	},
+	set(v) {
+		__memoryValue = v;
+	},
+});
 
 function buildGame() {
 	byId = new Map();
@@ -2443,6 +2455,19 @@ function __runTick() {
 	__intentCpu = 0;
 	__consoleLines = [];
 	try {
+		// bot 上一 tick 可能 delete global.Memory: 每 tick 确保访问器存在 (官方由 runtime 重建)
+		if (!Object.getOwnPropertyDescriptor(globalThis, "Memory")) {
+			Object.defineProperty(globalThis, "Memory", {
+				configurable: true,
+				enumerable: true,
+				get() {
+					return __memoryValue;
+				},
+				set(v) {
+					__memoryValue = v;
+				},
+			});
+		}
 		__W = JSON.parse(__ops.op_sim_get_snapshot());
 		buildGame();
 		rawMemoryData = __ops.op_sim_get_memory();
@@ -2487,7 +2512,8 @@ function __runTick() {
 	}
 	let memoryOut = "";
 	try {
-		memoryOut = JSON.stringify(globalThis.Memory || {});
+		// 官方: 读 rawMemory._parsed (delete global.Memory 只删属性, 底层数据保留并照常保存)
+		memoryOut = JSON.stringify(__memoryValue || {});
 	} catch {
 		memoryOut = "{}";
 	}

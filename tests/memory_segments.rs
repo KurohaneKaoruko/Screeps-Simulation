@@ -149,3 +149,48 @@ fn raw_memory_validation_matches_official() {
 		assert!(bot.segments().get(&5).is_none(), "非法段不应写入宿主");
 	});
 }
+
+/// issue #1 §3.4: Memory 是 globalThis 上的可配置属性 — strict 模式下
+/// `delete globalThis.Memory` 不抛错; 底层数据保留并照常保存; 下一 tick 访问器自动重建。
+#[test]
+fn memory_is_configurable_and_survives_delete() {
+	in_tokio(|| {
+		let scenario = Scenario::from_json(ROOM).unwrap();
+		let world = build_world(&scenario).unwrap();
+		let bundle = r#"
+			exports.loop = function() {
+				const desc = Object.getOwnPropertyDescriptor(globalThis, "Memory");
+				if (!Memory.ran) {
+					Memory.ran = 1;
+					const del = delete globalThis.Memory;
+					console.log(JSON.stringify({ configurable: desc && desc.configurable, del, gone: globalThis.Memory === undefined }));
+				} else {
+					Memory.ran += 1;
+					console.log(JSON.stringify({ configurable: desc && desc.configurable, ran: Memory.ran }));
+				}
+			};
+		"#;
+		let snap = snapshot(&world);
+		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let memory = String::from("{}");
+
+		let r1 = bot.run_tick(&snap, &memory).unwrap();
+		let info: serde_json::Value =
+			serde_json::from_str(r1.console.first().map(String::as_str).unwrap_or("{}")).unwrap();
+		assert_eq!(info["configurable"], true, "Memory 必须是可配置属性: {info}");
+		assert_eq!(info["del"], true, "delete 不应抛错且返回 true: {info}");
+		assert_eq!(info["gone"], true, "删除后属性应消失: {info}");
+		assert!(
+			r1.memory.contains("\"ran\":1"),
+			"删除属性不应丢弃底层数据 (官方 rawMemory._parsed 语义): {}",
+			r1.memory
+		);
+
+		let r2 = bot.run_tick(&snap, &r1.memory).unwrap();
+		let info2: serde_json::Value =
+			serde_json::from_str(r2.console.first().map(String::as_str).unwrap_or("{}")).unwrap();
+		assert_eq!(info2["configurable"], true, "下一 tick 访问器应自动重建: {info2}");
+		assert_eq!(info2["ran"], 2, "Memory 应跨 tick 往返: {info2}");
+		assert!(r2.errors.is_empty(), "不应有任何 bot 异常: {:?}", r2.errors);
+	});
+}
