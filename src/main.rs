@@ -262,8 +262,15 @@ async fn async_main() {
     println!("意图分布: {:?}", intent_histogram);
     println!("移动执行率: {}/{} = {:.1}%", total_moved, total_moves, 100.0 * total_moved as f64 / total_moves.max(1) as f64);
 
+    // ── 落盘输出 (先于断言, 保证失败时也能拿到数据) ──
     if let Some(path) = &dump_memory_path {
         let _ = std::fs::write(path, &memory_json);
+    }
+    if let Some(path) = &report_path {
+        let report = build_json_report(&world, &metrics, &scenario, tps, elapsed.as_secs_f64());
+        if let Ok(text) = serde_json::to_string_pretty(&report) {
+            let _ = std::fs::write(path, text);
+        }
     }
 
     // ── 断言 ──
@@ -291,13 +298,6 @@ async fn async_main() {
         }
     }
 
-    // ── JSON 报告 ──
-    if let Some(path) = report_path {
-        let report = build_json_report(&world, &metrics, &scenario, tps, elapsed.as_secs_f64());
-        if let Ok(text) = serde_json::to_string_pretty(&report) {
-            let _ = std::fs::write(path, text);
-        }
-    }
 }
 
 fn summarize(world: &World) -> (u8, u32, u32, u32, u32, usize, usize) {
