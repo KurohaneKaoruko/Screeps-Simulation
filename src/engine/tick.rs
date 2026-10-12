@@ -285,11 +285,24 @@ fn tick_spawns(world: &mut World, room_name: &str, movement: &mut Movement, ener
         let job = world.rooms[room_name].objects[&spawn_id].spawn_job.clone();
         if let Some(job) = job {
             if tick >= job.spawn_time.saturating_sub(1) {
-                let birth = {
+                let mut birth = {
                     let room = &world.rooms[room_name];
                     let spawn = &room.objects[&spawn_id];
                     movement::find_birth_tile(room, spawn, movement, job.directions.as_deref())
                 };
+                if birth.is_none() {
+                    // 官方 _born-creep.js: 四周全堵且方向序内有敌方 creep → 踩死它 (_die 正常留墓碑) 并在其格出生
+                    let stomp = {
+                        let room = &world.rooms[room_name];
+                        movement::find_spawn_stomp_target(room, &room.objects[&spawn_id], movement, job.directions.as_deref())
+                    };
+                    if let Some(hid) = stomp {
+                        if let Some(dead) = world.rooms.get_mut(room_name).unwrap().objects.remove(&hid) {
+                            birth = Some((dead.x, dead.y));
+                            intents::bury_creep(world, room_name, dead, constants::CREEP_CORPSE_RATE);
+                        }
+                    }
+                }
                 let room = world.rooms.get_mut(room_name).unwrap();
                 if let Some((x, y)) = birth {
                     // 找到孵化中的 creep 并落位

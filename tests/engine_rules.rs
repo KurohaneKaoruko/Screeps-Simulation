@@ -1888,3 +1888,43 @@ fn spawn_creep_intent_ignored_on_off_or_foreign_spawn() {
 	tick::run_tick(&mut world, &mut movement, &spawn_intent(near, "spawnCreep", r#"{"name":"B","body":["move"]}"#));
 	assert!(creep_named(&world, "B").is_none(), "非我方 spawn 不孵化");
 }
+
+/// 官方 _born-creep.js spawnstomp: 周围全被占且有敌方 creep → 踩死方向序中第一个敌人 (留墓碑) 并在其格出生;
+/// 方向序之外还有空位时不踩, 继续等待
+#[test]
+fn spawn_stomps_hostile_when_surrounded() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	// spawn (25,25): 7 个己方 creep 围住, 方向 3 (26,25) 站敌方
+	let mut hostile = 0;
+	for (i, d) in [(0i32, -1i32), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)].iter().enumerate() {
+		let (x, y) = ((25 + d.0) as u8, (25 + d.1) as u8);
+		let id = add_creep(&mut world, &format!("C{i}"), x, y, &["move"]);
+		if (x, y) == (26, 25) {
+			world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&id).unwrap().mine = false;
+			hostile = id;
+		}
+	}
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"S"}"#));
+	for _ in 0..3 {
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	}
+	let c = creep_named(&world, "S").expect("孵化出的 creep");
+	assert!(!c.spawning, "被围时踩死敌人出生");
+	assert_eq!((c.x, c.y), (26, 25));
+	let room = &world.rooms["W5N8"];
+	assert!(!room.objects.contains_key(&hostile), "敌方被踩死");
+	assert!(room.objects.values().any(|o| o.obj_type == "tombstone" && o.x == 26 && o.y == 25), "留墓碑");
+
+	// 方向序只给 [3] (敌人所在), 但方向 1 有空位 → 不踩, 继续等待
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	let h = add_creep(&mut world, "H", 26, 25, &["move"]);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&h).unwrap().mine = false;
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"T","directions":[3]}"#));
+	for _ in 0..4 {
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	}
+	assert!(creep_named(&world, "T").unwrap().spawning, "有其它空位时不踩, 顺延");
+	assert!(world.rooms["W5N8"].objects.contains_key(&h));
+}

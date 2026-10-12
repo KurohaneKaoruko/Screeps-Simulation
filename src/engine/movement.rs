@@ -340,6 +340,48 @@ pub fn recover_fatigue(obj: &mut Obj) {
     }
 }
 
+/// 方向 1..8 → 偏移 (TOP 起顺时针)
+const BIRTH_DIRS: [(i32, i32); 8] = [(0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)];
+
+/// 官方 _born-creep.js:48-70 spawnstomp: 出生方向全被占时, 取方向序中第一个站着敌方 creep 的格子;
+/// 但只要方向序之外还有空位 (阻挡物/纯墙/本 tick 有人进入都算占用) 就不踩, 返回 None。
+/// 只应在 `find_birth_tile` 返回 None 后调用。返回被踩死的敌方 creep id。
+pub fn find_spawn_stomp_target(
+    room: &Room,
+    spawn: &Obj,
+    movement: &Movement,
+    directions: Option<&[i32]>,
+) -> Option<u64> {
+    let dirs: Vec<i32> = match directions {
+        Some(d) if !d.is_empty() => d.iter().copied().filter(|d| (1..=8).contains(d)).collect(),
+        _ => (1..=8).collect(),
+    };
+    let tile = |d: i32| -> Option<(u8, u8)> {
+        let (dx, dy) = BIRTH_DIRS[(d - 1) as usize];
+        let (nx, ny) = (spawn.x as i32 + dx, spawn.y as i32 + dy);
+        ((0..50).contains(&nx) && (0..50).contains(&ny)).then_some((nx as u8, ny as u8))
+    };
+    let hostile = dirs.iter().filter_map(|d| tile(*d)).find_map(|(x, y)| {
+        room.objects
+            .values()
+            .find(|o| o.obj_type == "creep" && !o.mine && !o.spawning && o.x == x && o.y == y)
+            .map(|o| o.id)
+    })?;
+    for d in (1..=8).filter(|d| !dirs.contains(d)) {
+        let Some((x, y)) = tile(d) else { continue };
+        let occupied = room.terrain.is_wall(x as usize, y as usize)
+            || movement.is_tile_busy(&room.name, x, y)
+            || room
+                .objects
+                .values()
+                .any(|o| o.x == x && o.y == y && (o.is_obstacle() || o.obj_type == "creep"));
+        if !occupied {
+            return None;
+        }
+    }
+    Some(hostile)
+}
+
 /// 出生放置: spawn 周围 8 向第一格无阻挡位 (engine: _born-creep)。
 /// `directions` 非空时按官方 `setDirections` 语义只在该优先序内挑格。
 pub fn find_birth_tile(
@@ -348,24 +390,14 @@ pub fn find_birth_tile(
     movement: &Movement,
     directions: Option<&[i32]>,
 ) -> Option<(u8, u8)> {
-    const DIRS: [(i32, i32); 8] = [
-        (0, -1),
-        (1, -1),
-        (1, 0),
-        (1, 1),
-        (0, 1),
-        (-1, 1),
-        (-1, 0),
-        (-1, -1),
-    ];
     let candidates: Vec<(i32, i32)> = match directions {
         Some(dirs) if !dirs.is_empty() => dirs
             .iter()
             // 只接受 1..8: 越界值不再被夹成 TOP (官方意图层已拒绝非法方向)
             .filter(|d| (1..=8).contains(*d))
-            .map(|d| DIRS[(*d - 1) as usize])
+            .map(|d| BIRTH_DIRS[(*d - 1) as usize])
             .collect(),
-        _ => DIRS.to_vec(),
+        _ => BIRTH_DIRS.to_vec(),
     };
     for (dx, dy) in candidates {
         let nx = spawn.x as i32 + dx;
