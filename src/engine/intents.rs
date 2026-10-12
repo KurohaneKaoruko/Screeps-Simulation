@@ -77,10 +77,12 @@ fn intent_rank(name: &str) -> usize {
         return pos;
     }
     match name {
+        // 官方 spawns/intents.js: createCreep → renewCreep → recycleCreep → setSpawnDirections → cancelSpawning
         "spawnCreep" => 100,
-        "setDirections" => 101,
         "renewCreep" => 102,
         "recycleCreep" => 103,
+        "setSpawnDirections" => 104,
+        "cancelSpawning" => 105,
         "transferEnergy" => 110,
         _ => 200,
     }
@@ -910,19 +912,29 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 }
             }
             ("spawn", "spawnCreep") => {
+                // 官方 spawns/create-creep.js
                 let body_spec: Vec<String> = data
                     .get("body")
                     .and_then(Value::as_array)
                     .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
                     .unwrap_or_default();
                 let name = data.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-                let spawn_busy = match room.objects.get(&id) {
-                    Some(spawn) => spawn.spawn_job.is_some(),
+                // 官方: spawning 中直接返回; checkStructureAgainstController 不通过 (非我方 / 超出 RCL) 也返回
+                let usable = match room.objects.get(&id) {
+                    Some(spawn) => spawn.spawn_job.is_none() && spawn.mine && room.structure_active(spawn),
                     None => continue,
                 };
-                if spawn_busy || name.is_empty() || body_spec.is_empty() || body_spec.len() > constants::MAX_CREEP_SIZE {
+                if !usable || name.is_empty() || body_spec.is_empty() || body_spec.len() > constants::MAX_CREEP_SIZE {
                     continue;
                 }
+                // 官方: directions 存在时须为数组, 去重后每个都是 1..8 的整数, 否则整个意图作废
+                let directions = match data.get("directions") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => match parse_directions(v) {
+                        Some(dirs) => Some(dirs).filter(|d: &Vec<i32>| !d.is_empty()),
+                        None => continue,
+                    },
+                };
                 // 同 tick 重名: 孵化中的 creep 已落位, 直接查重即可 (官方 createdCreepNames)
                 let dup = room
                     .objects
@@ -932,12 +944,14 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     continue;
                 }
                 let cost: u32 = body_spec.iter().map(|p| constants::bodypart_cost(p)).sum();
-                let preferred: Vec<u64> = data
-                    .get("energyStructures")
-                    .and_then(Value::as_array)
-                    .map(|a| a.iter().filter_map(|v| v.as_str()).filter_map(|s| u64::from_str_radix(s, 16).ok()).collect())
-                    .unwrap_or_default();
-                if !charge_spawn_energy(room, id, cost, &preferred) {
+                // energyStructures 缺省 → 官方旧扣能路径; 给出 (哪怕为空) → 只用列出的结构
+                let preferred: Option<Vec<u64>> = data.get("energyStructures").and_then(Value::as_array).map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .filter_map(|s| u64::from_str_radix(s, 16).ok())
+                        .collect()
+                });
+                if !charge_spawn_energy(room, id, cost, preferred.as_deref()) {
                     continue;
                 }
                 let need_time = constants::CREEP_SPAWN_TIME * body_spec.len() as u64;
@@ -952,11 +966,6 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 creep.spawning = true;
                 creep.mine = true;
                 room.objects.insert(creep_id, creep);
-                let directions: Option<Vec<i32>> = data
-                    .get("directions")
-                    .and_then(Value::as_array)
-                    .map(|a| a.iter().filter_map(Value::as_i64).map(|d| d as i32).collect())
-                    .filter(|v: &Vec<i32>| !v.is_empty());
                 let spawn = room.objects.get_mut(&id).unwrap();
                 spawn.spawn_job = Some(objects::SpawnJob {
                     name,
@@ -967,24 +976,32 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 world.creeps_produced += 1;
                 world.energy_spawned += cost as u64;
             }
-            ("spawn", "setDirections") => {
-                // 官方 StructureSpawn.setDirections: 覆盖正在孵化单位的出生方向序
-                let name = data.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-                let directions: Vec<i32> = data
-                    .get("directions")
-                    .and_then(Value::as_array)
-                    .map(|a| a.iter().filter_map(Value::as_i64).map(|d| d as i32).collect())
-                    .unwrap_or_default();
-                if name.is_empty() || directions.is_empty() {
+            ("spawn", "setSpawnDirections") => {
+                // 官方 spawns/set-spawn-directions.js: 非空数组、去重后全为 1..8 整数才覆盖出生方向序
+                let Some(directions) = data.get("directions").and_then(parse_directions) else { continue };
+                if directions.is_empty() {
                     continue;
                 }
-                if let Some(spawn) = room.objects.get_mut(&id) {
-                    if let Some(job) = spawn.spawn_job.as_mut() {
-                        if job.name == name {
-                            job.directions = Some(directions);
-                        }
-                    }
+                if let Some(job) = room.objects.get_mut(&id).and_then(|s| s.spawn_job.as_mut()) {
+                    job.directions = Some(directions);
                 }
+            }
+            ("spawn", "cancelSpawning") => {
+                // 官方 spawns/cancel-spawning.js: 移除 spawn 格上同名的孵化中 creep, 清空 spawning (不退能量)
+                let Some(spawn) = room.objects.get(&id) else { continue };
+                let Some(job) = spawn.spawn_job.clone() else { continue };
+                let (sx, sy) = (spawn.x, spawn.y);
+                let creep_id = room
+                    .objects
+                    .values()
+                    .find(|o| {
+                        o.obj_type == "creep" && o.name.as_deref() == Some(job.name.as_str()) && o.x == sx && o.y == sy
+                    })
+                    .map(|o| o.id);
+                if let Some(cid) = creep_id {
+                    room.objects.remove(&cid);
+                }
+                room.objects.get_mut(&id).unwrap().spawn_job = None;
             }
             ("spawn", "renewCreep") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
@@ -1022,7 +1039,7 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     / constants::CREEP_SPAWN_TIME as f64
                     / body_len as f64)
                     .ceil() as u32;
-                if !charge_spawn_energy(room, id, cost, &[]) {
+                if !charge_spawn_energy(room, id, cost, None) {
                     continue;
                 }
                 if let Some(c) = room.objects.get_mut(&target_id) {
@@ -1327,10 +1344,12 @@ fn downgrade_for(level: u8) -> u64 {
         .unwrap_or(20_000)
 }
 
-/// spawn 能量扣费: 先就近 spawn, 再就近 extension (官方 _charge-energy 旧路径, 切比雪夫距离)。
-/// `preferred` 非空时按官方 `opts.energyStructures` 语义只用这些结构 (保持给定顺序);
+/// spawn 能量扣费 (官方 spawns/_charge-energy.js)。
+/// - `preferred = None`: 旧路径 —— 全部 spawn 就近优先, 再 extension 就近优先 (切比雪夫距离)
+/// - `preferred = Some(ids)`: 官方 `opts.energyStructures` —— 只用列出的、属于我方且未停用的
+///   spawn/extension, 按给定顺序扣, 重复 id 只保留第一次出现 (官方 `_.uniq`)
 /// 被停用 (off) 的结构不参与扣费 (官方 _charge-energy.js:7-8)。
-fn charge_spawn_energy(room: &mut Room, spawn_id: u64, mut cost: u32, preferred: &[u64]) -> bool {
+fn charge_spawn_energy(room: &mut Room, spawn_id: u64, mut cost: u32, preferred: Option<&[u64]>) -> bool {
     #[derive(Clone)]
     struct Src {
         id: u64,
@@ -1351,48 +1370,72 @@ fn charge_spawn_energy(room: &mut Room, spawn_id: u64, mut cost: u32, preferred:
             is_spawn: o.obj_type == "spawn",
         })
         .collect();
-    let total: u32 = sources.iter().map(|s| s.energy).sum();
-    if total < cost {
-        return false;
-    }
     let (sx, sy) = {
         let s = &room.objects[&spawn_id];
         (s.x as i32, s.y as i32)
     };
     let cheb = |s: &Src| (s.x - sx).abs().max((s.y - sy).abs());
-    let mut ordered: Vec<Src> = if preferred.is_empty() {
-        let mut v = sources.clone();
-        v.sort_by_key(cheb);
-        // 官方顺序: 全部 spawn 就近优先, 再 extension 就近优先
-        v.sort_by_key(|s| !s.is_spawn);
-        v
-    } else {
-        // 显式 energyStructures: 严格按给定顺序 (只保留房间内的 spawn/extension)
-        preferred
-            .iter()
-            .filter_map(|pid| sources.iter().find(|s| s.id == *pid).cloned())
-            .collect()
+    let ordered: Vec<Src> = match preferred {
+        None => {
+            let mut v = sources.clone();
+            v.sort_by_key(cheb);
+            // 官方顺序: 全部 spawn 就近优先, 再 extension 就近优先
+            v.sort_by_key(|s| !s.is_spawn);
+            v
+        }
+        Some(ids) => {
+            let mut seen: Vec<u64> = Vec::new();
+            ids.iter()
+                .filter(|pid| {
+                    if seen.contains(pid) {
+                        false
+                    } else {
+                        seen.push(**pid);
+                        true
+                    }
+                })
+                .filter_map(|pid| sources.iter().find(|s| s.id == *pid).cloned())
+                .collect()
+        }
     };
-    if ordered.is_empty() {
-        return false;
-    }
     let ordered_total: u32 = ordered.iter().map(|s| s.energy).sum();
-    if ordered_total < cost {
+    if ordered.is_empty() || ordered_total < cost {
         return false;
     }
-    for src in ordered.drain(..) {
+    for src in ordered {
         if cost == 0 {
             break;
         }
-        let take = src.energy.min(cost);
+        let obj = room.objects.get_mut(&src.id).unwrap();
+        let have = obj.store.get("energy").copied().unwrap_or(0);
+        let take = have.min(cost);
         if take > 0 {
-            let obj = room.objects.get_mut(&src.id).unwrap();
-            let left = obj.store.get("energy").copied().unwrap_or(0) - take;
-            obj.store.insert("energy".into(), left);
+            obj.store.insert("energy".into(), have.saturating_sub(take));
             cost -= take;
         }
     }
     true
+}
+
+/// 官方 directions 校验: 数组 → 逐个转数字并去重 (保持首次出现序), 任一不是 1..8 的整数 → None
+fn parse_directions(v: &Value) -> Option<Vec<i32>> {
+    let arr = v.as_array()?;
+    let mut out: Vec<i32> = Vec::new();
+    for d in arr {
+        let n = match d {
+            Value::Number(n) => n.as_f64()?,
+            Value::String(s) => s.trim().parse::<f64>().ok()?,
+            _ => return None,
+        };
+        if !(1.0..=8.0).contains(&n) || n.fract() != 0.0 {
+            return None;
+        }
+        let n = n as i32;
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    Some(out)
 }
 
 /// 采集超容量 → 原地掉落 (官方 harvest 溢出规则)

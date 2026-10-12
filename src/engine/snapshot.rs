@@ -230,6 +230,17 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
                     let _ = write!(out, "{}", job.need_time);
                     out.push_str(",\"remainingTime\":");
                     let _ = write!(out, "{}", job.spawn_time.saturating_sub(world.tick));
+                    // 官方 Spawning.directions: 未设置时为 undefined (键缺省)
+                    if let Some(dirs) = &job.directions {
+                        out.push_str(",\"directions\":[");
+                        for (i, d) in dirs.iter().enumerate() {
+                            if i > 0 {
+                                out.push(',');
+                            }
+                            let _ = write!(out, "{}", d);
+                        }
+                        out.push(']');
+                    }
                     out.push('}');
                 }
                 None => out.push_str("null"),
@@ -513,14 +524,15 @@ fn object_json(obj: &Obj, world: &World) -> Value {
             extra.insert("energyCapacity".into(), json!(obj.energy_capacity));
             match &obj.spawn_job {
                 Some(job) => {
-                    extra.insert(
-                        "spawning".into(),
-                        json!({
-                            "name": job.name,
-                            "needTime": job.need_time,
-                            "remainingTime": job.spawn_time.saturating_sub(world.tick),
-                        }),
-                    );
+                    let mut spawning = json!({
+                        "name": job.name,
+                        "needTime": job.need_time,
+                        "remainingTime": job.spawn_time.saturating_sub(world.tick),
+                    });
+                    if let Some(dirs) = &job.directions {
+                        spawning["directions"] = json!(dirs);
+                    }
+                    extra.insert("spawning".into(), spawning);
                 }
                 None => {
                     extra.insert("spawning".into(), Value::Null);

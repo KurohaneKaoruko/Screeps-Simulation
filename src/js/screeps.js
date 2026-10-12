@@ -1343,11 +1343,71 @@ class OwnedStructure extends Structure {
 		this.owner = this.my ? { username: "Nexus" } : undefined;
 	}
 }
+/** 官方 E/game/structures.js:1050-1059: energyStructures 中未停用的 spawn/extension 的能量合计 */
+function calcEnergyAvailable(ids) {
+	let sum = 0;
+	for (const id of ids) {
+		const o = id === undefined || id === null ? null : byId.get(id);
+		if (o && !o.__off && (o.structureType === "spawn" || o.structureType === "extension") && o.store) {
+			sum += o.store.energy || 0;
+		}
+	}
+	return sum;
+}
+
+/** 官方 createCreep 的随机名字 (names.getUniqueName 的精简名单) */
+const CREEP_NAMES = [
+	"Jackson", "Aiden", "Liam", "Lucas", "Noah", "Mason", "Ethan", "Jacob", "Logan", "Caleb", "Henry", "Carter",
+	"Sophia", "Emma", "Olivia", "Isabella", "Mia", "Ava", "Lily", "Zoe", "Emily", "Chloe", "Layla", "Madison",
+];
+function uniqueCreepName() {
+	let name;
+	let c = 0;
+	do {
+		name = CREEP_NAMES[Math.floor(Math.random() * CREEP_NAMES.length)];
+		if (c > 3) name += CREEP_NAMES[Math.floor(Math.random() * CREEP_NAMES.length)];
+		c++;
+	} while (Game.creeps[name] || __createdCreepNames.has(name));
+	return name;
+}
+
+/**
+ * 官方 E/game/structures.js:983-1047 / 1143-1213: spawnCreep/createCreep 成功后立刻把占位 Creep 放进
+ * Game.creeps (spawning:true, ticksToLive=CREEP_LIFE_TIME, 空 store, 满血, 位于 spawn 格)
+ */
+function placeholderCreep(spawn, name, body) {
+	const carry = body.reduce((n, t) => n + (t === C.CARRY ? C.CARRY_CAPACITY : 0), 0);
+	const creep = new Creep({
+		id: undefined,
+		x: spawn.pos.x,
+		y: spawn.pos.y,
+		roomName: spawn.pos.roomName,
+		name,
+		my: true,
+		body: body.map((type) => ({ type, hits: 100 })),
+		fatigue: 0,
+		spawning: true,
+		ticksToLive: C.CREEP_LIFE_TIME,
+		hits: body.length * 100,
+		hitsMax: body.length * 100,
+		store: {},
+		storeCapacity: carry,
+	});
+	Game.creeps[name] = creep;
+	return creep;
+}
+
+/** 官方方向校验: 去重后的数字数组, 每个都是 1..8 的整数 */
+function validDirections(directions) {
+	return directions.every((d) => d >= 1 && d <= 8 && d === (d | 0));
+}
+
 class StructureSpawn extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
 		this.name = raw.name;
-		this.spawning = raw.spawning || null;
+		// 官方: spawning 为 StructureSpawn.Spawning 实例 (含 setDirections / cancel)
+		this.spawning = raw.spawning ? new Spawning(this, raw.spawning) : null;
 		this.energy = raw.store ? raw.store.energy || 0 : 0;
 		this.energyCapacity = raw.energyCapacity;
 	}
@@ -1360,43 +1420,78 @@ class StructureSpawn extends OwnedStructure {
 		if (!Memory.spawns) Memory.spawns = {};
 		Memory.spawns[this.name] = v;
 	}
-	/** 官方 E/game/structures.js:1073-1128 */
-	spawnCreep(body, name, opts) {
-		opts = opts || {};
-		if (this.spawning) return C.ERR_BUSY;
-		if (typeof name !== "string" || !name || name.length > 100) return C.ERR_INVALID_ARGS;
+	/** 官方 E/game/structures.js:1063-1218 (检查顺序逐条照搬) */
+	spawnCreep(body, name, options = {}) {
+		if (!name || !_.isObject(options)) return C.ERR_INVALID_ARGS;
+		name = name.toString();
+		if (name.length > 100) return C.ERR_INVALID_ARGS;
 		if (Game.creeps[name] || __createdCreepNames.has(name)) return C.ERR_NAME_EXISTS;
-		if (!Array.isArray(body) || body.length === 0) return C.ERR_INVALID_ARGS;
-		// 官方: 超过 50 个部件返回 ERR_INVALID_ARGS (不再静默截断)
-		if (body.length > C.MAX_CREEP_SIZE) return C.ERR_INVALID_ARGS;
-		let cost = 0;
-		for (const p of body) {
-			if (!C.BODYPART_COST[p]) return C.ERR_INVALID_ARGS;
-			cost += C.BODYPART_COST[p];
+		const energyStructures = options.energyStructures && _.uniq(_.map(options.energyStructures, "id"));
+		let directions = options.directions;
+		if (directions !== undefined) {
+			if (!Array.isArray(directions)) return C.ERR_INVALID_ARGS;
+			directions = _.uniq(directions.map((d) => +d));
+			if (directions.length === 0 || !validDirections(directions)) return C.ERR_INVALID_ARGS;
 		}
-		if (cost > this.room.energyAvailable) return C.ERR_NOT_ENOUGH_ENERGY;
-		// dryRun: 副作用 (意图/Memory) 之前返回
-		if (opts.dryRun) return C.OK;
-		if (!Memory.creeps) Memory.creeps = {};
-		// 官方总是创建 Memory.creeps[name], 未传 opts.memory 时为 {}
-		Memory.creeps[name] = opts.memory || {};
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (this.__off) return C.ERR_RCL_NOT_ENOUGH;
+		if (!body || !Array.isArray(body) || body.length === 0 || body.length > C.MAX_CREEP_SIZE) return C.ERR_INVALID_ARGS;
+		for (const p of body) {
+			if (!C.BODYPARTS_ALL.includes(p)) return C.ERR_INVALID_ARGS;
+		}
+		const cost = body.reduce((n, p) => n + C.BODYPART_COST[p], 0);
+		const energyAvailable = energyStructures ? calcEnergyAvailable(energyStructures) : this.room.energyAvailable;
+		if (energyAvailable < cost) return C.ERR_NOT_ENOUGH_ENERGY;
+		// dryRun: 副作用 (意图/Memory/占位 creep) 之前返回
+		if (options.dryRun) return C.OK;
 		__createdCreepNames.add(name);
-		const data = { body, name };
-		if (opts.directions) data.directions = opts.directions;
-		if (opts.energyStructures) data.energyStructures = opts.energyStructures.map((s) => s.id || s);
+		if (Memory.creeps === undefined) Memory.creeps = {};
+		if (_.isObject(Memory.creeps)) Memory.creeps[name] = options.memory || Memory.creeps[name] || {};
+		placeholderCreep(this, name, body);
+		const data = { name, body };
+		if (energyStructures) data.energyStructures = energyStructures;
+		if (directions) data.directions = directions;
 		intent(this.id, "spawnCreep", data);
 		return C.OK;
 	}
-	/** 官方 StructureSpawn.setDirections: 覆盖正在孵化单位的出生方向 */
-	setDirections(name, directions) {
-		if (this.spawning && this.spawning.name === name) {
-			intent(this.id, "setDirections", { name, directions });
-			return C.OK;
+	/** 官方 E/game/structures.js:897-931 (旧 API, 检查顺序与 spawnCreep 不同) */
+	canCreateCreep(body, name) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!body || !Array.isArray(body) || body.length === 0 || body.length > C.MAX_CREEP_SIZE) return C.ERR_INVALID_ARGS;
+		for (const p of body) {
+			if (!C.BODYPARTS_ALL.includes(p)) return C.ERR_INVALID_ARGS;
 		}
-		return C.ERR_NOT_FOUND;
+		if (this.room.energyAvailable < creepCost(body.map((type) => ({ type })))) {
+			return C.ERR_NOT_ENOUGH_ENERGY;
+		}
+		if (this.__off) return C.ERR_RCL_NOT_ENOUGH;
+		if (name) {
+			name = name.toString();
+			if (Game.creeps[name] || __createdCreepNames.has(name)) return C.ERR_NAME_EXISTS;
+			if (name.length > 100) return C.ERR_INVALID_ARGS;
+		}
+		return C.OK;
 	}
-	canCreateCreep() {
-		return this.spawning ? C.ERR_BUSY : C.OK;
+	/** 官方 E/game/structures.js:933-1047: 成功返回名字 (未给名字时随机生成), 失败返回错误码 */
+	createCreep(body, name, creepMemory) {
+		if (_.isObject(name) && creepMemory === undefined) {
+			creepMemory = name;
+			name = undefined;
+		}
+		const code = this.canCreateCreep(body, name);
+		if (code !== C.OK) return code;
+		name = name ? name.toString() : uniqueCreepName();
+		__createdCreepNames.add(name);
+		if (Memory.creeps === undefined) Memory.creeps = {};
+		if (_.isObject(Memory.creeps)) {
+			if (creepMemory !== undefined) Memory.creeps[name] = creepMemory;
+			else Memory.creeps[name] = Memory.creeps[name] || {};
+		}
+		placeholderCreep(this, name, body);
+		intent(this.id, "spawnCreep", { name, body });
+		return name;
 	}
 	/** 官方 E/game/structures.js:1237-1266 */
 	renewCreep(target) {
@@ -1427,6 +1522,34 @@ class StructureSpawn extends OwnedStructure {
 		return `[spawn ${this.name}]`;
 	}
 }
+
+/** 官方 E/game/structures.js:1293-1335: StructureSpawn.Spawning (spawn 为不可枚举属性) */
+class Spawning {
+	constructor(spawn, raw) {
+		Object.defineProperty(this, "spawn", { enumerable: false, value: spawn });
+		this.name = raw.name;
+		this.needTime = raw.needTime;
+		this.remainingTime = raw.remainingTime;
+		this.directions = raw.directions === null ? undefined : raw.directions;
+	}
+	setDirections(directions) {
+		if (!this.spawn.my) return C.ERR_NOT_OWNER;
+		if (Array.isArray(directions) && directions.length > 0) {
+			directions = _.uniq(directions.map((d) => +d));
+			if (validDirections(directions)) {
+				intent(this.spawn.id, "setSpawnDirections", { directions });
+				return C.OK;
+			}
+		}
+		return C.ERR_INVALID_ARGS;
+	}
+	cancel() {
+		if (!this.spawn.my) return C.ERR_NOT_OWNER;
+		intent(this.spawn.id, "cancelSpawning", {});
+		return C.OK;
+	}
+}
+StructureSpawn.Spawning = Spawning;
 class StructureController extends OwnedStructure {
 	constructor(raw) {
 		super(raw);

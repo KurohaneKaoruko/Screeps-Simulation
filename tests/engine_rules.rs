@@ -1239,7 +1239,7 @@ fn snapshot_direct_serializer_matches_value_tree() {
 		.map(|o| format!("{:024x}", o.id))
 		.unwrap();
 	let intents = IntentList::parse(&format!(
-		r#"[{{"o":"{creep_id}","n":"harvest"}},{{"o":"{spawn_id}","n":"spawnCreep","d":{{"body":["work","move"],"name":"b1"}}}}]"#
+		r#"[{{"o":"{creep_id}","n":"harvest"}},{{"o":"{spawn_id}","n":"spawnCreep","d":{{"body":["work","move"],"name":"b1","directions":[3,5]}}}}]"#
 	));
 	let mut movement = Movement::default();
 	tick::run_tick(&mut world, &mut movement, &intents);
@@ -1409,4 +1409,136 @@ fn spawn_regen_requires_owned_controller() {
 	}
 	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
 	assert_eq!(store_of(&world, spawn), 100, "控制器无主 → 不回能");
+}
+
+// ═════════════════════════ 孵化: Spawning 意图 / spawnCreep 校验 / 出生落位 ═════════════════════════
+
+fn spawn_intent(spawn: u64, name: &str, data: &str) -> IntentList {
+	IntentList::parse(&format!(r#"[{{"o":"{spawn:024x}","n":"{name}","d":{data}}}]"#))
+}
+
+fn creep_named<'a>(world: &'a World, name: &str) -> Option<&'a objects::Obj> {
+	world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "creep" && o.name.as_deref() == Some(name))
+}
+
+/// 官方 cancelSpawning: 移除孵化中的 creep 并清空 spawning (能量不退)
+#[test]
+fn cancel_spawning_removes_creep() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["work","carry","move"],"name":"K"}"#));
+	assert!(creep_named(&world, "K").map(|c| c.spawning).unwrap_or(false));
+	let energy_after_spawn = store_of(&world, spawn);
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "cancelSpawning", "{}"));
+	assert!(creep_named(&world, "K").is_none(), "取消后孵化中的 creep 消失");
+	assert!(world.rooms["W5N8"].objects[&spawn].spawn_job.is_none(), "spawning 清空");
+	assert_eq!(store_of(&world, spawn), energy_after_spawn + 1, "不退能量 (只有自然回能 +1)");
+}
+
+/// 官方 setSpawnDirections: 合法方向覆盖出生方向序; 非法 (越界/非整数/空) 整体忽略
+#[test]
+fn set_spawn_directions_validates_and_applies() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move","move","move"],"name":"D"}"#));
+	let dirs = |w: &World| w.rooms["W5N8"].objects[&spawn].spawn_job.as_ref().unwrap().directions.clone();
+	assert_eq!(dirs(&world), None);
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "setSpawnDirections", r#"{"directions":[9,1]}"#));
+	assert_eq!(dirs(&world), None, "含越界方向 → 忽略");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "setSpawnDirections", r#"{"directions":[1.5]}"#));
+	assert_eq!(dirs(&world), None, "非整数 → 忽略");
+	// 1 部件孵化 3 tick: 第 2/3 tick 之间设好方向 5,5,"3" → 去重为 [5,3]
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move","move"],"name":"D"}"#));
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "setSpawnDirections", r#"{"directions":[5,5,"3"]}"#));
+	assert_eq!(dirs(&world), Some(vec![5, 3]));
+	for _ in 0..6 {
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	}
+	let c = creep_named(&world, "D").unwrap();
+	assert!(!c.spawning);
+	assert_eq!((c.x, c.y), (25, 26), "按方向 5 (BOTTOM) 出生");
+}
+
+/// 官方 create-creep.js: directions 非法 / spawn 停用 / 非我方 → 不孵化
+#[test]
+fn spawn_creep_rejects_invalid_directions_and_inactive_spawn() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"X","directions":[0]}"#));
+	assert!(creep_named(&world, "X").is_none(), "方向 0 非法 → 意图作废");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"X","directions":"5"}"#));
+	assert!(creep_named(&world, "X").is_none(), "directions 不是数组 → 意图作废");
+	// 控制器降为 0 级: spawn 不可用 (checkStructureAgainstController)
+	{
+		let c = world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap();
+		c.level = 0;
+	}
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"Y"}"#));
+	assert!(creep_named(&world, "Y").is_none(), "RCL0 spawn 停用 → 不孵化");
+	// 非我方 spawn
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&spawn).unwrap().mine = false;
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"Z"}"#));
+	assert!(creep_named(&world, "Z").is_none(), "非我方 spawn 不孵化");
+}
+
+/// energyStructures 重复 id 只算一次 (官方 _.uniq): 200 能量的 spawn 列两次不能付 300 的身体;
+/// 旧实现会按 400 判定够用, 扣费时 u32 下溢
+#[test]
+fn spawn_energy_structures_dedup() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	set_store(&mut world, spawn, 200);
+	let ids = format!(r#"["{spawn:024x}","{spawn:024x}"]"#);
+	let data = format!(r#"{{"body":["work","work","move","move"],"name":"E","energyStructures":{ids}}}"#);
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", &data));
+	assert!(creep_named(&world, "E").is_none(), "去重后只有 200 能量, 不够 300");
+	assert_eq!(store_of(&world, spawn), 201, "未扣费, 仅自然回能");
+	let data = format!(r#"{{"body":["work","move"],"name":"F","energyStructures":{ids}}}"#);
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", &data));
+	assert!(creep_named(&world, "F").is_some(), "150 够用");
+	assert_eq!(store_of(&world, spawn), 201 - 150 + 1);
+	// 显式空列表 → 只用列出的结构 (没有) → 失败
+	let data = r#"{"body":["move"],"name":"G","energyStructures":[]}"#;
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", data));
+	assert!(creep_named(&world, "G").is_none(), "energyStructures=[] 无可用能量");
+}
+
+/// 出生落位: 越界方向不再被夹成 TOP; 墙格上有路时可出生 (官方 _born-creep.js)
+#[test]
+fn birth_tile_directions_and_road_on_wall() {
+	use screeps_sim::engine::movement::find_birth_tile;
+	let (mut world, _) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	let movement = Movement::default();
+	{
+		let room = &world.rooms["W5N8"];
+		let s = &room.objects[&spawn];
+		assert_eq!(find_birth_tile(room, s, &movement, Some(&[0, 9])), None, "越界方向不映射到 TOP");
+		assert_eq!(find_birth_tile(room, s, &movement, Some(&[0, 3])), Some((26, 25)), "跳过非法值, 用方向 3");
+	}
+	// spawn (25,25) 周围全是墙, 只有 (26,26) 的墙上有路
+	{
+		let room = world.rooms.get_mut("W5N8").unwrap();
+		for dx in -1i32..=1 {
+			for dy in -1i32..=1 {
+				if dx != 0 || dy != 0 {
+					room.terrain.set((25 + dx) as usize, (25 + dy) as usize, 1);
+				}
+			}
+		}
+	}
+	{
+		let room = &world.rooms["W5N8"];
+		assert_eq!(find_birth_tile(room, &room.objects[&spawn], &movement, None), None, "四面是墙无处出生");
+	}
+	let road = alloc_id(&mut world.next_id);
+	world.rooms.get_mut("W5N8").unwrap().objects.insert(road, objects::structure(road, "road", 26, 26, false));
+	let room = &world.rooms["W5N8"];
+	assert_eq!(find_birth_tile(room, &room.objects[&spawn], &movement, None), Some((26, 26)), "墙上路可出生");
 }

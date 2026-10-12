@@ -578,3 +578,133 @@ fn is_active_follows_controller_structures_inner() {
 	assert_eq!(info["poorAttack"], -6, "能量检查先于 RCL 检查 → ERR_NOT_ENOUGH_ENERGY: {info}");
 	assert_eq!(entries.iter().filter(|(_, n, _)| n == "attack").count(), 1, "只有近塔提交 attack 意图");
 }
+
+// ═════════════════════════ StructureSpawn.Spawning / spawnCreep 官方语义 ═════════════════════════
+
+fn snapshot_of(world: &screeps_sim::engine::world::World) -> String {
+	build_snapshot(
+		world,
+		&SnapshotOptions {
+			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
+			always_visible: false,
+			include_terrain: true,
+		},
+	)
+}
+
+/// spawnCreep: 占位 creep 立即进 Game.creeps; Memory 合并规则; 校验顺序 (重名先于 busy、directions、dryRun);
+/// 下一 tick spawn.spawning 是 StructureSpawn.Spawning (spawn 不可枚举), setDirections / cancel 提交官方意图
+#[test]
+fn spawning_object_and_spawn_creep_semantics() {
+	in_tokio(|| spawning_object_and_spawn_creep_semantics_inner());
+}
+
+fn spawning_object_and_spawn_creep_semantics_inner() {
+	let scenario = Scenario::from_json(TWO_ROOMS).unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let mut movement = Movement::default();
+	let bundle = r#"
+		exports.loop = function() {
+			const spawn = Game.spawns[Object.keys(Game.spawns)[0]];
+			if (!spawn.spawning) {
+				Memory.creeps = { Old: { keep: 1 } };
+				const out = {};
+				out.badDirs = spawn.spawnCreep([MOVE], "A", { directions: [1, 9] });
+				out.emptyDirs = spawn.spawnCreep([MOVE], "A", { directions: [] });
+				out.notArray = spawn.spawnCreep([MOVE], "A", { directions: 3 });
+				out.noName = spawn.spawnCreep([MOVE]);
+				out.nullOpts = spawn.spawnCreep([MOVE], "A", null);
+				out.badPart = spawn.spawnCreep(["wing"], "A");
+				out.esDup = spawn.spawnCreep([WORK, WORK, MOVE, MOVE, MOVE], "A", { energyStructures: [spawn, spawn], dryRun: true });
+				out.esStrIds = spawn.spawnCreep([MOVE], "A", { energyStructures: [spawn.id], dryRun: true });
+				out.dry = spawn.spawnCreep([MOVE], "A", { dryRun: true });
+				out.dryMem = Memory.creeps.A === undefined && !Game.creeps.A;
+				out.ok = spawn.spawnCreep([CARRY, CARRY, MOVE], "Old", { directions: ["5", 5, 3] });
+				const c = Game.creeps.Old;
+				out.ph = c && { spawning: c.spawning, my: c.my, ttl: c.ticksToLive, hits: c.hits, hitsMax: c.hitsMax,
+					cap: c.carryCapacity, used: c.store.getUsedCapacity(), fatigue: c.fatigue, owner: c.owner.username,
+					x: c.pos.x, y: c.pos.y, body: c.body.map(p => p.type + p.hits).join(), isCreep: c instanceof Creep };
+				out.mem = Memory.creeps.Old;
+				out.nameExists = spawn.spawnCreep([MOVE], "Old");
+				out.nameFirst = spawn.spawnCreep([MOVE], "Old", { directions: [0] });
+				out.numName = spawn.spawnCreep([MOVE], 12345, { dryRun: true });
+				console.log(JSON.stringify(out));
+				return;
+			}
+			const sp = spawn.spawning;
+			console.log(JSON.stringify({
+				isSpawning: sp instanceof StructureSpawn.Spawning,
+				keys: Object.keys(sp).sort().join(),
+				spawnIsSelf: sp.spawn === spawn,
+				name: sp.name, needTime: sp.needTime, remainingTime: sp.remainingTime, directions: sp.directions,
+				badSet: sp.setDirections([0]), emptySet: sp.setDirections([]), notArraySet: sp.setDirections(5),
+				okSet: sp.setDirections([7, "7", 1]),
+				nameBeforeBusy: spawn.spawnCreep([MOVE], "Old"),
+				busy: spawn.spawnCreep([MOVE], "B"),
+				cancel: sp.cancel(),
+			}));
+		};
+	"#;
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let r1 = bot.run_tick(snapshot_of(&world), "{}".to_string()).unwrap();
+	let a: serde_json::Value = serde_json::from_str(&r1.console[0]).unwrap();
+	assert_eq!(a["badDirs"], -10, "{a}");
+	assert_eq!(a["emptyDirs"], -10, "{a}");
+	assert_eq!(a["notArray"], -10, "{a}");
+	assert_eq!(a["noName"], -10, "{a}");
+	assert_eq!(a["nullOpts"], -10, "{a}");
+	assert_eq!(a["badPart"], -10, "{a}");
+	assert_eq!(a["esDup"], -6, "两次列同一 spawn 只算一次 (300 < 350): {a}");
+	assert_eq!(a["esStrIds"], -6, "官方 _.map(es, 'id'): 传 id 字符串得不到能量: {a}");
+	assert_eq!(a["dry"], 0, "{a}");
+	assert_eq!(a["dryMem"], true, "dryRun 无副作用: {a}");
+	assert_eq!(a["ok"], 0, "{a}");
+	let ph = &a["ph"];
+	assert_eq!(ph["spawning"], true, "{a}");
+	assert_eq!(ph["my"], true);
+	assert_eq!(ph["ttl"], 1500);
+	assert_eq!(ph["hits"], 300);
+	assert_eq!(ph["hitsMax"], 300);
+	assert_eq!(ph["cap"], 100);
+	assert_eq!(ph["used"], 0);
+	assert_eq!(ph["fatigue"], 0);
+	assert_eq!(ph["owner"], "Nexus");
+	assert_eq!((ph["x"].as_u64(), ph["y"].as_u64()), (Some(25), Some(25)), "占位 creep 在 spawn 格");
+	assert_eq!(ph["body"], "carry100,carry100,move100");
+	assert_eq!(ph["isCreep"], true);
+	assert_eq!(a["mem"], serde_json::json!({ "keep": 1 }), "未给 opts.memory 时保留已有 Memory.creeps[name]: {a}");
+	assert_eq!(a["nameExists"], -3, "{a}");
+	assert_eq!(a["nameFirst"], -3, "重名检查先于 directions 校验: {a}");
+	assert_eq!(a["numName"], 0, "name.toString(): {a}");
+	let spawn_intents: Vec<_> = r1.intents.entries.iter().filter(|(_, n, _)| n == "spawnCreep").collect();
+	assert_eq!(spawn_intents.len(), 1, "只有一个 spawnCreep 意图");
+	assert_eq!(spawn_intents[0].2["directions"], serde_json::json!([5, 3]), "directions 转数字去重");
+	tick::run_tick(&mut world, &mut movement, &r1.intents);
+
+	let r2 = bot.run_tick(snapshot_of(&world), r1.memory.clone()).unwrap();
+	let b: serde_json::Value = serde_json::from_str(&r2.console[0]).unwrap();
+	assert_eq!(b["isSpawning"], true, "{b}");
+	assert_eq!(b["keys"], "directions,name,needTime,remainingTime", "spawn 不可枚举: {b}");
+	assert_eq!(b["spawnIsSelf"], true, "{b}");
+	assert_eq!(b["name"], "Old");
+	assert_eq!(b["needTime"], 9);
+	assert_eq!(b["remainingTime"], 8);
+	assert_eq!(b["directions"], serde_json::json!([5, 3]), "快照下发 directions: {b}");
+	assert_eq!(b["badSet"], -10);
+	assert_eq!(b["emptySet"], -10);
+	assert_eq!(b["notArraySet"], -10);
+	assert_eq!(b["okSet"], 0);
+	assert_eq!(b["nameBeforeBusy"], -3, "官方: 重名检查先于 ERR_BUSY: {b}");
+	assert_eq!(b["busy"], -4, "{b}");
+	assert_eq!(b["cancel"], 0);
+	let names: Vec<&str> = r2.intents.entries.iter().map(|(_, n, _)| n.as_str()).collect();
+	assert!(names.contains(&"setSpawnDirections") && names.contains(&"cancelSpawning"), "{names:?}");
+	let set = r2.intents.entries.iter().find(|(_, n, _)| n == "setSpawnDirections").unwrap();
+	assert_eq!(set.2["directions"], serde_json::json!([7, 1]));
+	tick::run_tick(&mut world, &mut movement, &r2.intents);
+	assert!(
+		!world.rooms["W5N8"].objects.values().any(|o| o.obj_type == "creep"),
+		"cancel 后孵化中的 creep 被移除"
+	);
+	assert!(world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "spawn").unwrap().spawn_job.is_none());
+}

@@ -358,7 +358,9 @@ pub fn find_birth_tile(
     let candidates: Vec<(i32, i32)> = match directions {
         Some(dirs) if !dirs.is_empty() => dirs
             .iter()
-            .filter_map(|d| DIRS.get((*d - 1).max(0) as usize).copied())
+            // 只接受 1..8: 越界值不再被夹成 TOP (官方意图层已拒绝非法方向)
+            .filter(|d| (1..=8).contains(*d))
+            .map(|d| DIRS[(*d - 1) as usize])
             .collect(),
         _ => DIRS.to_vec(),
     };
@@ -369,7 +371,10 @@ pub fn find_birth_tile(
             continue;
         }
         let (nx, ny) = (nx as u8, ny as u8);
-        if room.terrain.is_wall(nx as usize, ny as usize) {
+        // 官方 _born-creep.js: 墙格上有路时可以出生
+        if room.terrain.is_wall(nx as usize, ny as usize)
+            && !room.objects.values().any(|o| o.obj_type == "road" && o.x == nx && o.y == ny)
+        {
             continue;
         }
         if movement.is_tile_busy(&room.name, nx, ny) {
