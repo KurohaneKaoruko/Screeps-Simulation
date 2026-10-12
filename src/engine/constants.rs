@@ -203,6 +203,7 @@ pub const EVENT_HEAL_TYPE_RANGED: u32 = 2;
 /// Source / 掉落能量
 pub const SOURCE_ENERGY_CAPACITY: u32 = 3000;
 pub const SOURCE_ENERGY_NEUTRAL_CAPACITY: u32 = 1500;
+pub const SOURCE_ENERGY_KEEPER_CAPACITY: u32 = 4000;
 pub const ENERGY_REGEN_TIME: u64 = 300;
 /// 掉落能量每 tick 衰减 ceil(amount / ENERGY_DECAY)
 pub const ENERGY_DECAY: u32 = 1000;

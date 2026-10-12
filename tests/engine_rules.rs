@@ -1305,3 +1305,42 @@ fn move_toward_creep_without_pull_needs_move_parts() {
 	assert_eq!(find_creep(&world, "Tug").1, 26);
 	assert_eq!(find_creep(&world, "Miner").1, 24, "没人拉、没 MOVE → 原地");
 }
+
+/// 保留: 可以连续续保留; 不再续则到期清除 (官方 controllers/tick.js:10);
+/// 被保留期间 source 容量 3000, 到期回中立 1500 (官方 sources/tick.js); 无控制器的房间 4000 (SK 房)
+#[test]
+fn reservation_renew_expire_and_source_capacity() {
+	let (mut world, mut movement) = setup(
+		r#"{
+		"name": "reserve", "seed": 1,
+		"rooms": [
+			{ "name": "W5N8", "terrain": { "kind": "flat" },
+			  "sources": { "positions": [[10, 10]] },
+			  "controller": { "level": 0, "pos": [28, 27], "mine": false } },
+			{ "name": "W4N8", "terrain": { "kind": "flat" }, "sources": { "positions": [[10, 10]] } }
+		]
+	}"#,
+	);
+	let creep = add_creep(&mut world, "R", 27, 27, &["claim", "claim", "move"]);
+	let ctrl = world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "controller").unwrap().id;
+	let src_cap = |w: &World, room: &str| w.rooms[room].objects.values().find(|o| o.obj_type == "source").unwrap().energy_capacity;
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(src_cap(&world, "W5N8"), 1500, "中立房 1500");
+	assert_eq!(src_cap(&world, "W4N8"), 4000, "无控制器 (SK 房) 4000");
+	let json = format!(r#"[{{"o":"{creep:024x}","n":"reserveController","d":{{"id":"{ctrl:024x}"}}}}]"#);
+	for _ in 0..10 {
+		tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	}
+	let left = |w: &World| w.rooms["W5N8"].objects[&ctrl].reservation_end_time.map(|e| e as i64 - w.tick as i64);
+	// 2 CLAIM × 10 tick 续 = 20, 期间流逝 10 → 剩 ~11 (含首次 endTime = now+1)
+	let remaining = left(&world).expect("应处于保留");
+	assert!((10..=12).contains(&remaining), "续保留应累积, 剩余 {remaining}");
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(src_cap(&world, "W5N8"), 3000, "被保留 → 3000");
+	for _ in 0..15 {
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	}
+	assert_eq!(left(&world), None, "不续则到期清除");
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(src_cap(&world, "W5N8"), 1500, "到期回中立 1500");
+}

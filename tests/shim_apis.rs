@@ -511,3 +511,37 @@ fn transfer_into_busy_spawn_inner() {
 		.unwrap_or(0);
 	assert_eq!(spawn_energy, 101 + 1, "能量应进 spawn (1 + 100, 本 tick 房间能量仍 < 300 再回 1)");
 }
+
+/// reserveController: 自己的保留可以续 (此前 shim 用 !target.my 判断, 第二次起恒返回 ERR_INVALID_TARGET);
+/// reservation 字段名是 ticksToEnd
+#[test]
+fn reserve_controller_renews_own_reservation() {
+	in_tokio(|| {
+		let scenario = Scenario::from_json(
+			r#"{ "name": "r", "seed": 1, "rooms": [{ "name": "W5N8", "terrain": { "kind": "flat" },
+				"controller": { "level": 0, "pos": [28, 27], "mine": false },
+				"creeps": [{ "name": "R", "body": ["claim", "move"], "pos": [27, 27] }] }] }"#,
+		)
+		.unwrap();
+		let mut world = build_world(&scenario).unwrap();
+		let mut movement = Movement::default();
+		let bundle = r#"exports.loop = function() {
+			const c = Game.creeps.R; const ctrl = c.room.controller;
+			console.log(JSON.stringify({ code: c.reserveController(ctrl), res: ctrl.reservation === undefined ? "none" : ctrl.reservation }));
+		};"#;
+		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut memory = String::from("{}");
+		let mut out = Vec::new();
+		for _ in 0..3 {
+			let snapshot = build_snapshot(&world, &SnapshotOptions { cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 }, always_visible: false, include_terrain: true });
+			let r = bot.run_tick(snapshot, memory.clone()).unwrap();
+			memory = r.memory.clone();
+			out.push(serde_json::from_str::<serde_json::Value>(&r.console[0]).unwrap());
+			tick::run_tick(&mut world, &mut movement, &r.intents);
+		}
+		assert_eq!(out[0]["res"], "none", "{out:?}");
+		assert!(out.iter().all(|o| o["code"] == 0), "每 tick 都能续: {out:?}");
+		assert_eq!(out[2]["res"]["username"], "Nexus", "{out:?}");
+		assert!(out[2]["res"]["ticksToEnd"].as_u64().unwrap() >= 1, "ticksToEnd 字段: {out:?}");
+	});
+}

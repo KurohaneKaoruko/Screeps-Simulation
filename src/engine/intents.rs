@@ -823,7 +823,8 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     _ => continue,
                 };
                 let (tx, ty, owned) = match room.objects.get(&target_id) {
-                    Some(c) if c.obj_type == "controller" => (c.x, c.y, c.mine),
+                    // 官方 reserveController.js: 有主 (target.user) 的控制器不能保留
+                    Some(c) if c.obj_type == "controller" => (c.x, c.y, c.mine || c.enemy),
                     _ => continue,
                 };
                 if owned {

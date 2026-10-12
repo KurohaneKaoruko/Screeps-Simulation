@@ -1156,13 +1156,16 @@ class Creep extends RoomObject {
 		return C.OK;
 	}
 	/** 官方 reserveController: CLAIM 部件, 目标须无主且无他人预约 */
+	/** 官方 E/game/creeps.js:955-985 */
 	reserveController(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
-		if (!target || !target.id || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
+		if (!target || !target.id || !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
 		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
-		if (target.my) return C.ERR_INVALID_TARGET;
-		if (target.reservation && !target.my) return C.ERR_INVALID_TARGET;
+		if (target.structureType !== "controller") return C.ERR_INVALID_TARGET;
+		if (target.owner) return C.ERR_INVALID_TARGET;
+		// 自己的保留可以续 (此前误用 !target.my, 中立控制器恒为 false, 续保留永远被拒)
+		if (target.reservation && target.reservation.username !== this.owner.username) return C.ERR_INVALID_TARGET;
 		if (!this.getActiveBodyparts("claim")) return C.ERR_NO_BODYPART;
 		intent(this.id, "reserveController", { id: target.id });
 		return C.OK;
@@ -1404,7 +1407,8 @@ class StructureController extends OwnedStructure {
 		this.safeMode = raw.safeMode || null;
 		this.safeModeCooldown = null;
 		this.upgradeBlocked = raw.upgradeBlocked || 0;
-		this.reservation = raw.reservation || null;
+		// 官方 structures.js: 没有保留时为 undefined; 字段名 ticksToEnd
+		this.reservation = raw.reservation || undefined;
 		this.sign = raw.sign || null;
 		this.isPowerEnabled = false;
 	}
