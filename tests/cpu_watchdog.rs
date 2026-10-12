@@ -33,9 +33,10 @@ fn snapshot(world: &World) -> String {
 		&SnapshotOptions {
 			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
 			always_visible: false,
+			include_terrain: true,
 		},
 	);
-	serde_json::to_string(&snap).unwrap()
+	snap
 }
 
 /// 首 tick 死循环 → 被看门狗中断; 次 tick 正常 → isolate 已恢复

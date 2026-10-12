@@ -31,9 +31,10 @@ fn snapshot(world: &World) -> String {
 		&SnapshotOptions {
 			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
 			always_visible: false,
+			include_terrain: true,
 		},
 	);
-	serde_json::to_string(&snap).unwrap()
+	snap
 }
 
 /// 段内容跨 tick 持久: tick1 写入 + 激活 → tick2 可读并续写

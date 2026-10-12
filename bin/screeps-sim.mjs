@@ -59,6 +59,7 @@ test 选项:
   [patterns...]     文件 / 目录 / 通配符, 缺省扫描当前目录 (**/*.sim.ts, 跳过 node_modules/target 等)
   --bundle, -b <p>  bot bundle 路径 (默认: 用例内 bundle 字段, 再退回 ./dist/main.js)
   --ticks, -t <n>   覆盖所有用例的 tick 数 (快速冒烟)
+  --jobs, -j <n>    并行运行 n 个引擎进程 (含 cpu*Below 断言时建议 -j 1)
   --list, -l        只列出发现的用例, 不运行
   --verbose, -v     显示 bot console 输出与引擎 stderr
 

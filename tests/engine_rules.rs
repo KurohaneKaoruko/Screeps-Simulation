@@ -1160,3 +1160,106 @@ fn spawn_creep_charges_spawn_then_nearest_extensions() {
 		"孵化中的 B1 应已落位 (spawning)"
 	);
 }
+
+/// 直接序列化器 (build_snapshot → String) 与 Value 版 (build_snapshot_value)
+/// 必须语义一致: 直接序列化器是热路径, Value 版是对拍基准。任何分歧都意味着
+/// shim 读到的世界不同 —— 字段增删时两处同步修改并跑此测试。
+#[test]
+fn snapshot_direct_serializer_matches_value_tree() {
+	use screeps_sim::engine::snapshot::{build_snapshot, build_snapshot_value, CpuView, SnapshotOptions};
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "parity",
+		"seed": 1,
+		"rooms": [
+			{ "name": "W5N8", "terrain": { "kind": "flat" },
+			  "sources": { "positions": [[10, 10]] },
+			  "mineral": { "pos": [40, 40], "mineral_type": "Z", "amount": 2500 },
+			  "controller": { "level": 3, "pos": [28, 27] },
+			  "structures": [
+			    { "type": "spawn", "pos": [25, 25], "energy": 200 },
+			    { "type": "extension", "pos": [26, 25], "energy": 50 },
+			    { "type": "tower", "pos": [27, 25], "energy": 300 },
+			    { "type": "link", "pos": [28, 25], "energy": 100 },
+			    { "type": "storage", "pos": [24, 25], "energy": 4000 },
+			    { "type": "container", "pos": [23, 25], "energy": 900 },
+			    { "type": "road", "pos": [22, 25] },
+			    { "type": "rampart", "pos": [25, 26] },
+			    { "type": "constructedWall", "pos": [25, 27] }
+			  ],
+			  "creeps": [{ "name": "w\"q", "body": ["tough", "work", "carry", "move"], "pos": [10, 11],
+			               "store": { "energy": 42 } }] }
+		]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+
+	// 富化状态: 掉落能量 / 墓碑 / 控制器签名与保留 / 容器衰减
+	{
+		let room = world.rooms.values_mut().next().unwrap();
+		let mut next = world.next_id;
+		let id1 = alloc_id(&mut next);
+		let id2 = alloc_id(&mut next);
+		let id3 = alloc_id(&mut next);
+		world.next_id = next;
+		room.objects.insert(id1, objects::dropped_energy(id1, 15, 15, 350));
+		room.objects.insert(id2, objects::tombstone(id2, 16, 16, "w\"q", world.tick + 300));
+		room.objects
+			.insert(id3, objects::construction_site(id3, "road", 20, 20, 300));
+		if let Some(c) = room.controller_mut() {
+			c.sign = Some("签名 \"引号\" & <tag>".to_string());
+			c.reservation_end_time = Some(world.tick + 500);
+		}
+		for o in room.objects.values_mut() {
+			if o.obj_type == "container" {
+				o.next_decay_time = Some(world.tick + 400);
+			}
+		}
+	}
+	// 跑一个意图 tick: 采集/孵化/建造路径都会改变字段形态
+	let creep_id = world
+		.rooms
+		.values()
+		.next()
+		.unwrap()
+		.objects
+		.values()
+		.find(|o| o.obj_type == "creep")
+		.map(|o| format!("{:024x}", o.id))
+		.unwrap();
+	let spawn_id = world
+		.rooms
+		.values()
+		.next()
+		.unwrap()
+		.objects
+		.values()
+		.find(|o| o.obj_type == "spawn")
+		.map(|o| format!("{:024x}", o.id))
+		.unwrap();
+	let intents = IntentList::parse(&format!(
+		r#"[{{"o":"{creep_id}","n":"harvest"}},{{"o":"{spawn_id}","n":"spawnCreep","d":{{"body":["work","move"],"name":"b1"}}}}]"#
+	));
+	let mut movement = Movement::default();
+	tick::run_tick(&mut world, &mut movement, &intents);
+
+	for include_terrain in [true, false] {
+		let opts = SnapshotOptions {
+			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
+			always_visible: true,
+			include_terrain,
+		};
+		let direct = build_snapshot(&world, &opts);
+		let parsed: serde_json::Value =
+			serde_json::from_str(&direct).expect("直接序列化必须是合法 JSON");
+		let reference = build_snapshot_value(&world, &opts);
+		assert_eq!(
+			parsed, reference,
+			"直接序列化器与 Value 版输出不一致 (include_terrain={include_terrain})"
+		);
+		if !include_terrain {
+			assert_eq!(parsed["terrain"], serde_json::json!({}), "不含 terrain 时应为空对象");
+		}
+	}
+}

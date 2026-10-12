@@ -34,10 +34,11 @@ fn run_once(bundle: &str, world: &mut screeps_sim::engine::world::World) -> (Vec
 		&SnapshotOptions {
 			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
 			always_visible: false,
+			include_terrain: true,
 		},
 	);
 	let mut bot = BotRuntime::new(bundle, 1).unwrap();
-	let result = bot.run_tick(serde_json::to_string(&snapshot).unwrap(), "{}".to_string()).unwrap();
+	let result = bot.run_tick(snapshot, "{}".to_string()).unwrap();
 	(result.intents.entries, result.console)
 }
 
@@ -148,10 +149,11 @@ fn moveto_end_to_end_inner() {
 			&SnapshotOptions {
 				cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
 				always_visible: false,
+			include_terrain: true,
 			},
 		);
 		let result = bot
-			.run_tick(serde_json::to_string(&snapshot).unwrap(), memory.clone())
+			.run_tick(snapshot, memory.clone())
 			.unwrap();
 		memory = result.memory.clone();
 		let info: serde_json::Value =
@@ -398,11 +400,12 @@ fn loop_exception_keeps_intents_and_memory_inner() {
 		&SnapshotOptions {
 			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
 			always_visible: false,
+			include_terrain: true,
 		},
 	);
 	let mut bot = BotRuntime::new(bundle, 1).unwrap();
 	let result = bot
-		.run_tick(serde_json::to_string(&snapshot).unwrap(), "{}".to_string())
+		.run_tick(snapshot, "{}".to_string())
 		.unwrap();
 	assert_eq!(result.errors.len(), 1, "异常应被捕获并上报 (不中断模拟)");
 	assert_eq!(result.errors[0].contains("boom"), true, "异常信息应包含原始消息");

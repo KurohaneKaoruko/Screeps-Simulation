@@ -1,6 +1,6 @@
 // Rust 二进制定位 / 构建 / 透传。
 // 解析顺序: SCREEPS_SIM_BIN 环境变量 → <包根>/target/release/screeps-sim → 自动 cargo build。
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -54,11 +54,26 @@ export function forwardToBinary(args) {
 	process.exit(r.status ?? 1)
 }
 
-/// 捕获式运行: 场景走 stdin, JSON 报告从 stdout 收 (引擎的管道协议)
+/// 捕获式运行 (同步): 场景走 stdin, JSON 报告从 stdout 收 (引擎的管道协议)
 export function runBinaryCapture(bin, args, stdinText) {
 	return spawnSync(bin, args, {
 		input: stdinText,
 		encoding: 'utf8',
 		maxBuffer: 256 * 1024 * 1024,
+	})
+}
+
+/// 捕获式运行 (异步): 并行模式用, 不阻塞事件循环
+export function runBinaryAsync(bin, args, stdinText) {
+	return new Promise((resolve) => {
+		const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+		let stdout = ''
+		let stderr = ''
+		child.stdout.on('data', (c) => (stdout += c))
+		child.stderr.on('data', (c) => (stderr += c))
+		child.on('error', (e) => resolve({ status: 1, stdout, stderr: String(e), error: e }))
+		child.on('close', (status) => resolve({ status, stdout, stderr }))
+		child.stdin.on('error', () => {}) // 引擎提前退出时忽略 EPIPE
+		child.stdin.end(stdinText)
 	})
 }

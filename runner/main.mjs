@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { ensureBinary, runBinaryCapture } from './binary.mjs'
+import { ensureBinary, runBinaryCapture, runBinaryAsync } from './binary.mjs'
 import { toWireScenario } from './wire.mjs'
 import { checkScenario } from './check.mjs'
 import { checkBundle } from './bundle-check.mjs'
@@ -16,7 +16,7 @@ const SKIP_DIRS = new Set(['node_modules', 'target', '.git', '.cargo', 'dist', '
 // ── 参数解析 ──────────────────────────────────────────────
 
 export function parseTestArgs(args) {
-	const opts = { patterns: [], bundle: undefined, ticks: undefined, verbose: false, list: false, strict: false }
+	const opts = { patterns: [], bundle: undefined, ticks: undefined, verbose: false, list: false, strict: false, jobs: 1 }
 	for (let i = 0; i < args.length; i++) {
 		const a = args[i]
 		switch (a) {
@@ -38,6 +38,10 @@ export function parseTestArgs(args) {
 				break
 			case '--strict':
 				opts.strict = true
+				break
+			case '--jobs':
+			case '-j':
+				opts.jobs = Math.max(1, Number(args[++i]) || 1)
 				break
 			default:
 				if (a.startsWith('-')) throw new Error(`test 子命令未知参数: ${a}`)
@@ -242,7 +246,9 @@ async function runCase(bin, simCase, opts, cfg = {}) {
 	if (opts.verbose) args.push('--verbose')
 	const stdinText = JSON.stringify(toWireScenario(simCase.sim))
 	const started = performance.now()
-	const r = runBinaryCapture(bin, args, stdinText)
+	const r = opts.jobs > 1
+		? await runBinaryAsync(bin, args, stdinText)
+		: runBinaryCapture(bin, args, stdinText)
 	const seconds = (performance.now() - started) / 1000
 
 	let report = null
@@ -357,7 +363,6 @@ export async function runTests(opts) {
 	const totalStart = performance.now()
 	let passed = 0
 	const failures = []
-	let lastFile = null
 
 	console.log(
 		c.bold(`screeps-sim test  ·  ${allCases.length} 个用例`) +
@@ -365,25 +370,59 @@ export async function runTests(opts) {
 	)
 	let skipped = 0
 	for (const simCase of allCases) {
+		if (simCase.sim.skip) skipped++
+	}
+	// CPU 敏感断言与并行互斥提示 (墙钟口径会被争抢污染)
+	if (opts.jobs > 1) {
+		const cpuSensitive = allCases.filter((cse) =>
+			(cse.sim.asserts ?? []).some((a) => a.kind === 'cpuAvgBelow' || a.kind === 'cpuP95Below')
+		)
+		if (cpuSensitive.length) {
+			console.log(
+				c.yellow(`⚠ --jobs ${opts.jobs} 且 ${cpuSensitive.length} 个用例含 cpu*Below 断言: 并行争抢会使墙钟口径偏大 (建议 -j 1)`)
+			)
+		}
+	}
+	const activeCases = allCases.filter((cse) => !cse.sim.skip)
+	const results = new Map()
+	const runOpts = { ...opts, bundle: bundleOpt }
+	if (opts.jobs <= 1) {
+		for (const simCase of activeCases) {
+			results.set(simCase, await runCase(bin, simCase, runOpts, cfg))
+		}
+	} else {
+		// 并行池: 每用例独立引擎进程, 结果按原序渲染
+		let idx = 0
+		const worker = async () => {
+			while (idx < activeCases.length) {
+				const my = idx++
+				results.set(activeCases[my], await runCase(bin, activeCases[my], runOpts, cfg))
+			}
+		}
+		await Promise.all(Array.from({ length: Math.min(opts.jobs, activeCases.length) }, worker))
+	}
+
+	// 渲染 (保持声明顺序与文件分组)
+	let lastFile = null
+	for (const simCase of allCases) {
 		if (simCase.file !== lastFile) {
 			lastFile = simCase.file
 			console.log(`\n${c.bold(relative(cwd, simCase.file))}`)
 		}
 		if (simCase.sim.skip) {
-			skipped++
 			console.log(`  ${c.dim('− ' + simCase.sim.name + '  (skip)')}`)
 			continue
 		}
 		const bundleDiag = perCase.get(simCase)
+		let r = results.get(simCase)
 		if (bundleDiag?.errors.length) {
-			console.log(`  ${c.red('✗ ' + simCase.sim.name)}`)
-			for (const e of bundleDiag.errors.slice(0, 10)) {
-				console.log(`      ${c.red('·')} bundle L${e.line}: ${e.message}`)
+			r = {
+				simCase,
+				ok: false,
+				reasons: bundleDiag.errors.map((e) => `bundle L${e.line}: ${e.message}`),
+				warnings: r?.warnings,
 			}
-			failures.push({ simCase, ok: false, reasons: bundleDiag.errors.map((e) => `bundle L${e.line}: ${e.message}`) })
-			continue
 		}
-		const r = await runCase(bin, simCase, { ...opts, bundle: bundleOpt }, cfg)
 		console.log(fmtCaseLine(r))
 		for (const w of r.warnings ?? []) {
 			console.log(`      ${c.dim('⚠ ' + w.path + ': ' + w.message)}`)

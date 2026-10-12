@@ -124,6 +124,8 @@ pub struct BotRuntime {
     /// 重建 isolate 所需 (全局重置)
     bundle_code: String,
     seed: u64,
+    /// isolate 新建/重置后需要携带 terrain (shim 的 terrainCache 常驻, 之后不再重发)
+    terrain_pending: bool,
 }
 
 /// 看门狗: 到点抢占式终止 V8 执行。
@@ -210,6 +212,7 @@ impl BotRuntime {
             active_segments: vec![],
             bundle_code: bundle_code.to_string(),
             seed,
+            terrain_pending: true,
         })
     }
 
@@ -226,8 +229,14 @@ impl BotRuntime {
         let mut fresh = BotRuntime::new(&bundle_code, seed)?;
         fresh.segments = segments;
         fresh.active_segments = active_segments;
+        fresh.terrain_pending = true;
         *self = fresh;
         Ok(())
+    }
+
+    /// 本 tick 快照是否需要携带 terrain (isolate 新建/重置后的首个快照; 取后即清)
+    pub fn take_terrain_pending(&mut self) -> bool {
+        std::mem::replace(&mut self.terrain_pending, false)
     }
 
     fn rt(&mut self) -> &mut JsRuntime {

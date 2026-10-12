@@ -264,7 +264,9 @@ CLI 选项：
 | `-b, --bundle <js>` | bot bundle，默认 `dist/main.js` |
 | `-t, --ticks <n>` | 覆盖场景里的 tick 数 |
 | `--csv <path>` | 逐 tick 指标 CSV |
-| `--json-report <path\|->` | 汇总 JSON 报告 (含断言结果); `-` 写 stdout, 人类可读报告转 stderr |
+| `--json-report <path\|->` | 汇总 JSON 报告 (含断言结果/分相耗时/状态哈希); `-` 写 stdout, 人类可读报告转 stderr |
+| `--record-intents <path>` | 每 tick 意图流落盘 JSONL (A/B 对比、回放原料) |
+| `--replay <path>` | 纯引擎回放意图流, **零 JS/零 V8** (~11 万 t/s), 不需要 `--bundle` |
 | `-q, --quiet` | 只输出报告 |
 | `-v, --verbose` | 打印全部 `console.log` |
 | `--dump-memory <path>` | 落盘最终 Memory |

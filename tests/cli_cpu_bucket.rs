@@ -147,6 +147,66 @@ fn stdin_scenario_and_stdout_json_report() {
     assert!(stderr.contains("模拟报告"), "人类报告应在 stderr:\n{stderr}");
 }
 
+/// 意图录制 → 回放保真度: 回放 (纯引擎, 零 JS) 的最终世界状态哈希必须与原运行一致。
+#[test]
+fn intent_record_and_replay_reproduce_identical_world() {
+    let bin = env!("CARGO_BIN_EXE_screeps-sim");
+    let scenario_path = tmp_path("replay-scenario.json");
+    let bundle_path = tmp_path("replay-bundle.js");
+    let record_path = tmp_path("replay-intents.jsonl");
+    write_file(
+        &scenario_path,
+        r#"{
+            "name": "replay-test",
+            "seed": 3,
+            "ticks": 30,
+            "rooms": [{
+                "name": "W5N8",
+                "terrain": { "kind": "flat" },
+                "sources": { "positions": [[18, 22]] },
+                "controller": { "level": 1, "pos": [28, 27] },
+                "structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 }],
+                "creeps": [{ "name": "w", "body": ["work", "carry", "move"], "pos": [19, 22] }]
+            }]
+        }"#,
+    );
+    // 采集 + 移动 + 回填 spawn: 产生稳定的意图流
+    write_file(
+        &bundle_path,
+        r#"exports.loop = function() {
+            const creep = Object.values(Game.creeps)[0];
+            if (!creep) return;
+            const spawn = creep.room.find(FIND_MY_SPAWNS)[0];
+            const src = creep.room.find(FIND_SOURCES)[0];
+            if (creep.store.getFreeCapacity() > 0) {
+                if (creep.harvest(src) === ERR_NOT_IN_RANGE) creep.moveTo(src);
+            } else if (creep.transfer(spawn, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+                creep.moveTo(spawn);
+            }
+        };"#,
+    );
+    let run = |extra: &[&str], report: &std::path::Path| -> serde_json::Value {
+        let out = Command::new(bin)
+            .arg("--scenario").arg(&scenario_path)
+            .args(extra)
+            .arg("--json-report").arg(report)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "运行失败\nstderr: {stderr}");
+        serde_json::from_str(&std::fs::read_to_string(report).unwrap()).unwrap_or_else(|e| {
+            panic!("报告解析失败 {e}\nstdout: {stdout}");
+        })
+    };
+    let r1 = run(&["--bundle", bundle_path.to_str().unwrap(), "--record-intents", record_path.to_str().unwrap()], &tmp_path("replay-r1.json"));
+    // 回放: 不传 --bundle (纯引擎, 无 V8)
+    let r2 = run(&["--replay", record_path.to_str().unwrap()], &tmp_path("replay-r2.json"));
+    assert_eq!(r1["stateHash"], r2["stateHash"], "回放的世界状态哈希必须与原运行一致");
+    assert_eq!(r1["ticks"], r2["ticks"]);
+    assert!(std::fs::read_to_string(&record_path).unwrap().lines().count() >= 25, "录制文件应包含每 tick 一行");
+}
+
 /// tickLimit 场景覆盖值生效: 覆盖为 10000 也不越过官方 500 上限的语义由公式保证,
 /// 这里验证覆盖值本身被采用 (Game.cpu.tickLimit 透传由单元测试覆盖)。
 #[test]

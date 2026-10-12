@@ -2,6 +2,20 @@
 
 > 基于代码热路径审查 + 受控基准测量 (2026-10, 本文档随实现推进更新)
 
+## ✅ P1 批次已交付 (2026-10-12, 接 P0)
+
+- **直接序列化器**: `build_snapshot` 直写 String, 不建 `serde_json::Value` 树;
+  `build_snapshot_value` 保留为对拍基准 (parity 测试保证两者语义一致, 富对象世界 + 转义字符)。
+- **terrain 不再重发**: 地形不可变 + shim `terrainCache` 常驻 → 仅 isolate 新建/重置后的
+  首个快照携带 (`include_terrain`), 9 房场景每 tick 省 ~20KB 序列化。
+- **意图录制/回放**: `--record-intents x.jsonl` / `--replay x.jsonl` (纯引擎, 零 V8);
+  CLI 测试验证回放的世界状态哈希与原运行逐位一致。
+- **runner 并行**: `test -j N` (每用例独立引擎进程, 原序渲染; cpu*Below 断言警告)。
+- 实测 (3000 tick, min-bot): 1 房 8815→**21179 t/s**, 9 房 5806→**17064 t/s**
+  (对比最初基线 6560/4689 = **3.2×/3.6×**); 快照相位 0.051→0.004ms;
+  回放模式 **113,868 t/s**。剩余底噪在 JS 侧 (JSON.parse + buildGame 重建),
+  下一步候选: V8 startup snapshot (isolate 重建 17ms) 与 shim 重建的增量对象包装 (语义风险需对拍)。
+
 ## ✅ P0 批次已交付 (2026-10-12)
 
 - 快照边界 3 次拷贝 → 1 次 (op take 转移所有权); 意图解析 3 次 → 1 次

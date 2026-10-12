@@ -62,6 +62,9 @@ async fn async_main() {
     let mut dump_memory_path: Option<String> = None;
     let mut render_room: Option<String> = None;
     let mut seed_random = true;
+    // 意图录制/回放 (P1-3): 录制 = 每 tick 意图落盘 JSONL; 回放 = 纯引擎重放, 零 JS
+    let mut record_intents_path: Option<String> = None;
+    let mut replay_path: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -106,6 +109,14 @@ async fn async_main() {
                 seed_random = false;
                 i += 1;
             }
+            "--record-intents" => {
+                record_intents_path = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--replay" => {
+                replay_path = args.get(i + 1).cloned();
+                i += 2;
+            }
             _ => {
                 eprintln!("未知参数: {} (支持 --scenario --bundle --ticks --csv --json-report --quiet)", args[i]);
                 std::process::exit(2);
@@ -146,9 +157,19 @@ async fn async_main() {
     let scenario = Scenario::from_json(&scenario_text)
         .unwrap_or_else(|e| panic!("{e}"));
     let total_ticks = ticks_override.or(scenario.ticks).unwrap_or(1000);
+    if record_intents_path.is_some() && replay_path.is_some() {
+        eprintln!("--record-intents 与 --replay 不能同时使用");
+        std::process::exit(2);
+    }
+    // 回放模式: 意图流来自录制文件, 不需要 bot bundle 与 V8
+    let replaying = replay_path.is_some();
 
-    let bundle = std::fs::read_to_string(&bundle_path)
-        .unwrap_or_else(|e| panic!("读取 bundle 失败 {bundle_path}: {e}"));
+    let bundle = if replaying {
+        String::new()
+    } else {
+        std::fs::read_to_string(&bundle_path)
+            .unwrap_or_else(|e| panic!("读取 bundle 失败 {bundle_path}: {e}"))
+    };
 
     let mut world = screeps_sim::engine::scenario::build_world(&scenario)
         .unwrap_or_else(|e| panic!("{e}"));
@@ -189,7 +210,22 @@ async fn async_main() {
     } else {
         0
     };
-    let mut bot = BotRuntime::new(&bundle, seed).unwrap_or_else(|e| panic!("{e}"));
+    // 回放模式不需要 V8; 录制文件逐行读取 (tick → intents)
+    let mut bot = if replaying {
+        None
+    } else {
+        Some(BotRuntime::new(&bundle, seed).unwrap_or_else(|e| panic!("{e}")))
+    };
+    let mut replay_reader = replay_path.as_ref().map(|p| {
+        std::io::BufReader::new(
+            std::fs::File::open(p).unwrap_or_else(|e| panic!("打开回放文件失败 {p}: {e}")),
+        )
+    });
+    let mut record_writer = record_intents_path.as_ref().map(|p| {
+        std::io::BufWriter::new(
+            std::fs::File::create(p).unwrap_or_else(|e| panic!("创建意图录制文件失败 {p}: {e}")),
+        )
+    });
 
     let wall_start = Instant::now();
     let mut memory_json = scenario.memory.clone().unwrap_or_else(|| "{}".to_string());
@@ -226,7 +262,7 @@ async fn async_main() {
     let mut phases = PhaseTiming::default();
     while run < total_ticks {
         // 0. 全局重置 (isolate 重建; 全局变量丢失、Memory/内存段保留)
-        if let Some(every) = global_reset_every {
+        if let (Some(every), Some(bot)) = (global_reset_every, bot.as_mut()) {
             if world.tick > 0 && world.tick % every == 0 {
                 if let Err(e) = bot.reset_global() {
                     eprintln!("[tick {}] 全局重置失败: {e}", world.tick);
@@ -240,13 +276,17 @@ async fn async_main() {
         }
         // 0.5. bucket 耗尽 → 跳过本 tick 的用户执行 (官方 make.js:72-83)。
         //     游戏世界照常推进 (只有 bot 的意图缺席), 跳过期间每 tick 回能。
-        if cpu.should_skip() {
+        //     (回放模式无 CPU 消耗, 永不触发)
+        if !replaying && cpu.should_skip() {
             eprintln!(
                 "[t{}] Script execution has been terminated: CPU bucket is empty ({:.0})",
                 world.tick, cpu.raw_bucket
             );
             cpu.skip_tick();
             let empty = IntentList::parse("[]");
+            if let Some(w) = record_writer.as_mut() {
+                let _ = writeln!(w, "{}", serde_json::json!({"tick": world.tick, "intents": []}));
+            }
             tick::run_tick(&mut world, &mut movement, &empty);
             let (rcl, progress, progress_total, energy_available, storage_energy, creeps, spawning) =
                 summarize(&world);
@@ -275,56 +315,74 @@ async fn async_main() {
             continue;
         }
 
-        // 1. 快照 (Game.cpu.bucket 显示 max(0, raw); tickLimit = min(500, bucket + limit))
+        // 1. 快照 + bot 执行 (回放模式跳过: 意图流直接来自录制文件)
         let tick_limit = tick_limit_override.unwrap_or_else(|| cpu.tick_limit());
-        let snapshot_opts = SnapshotOptions {
-            cpu: screeps_sim::engine::snapshot::CpuView {
-                limit: cpu_limit,
-                tick_limit,
-                bucket: cpu.displayed_bucket(),
-            },
-            always_visible: scenario.always_visible,
-        };
-        let t_snap = Instant::now();
-        let snapshot = build_snapshot(&world, &snapshot_opts).to_string();
-        phases.snapshot_us += t_snap.elapsed().as_micros() as u64;
+        let (cpu_used, tick_result);
+        if replaying {
+            cpu_used = 0.0;
+            tick_result = screeps_sim::runtime::TickResult {
+                intents: read_replay_intents(&mut replay_reader),
+                memory: memory_json.clone(),
+                cpu_used: 0.0,
+                errors: Vec::new(),
+                console: Vec::new(),
+                timed_out: false,
+            };
+        } else {
+            let bot = bot.as_mut().expect("非回放模式必有 runtime");
+            let snapshot_opts = SnapshotOptions {
+                cpu: screeps_sim::engine::snapshot::CpuView {
+                    limit: cpu_limit,
+                    tick_limit,
+                    bucket: cpu.displayed_bucket(),
+                },
+                always_visible: scenario.always_visible,
+                // terrain 不可变: 仅 isolate 新建/重置后的首个快照携带 (shim 缓存常驻)
+                include_terrain: bot.take_terrain_pending(),
+            };
+            let t_snap = Instant::now();
+            let snapshot = build_snapshot(&world, &snapshot_opts);
+            phases.snapshot_us += t_snap.elapsed().as_micros() as u64;
 
-        // 2. bot 执行 (enforce 时按当前 tickLimit 强制中断)。快照/内存按值转移, 避免边界拷贝。
-        let tick_timeout = if enforce_cpu { Some(tick_limit) } else { None };
-        let t_js = Instant::now();
-        let tick_result = match bot.run_tick_limited(snapshot, std::mem::take(&mut memory_json), tick_timeout) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[tick {}] 运行时致命错误: {e}", world.tick);
-                // memory 已按值移交 runtime, 从 IO 通道取回上一 tick 状态 (dump-memory 用)
-                memory_json = bot.pending_memory();
-                // 致命错误计入统计: 断言基于完整事实, 不再"带着错误通过"
-                let (rcl, progress, progress_total, energy_available, storage_energy, creeps, spawning) =
-                    summarize(&world);
-                metrics.record(
-                    TickMetrics {
-                        tick: world.tick,
-                        cpu_used: 0.0,
-                        intents: 0,
-                        creeps,
-                        spawning,
-                        energy_available,
-                        storage_energy,
-                        rcl,
-                        progress,
-                        controller_progress_total: progress_total,
-                        errors: 1,
-                        console_lines: 0,
-                    },
-                    memory_json.len(),
-                    false,
-                );
-                fatal_error = true;
-                break;
-            }
-        };
-        phases.js_us += t_js.elapsed().as_micros() as u64;
-        let cpu_used = tick_result.cpu_used;
+            // bot 执行 (enforce 时按当前 tickLimit 强制中断)。快照/内存按值转移, 避免边界拷贝。
+            let tick_timeout = if enforce_cpu { Some(tick_limit) } else { None };
+            let t_js = Instant::now();
+            let result =
+                match bot.run_tick_limited(snapshot, std::mem::take(&mut memory_json), tick_timeout) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("[tick {}] 运行时致命错误: {e}", world.tick);
+                        // memory 已按值移交 runtime, 从 IO 通道取回上一 tick 状态 (dump-memory 用)
+                        memory_json = bot.pending_memory();
+                        // 致命错误计入统计: 断言基于完整事实, 不再"带着错误通过"
+                        let (rcl, progress, progress_total, energy_available, storage_energy, creeps, spawning) =
+                            summarize(&world);
+                        metrics.record(
+                            TickMetrics {
+                                tick: world.tick,
+                                cpu_used: 0.0,
+                                intents: 0,
+                                creeps,
+                                spawning,
+                                energy_available,
+                                storage_energy,
+                                rcl,
+                                progress,
+                                controller_progress_total: progress_total,
+                                errors: 1,
+                                console_lines: 0,
+                            },
+                            memory_json.len(),
+                            false,
+                        );
+                        fatal_error = true;
+                        break;
+                    }
+                };
+            phases.js_us += t_js.elapsed().as_micros() as u64;
+            cpu_used = result.cpu_used;
+            tick_result = result;
+        }
         if tick_result.timed_out {
             eprintln!(
                 "[t{}] Script execution timed out ungracefully (tickLimit {:.0}ms): 本 tick 意图与 Memory 改动均丢弃",
@@ -356,6 +414,14 @@ async fn async_main() {
         // 4. 意图结算 + tick 推进 (意图已在 runtime 单次解析)
         let intents = tick_result.intents;
         let intent_count = intents.entries.len();
+        if let Some(w) = record_writer.as_mut() {
+            let arr: Vec<serde_json::Value> = intents
+                .entries
+                .iter()
+                .map(|(o, n, d)| serde_json::json!({ "o": o, "n": n, "d": d }))
+                .collect();
+            let _ = writeln!(w, "{}", serde_json::json!({ "tick": world.tick, "intents": arr }));
+        }
         for (_, name, _) in &intents.entries {
             *intent_histogram.entry(name.clone()).or_insert(0) += 1;
         }
@@ -416,6 +482,10 @@ async fn async_main() {
     }
 
     let elapsed = wall_start.elapsed();
+    // 录制文件落盘 (BufWriter 显式 flush, 不可忽略错误)
+    if let Some(w) = record_writer.as_mut() {
+        let _ = std::io::Write::flush(w);
+    }
     // tps 按实际运行的 tick 数计 (致命错误/提前退出时不再假装跑满)
     let actual_ticks = run;
     let tps = actual_ticks as f64 / elapsed.as_secs_f64().max(1e-9);
@@ -525,9 +595,43 @@ async fn async_main() {
     }
 }
 
+/// 回放文件的行格式: {"tick":T,"intents":[{o,n,d},...]}
+#[derive(serde::Deserialize)]
+struct ReplayLine {
+    #[allow(dead_code)]
+    tick: u64,
+    #[serde(default)]
+    intents: Vec<screeps_sim::engine::intents::IntentEntry>,
+}
+
+/// 读取回放文件的下一行意图 (EOF / 空行 / 坏行 → 空意图, 世界照常推进)
+fn read_replay_intents(
+    reader: &mut Option<std::io::BufReader<std::fs::File>>,
+) -> screeps_sim::engine::intents::IntentList {
+    use std::io::BufRead as _;
+    let Some(r) = reader else {
+        return screeps_sim::engine::intents::IntentList { entries: Vec::new() };
+    };
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match r.read_line(&mut line) {
+            Ok(0) => return screeps_sim::engine::intents::IntentList { entries: Vec::new() },
+            Ok(_) => {}
+            Err(_) => return screeps_sim::engine::intents::IntentList { entries: Vec::new() },
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<ReplayLine>(&line) {
+            Ok(l) => return screeps_sim::engine::intents::IntentList::from_entries(l.intents),
+            Err(_) => continue,
+        }
+    }
+}
+
 /// 断言种类标签 (与场景 JSON 的 `kind` 一致)
-fn assert_kind(spec: &screeps_sim::engine::scenario::AssertSpec) -> &'static str {
-    use screeps_sim::engine::scenario::AssertSpec;
+fn assert_kind(spec: &screeps_sim::engine::scenario::AssertSpec) -> &'static str {    use screeps_sim::engine::scenario::AssertSpec;
     match spec {
         AssertSpec::RclAtLeast { .. } => "rclAtLeast",
         AssertSpec::RclReachedBy { .. } => "rclReachedBy",
