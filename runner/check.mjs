@@ -149,6 +149,31 @@ export function checkScenario(sim) {
 			}
 		}
 	}
+	// market: 初始 credits + 外部订单 (下单收 5% 手续费 / 运输能量费由接单方终端出)
+	if (sim.market !== undefined) {
+		if (!sim.market || typeof sim.market !== 'object' || Array.isArray(sim.market)) {
+			err('market', '应为对象, 形如 { "credits": 10000, "orders": [{ "type": "sell", "resourceType": "energy", "roomName": "W1N1", "price": 0.5, "totalAmount": 1000 }] }')
+		} else {
+			if (sim.market.credits !== undefined && !(typeof sim.market.credits === 'number' && isFinite(sim.market.credits) && sim.market.credits >= 0)) {
+				err('market.credits', `必须为非负有限数 (当前 ${sim.market.credits})`)
+			}
+			if (sim.market.orders !== undefined) {
+				if (!Array.isArray(sim.market.orders)) {
+					err('market.orders', '应为数组')
+				} else {
+					sim.market.orders.forEach((o, i) => {
+						const at = `market.orders[${i}]`
+						if (!o || typeof o !== 'object' || Array.isArray(o)) { err(at, '应为对象'); return }
+						if (o.type !== 'buy' && o.type !== 'sell') err(`${at}.type`, `必须为 buy 或 sell (当前 ${o.type})`)
+						if (typeof o.resourceType !== 'string') err(`${at}.resourceType`, '必须为字符串')
+						if (typeof o.roomName !== 'string' || !/^(W|E)\d+(N|S)\d+$/.test(o.roomName)) err(`${at}.roomName`, `非法房名 (当前 ${o.roomName})`)
+						if (!(typeof o.price === 'number' && isFinite(o.price) && o.price >= 0.001 && o.price <= 1e8)) err(`${at}.price`, `必须在 [0.001, 1e8] 内 (当前 ${o.price})`)
+						if (!(Number.isInteger(o.totalAmount) && o.totalAmount > 0)) err(`${at}.totalAmount`, `必须为正整数 (当前 ${o.totalAmount})`)
+					})
+				}
+			}
+		}
+	}
 	if (sim.seed === 0) {
 		warn('seed', 'seed=0: 地形生成确定, 但 Math.random 不播种 → 模拟不可复现')
 	}

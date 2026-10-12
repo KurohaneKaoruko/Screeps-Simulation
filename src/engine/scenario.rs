@@ -210,6 +210,32 @@ pub enum AssertSpec {
     NoErrors,
 }
 
+/// 市场配置: 初始 credits + 外部订单 (NPC/他玩家)
+#[derive(Deserialize, Debug, Clone)]
+pub struct MarketSpec {
+    /// 初始账户 credits (默认 0)
+    #[serde(default)]
+    pub credits: Option<f64>,
+    /// 外部订单 (供本玩家 deal; 无需真实终端/账户)
+    #[serde(default)]
+    pub orders: Vec<MarketOrderSpec>,
+}
+
+/// 外部市场订单定义 (字段名对齐官方订单对象)
+#[derive(Deserialize, Debug, Clone)]
+pub struct MarketOrderSpec {
+    /// "buy" | "sell"
+    #[serde(rename = "type")]
+    pub order_type: String,
+    #[serde(rename = "resourceType")]
+    pub resource_type: String,
+    #[serde(rename = "roomName")]
+    pub room_name: String,
+    pub price: f64,
+    #[serde(rename = "totalAmount")]
+    pub total_amount: u32,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct Scenario {
     pub name: String,
@@ -241,6 +267,9 @@ pub struct Scenario {
     /// NPC 配置: invader 侵袭周期 (keeper/powerBank 由房间结构 keeperLair/powerBank 驱动)
     #[serde(default)]
     pub npcs: Option<crate::engine::npc::NpcConfig>,
+    /// 市场配置: 初始 credits + 外部订单
+    #[serde(default)]
+    pub market: Option<MarketSpec>,
 }
 
 fn default_true() -> bool {
@@ -288,6 +317,34 @@ impl Scenario {
                 }
                 if inv.lifetime == 0 {
                     return Err("npcs.invaders.lifetime 必须 > 0".into());
+                }
+            }
+        }
+        if let Some(market) = &self.market {
+            if let Some(c) = market.credits {
+                if !c.is_finite() || c < 0.0 {
+                    return Err(format!("market.credits 必须为非负有限数 (当前 {c})"));
+                }
+            }
+            for (i, o) in market.orders.iter().enumerate() {
+                let at = format!("market.orders[{i}]");
+                if o.order_type != "buy" && o.order_type != "sell" {
+                    return Err(format!("{at}.type 必须为 buy 或 sell (当前 {:?})", o.order_type));
+                }
+                if !crate::engine::constants::RESOURCES_ALL.contains(&o.resource_type.as_str()) {
+                    return Err(format!("{at}.resourceType 非法: {:?}", o.resource_type));
+                }
+                if !is_valid_room_name(&o.room_name) {
+                    return Err(format!("{at}.roomName 非法房名: {:?}", o.room_name));
+                }
+                if !crate::engine::market::valid_price(o.price) {
+                    return Err(format!(
+                        "{at}.price 必须在 [0.001, 1e8] 内 (当前 {})",
+                        o.price
+                    ));
+                }
+                if o.total_amount == 0 {
+                    return Err(format!("{at}.totalAmount 必须 > 0"));
                 }
             }
         }
@@ -601,6 +658,28 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
         .npcs
         .as_ref()
         .and_then(|n| n.invaders.clone());
+    // 市场: 初始 credits 与外部订单 (seq 先分给外部订单, 本玩家订单从其后开始)
+    if let Some(m) = &scenario.market {
+        world.market_credits = m.credits.unwrap_or(0.0);
+        for (i, o) in m.orders.iter().enumerate() {
+            let id = crate::engine::market::order_id(i as u64);
+            world.market_orders.insert(
+                id.clone(),
+                crate::engine::market::MarketOrder {
+                    id,
+                    order_type: o.order_type.clone(),
+                    resource_type: o.resource_type.clone(),
+                    room_name: o.room_name.clone(),
+                    price: crate::engine::market::normalize_price(o.price),
+                    amount: o.total_amount,
+                    total_amount: o.total_amount,
+                    created: 0,
+                    external: true,
+                },
+            );
+        }
+        world.market_order_seq = m.orders.len() as u64;
+    }
     prime_world(&mut world);
     Ok(world)
 }

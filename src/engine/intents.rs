@@ -146,6 +146,8 @@ pub struct TickEffects {
     pub errors: Vec<String>,
     /// 本 tick 通过校验的 terminal.send (官方 send.js 只登记 `send`, 由全局 market 阶段在 tick 末执行)
     pub sends: Vec<TerminalSend>,
+    /// 本 tick 登记的市场操作 (官方 market 阶段在 tick 末统一结算)
+    pub market_ops: Vec<crate::engine::market::MarketOp>,
 }
 
 /// 待执行的终端转账 (官方 terminal.send 意图)
@@ -166,16 +168,21 @@ pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
         deaths: vec![],
         errors: vec![],
         sends: vec![],
+        market_ops: vec![],
     };
     // 对象意图按 id 序 (等价官方 roomObjects 迭代序), 同对象多意图按提交序
     let mut object_intents: Vec<(u64, String, Value)> = Vec::new();
     let mut room_intents: Vec<(String, String, Value)> = Vec::new();
+    // 市场意图 (官方 market 方法): 无对象归属, 按提交序结算
+    let mut market_intents: Vec<(String, Value)> = Vec::new();
     for (obj, name, data) in &intents.entries {
         if obj == "room" {
             let room = data.get("room").and_then(Value::as_str).map(str::to_string).unwrap_or_default();
             if !room.is_empty() {
                 room_intents.push((room, name.clone(), data.clone()));
             }
+        } else if obj == "market" {
+            market_intents.push((name.clone(), data.clone()));
         } else if let Ok(id) = u64::from_str_radix(obj, 16) {
             object_intents.push((id, name.clone(), data.clone()));
         }
@@ -206,7 +213,53 @@ pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
     for (room_name, name, data) in room_intents {
         apply_room_intent(world, &room_name, &name, &data, &mut effects);
     }
+    for (name, data) in market_intents {
+        apply_market_intent(&name, &data, &mut effects);
+    }
     effects
+}
+
+/// 官方 market 方法登记 (无对象归属): 转成 MarketOp, 由 tick 末 market 阶段结算
+fn apply_market_intent(name: &str, data: &Value, effects: &mut TickEffects) {
+    use crate::engine::market::MarketOp;
+    match name {
+        "createOrder" => {
+            let order_type = data.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+            let resource_type =
+                data.get("resourceType").and_then(Value::as_str).unwrap_or("").to_string();
+            let room_name = data.get("roomName").and_then(Value::as_str).unwrap_or("").to_string();
+            let price = data.get("price").and_then(Value::as_f64).unwrap_or(0.0);
+            let total_amount = data.get("totalAmount").and_then(Value::as_u64).unwrap_or(0) as u32;
+            effects.market_ops.push(MarketOp::Create {
+                order_type,
+                resource_type,
+                room_name,
+                price,
+                total_amount,
+            });
+        }
+        "deal" => {
+            let order_id = data.get("orderId").and_then(Value::as_str).unwrap_or("").to_string();
+            let amount = data.get("amount").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let room_name = data.get("roomName").and_then(Value::as_str).map(str::to_string);
+            effects.market_ops.push(MarketOp::Deal { order_id, amount, room_name });
+        }
+        "cancelOrder" => {
+            let order_id = data.get("orderId").and_then(Value::as_str).unwrap_or("").to_string();
+            effects.market_ops.push(MarketOp::Cancel { order_id });
+        }
+        "changeOrderPrice" => {
+            let order_id = data.get("orderId").and_then(Value::as_str).unwrap_or("").to_string();
+            let new_price = data.get("newPrice").and_then(Value::as_f64).unwrap_or(0.0);
+            effects.market_ops.push(MarketOp::ChangePrice { order_id, new_price });
+        }
+        "extendOrder" => {
+            let order_id = data.get("orderId").and_then(Value::as_str).unwrap_or("").to_string();
+            let add_amount = data.get("addAmount").and_then(Value::as_u64).unwrap_or(0) as u32;
+            effects.market_ops.push(MarketOp::Extend { order_id, add_amount });
+        }
+        _ => {}
+    }
 }
 
 fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)], effects: &mut TickEffects) {

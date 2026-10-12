@@ -5,6 +5,7 @@ pub mod checkpoint;
 pub mod constants;
 pub mod cpu;
 pub mod intents;
+pub mod market;
 pub mod metrics;
 pub mod movement;
 pub mod npc;

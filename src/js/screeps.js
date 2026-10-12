@@ -2654,24 +2654,133 @@ function __installLazyMemory() {
 
 /** 静态共享对象: 每 tick Object.create 出新身份 (防 bot 缓存跨 tick 共享), 方法只挂在原型上 */
 const STATIC_SHARD = { name: "shard0", type: "world", ptr: false };
+/** 订单价格上下限 (官方 0.001 .. 1e8) */
+const MARKET_MIN_PRICE = 0.001;
+const MARKET_MAX_PRICE = 1e8;
+/** 本玩家在指定房间的终端 (Game.structures 只含自有 OwnedStructure) */
+function myTerminalIn(roomName) {
+	for (const s of Object.values(Game.structures)) {
+		if (s.structureType === C.STRUCTURE_TERMINAL && s.my && s.pos.roomName === roomName) return s;
+	}
+	return null;
+}
+/** 本玩家拥有终端的房间列表 (排序保证确定性) */
+function myTerminalRooms() {
+	const rooms = [];
+	for (const s of Object.values(Game.structures)) {
+		if (s.structureType === C.STRUCTURE_TERMINAL && s.my && !rooms.includes(s.pos.roomName)) rooms.push(s.pos.roomName);
+	}
+	return rooms.sort();
+}
+/** 去掉模拟器内部字段 (external) 后再交给 bot */
+function cleanOrder(o) {
+	const c = { ...o };
+	delete c.external;
+	return c;
+}
 const MARKET_PROTO = {
-	/** 官方 market.js:31-34 */
+	/** 官方 market.js:31-34: calcTransactionCost(amount, roomName1, roomName2) */
 	calcTransactionCost(amount, roomName1, roomName2) {
+		if (typeof amount !== "number" || !(amount > 0)) return C.ERR_INVALID_ARGS;
+		if (typeof roomName1 !== "string" || typeof roomName2 !== "string") return C.ERR_INVALID_ARGS;
 		return calcTerminalEnergyCost(amount, calcRoomsDistance(roomName1, roomName2));
 	},
-	createOrder() { return C.ERR_INVALID_ARGS; },
-	deal() { return C.ERR_INVALID_ARGS; },
-	cancelOrder() { return C.OK; },
-	changeOrderPrice() { return C.OK; },
-	extendOrder() { return C.OK; },
-	getAllOrders() { return []; },
-	getHistory() { return []; },
-	getOrderById() { return null; },
+	/** 官方 market.js: 创建订单, 立即收取「订单总价 × 5%」的手续费 */
+	createOrder(params) {
+		if (!params || typeof params !== "object") return C.ERR_INVALID_ARGS;
+		const { type, resourceType, roomName, price, totalAmount } = params;
+		if (type !== C.ORDER_BUY && type !== C.ORDER_SELL) return C.ERR_INVALID_ARGS;
+		if (!C.RESOURCES_ALL.includes(resourceType)) return C.ERR_INVALID_ARGS;
+		if (typeof roomName !== "string" || !/^(W|E)\d+(N|S)\d+$/.test(roomName)) return C.ERR_INVALID_ARGS;
+		if (typeof price !== "number" || !isFinite(price) || price < MARKET_MIN_PRICE || price > MARKET_MAX_PRICE) return C.ERR_INVALID_ARGS;
+		if (typeof totalAmount !== "number" || !(totalAmount > 0) || Math.floor(totalAmount) !== totalAmount) return C.ERR_INVALID_ARGS;
+		if (this.credits + 1e-9 < price * totalAmount * 0.05) return C.ERR_NOT_ENOUGH_RESOURCES;
+		intent("market", "createOrder", { type, resourceType, roomName, price, totalAmount });
+		return C.OK;
+	},
+	/** 官方 market.js: 成交 (接单方为我们; 能量费一律从我们的终端扣除) */
+	deal(orderId, amount, yourRoomName) {
+		if (typeof orderId !== "string") return C.ERR_INVALID_ARGS;
+		const order = this.getOrderById(orderId);
+		if (!order) return C.ERR_INVALID_TARGET;
+		if (typeof amount !== "number" || !(amount > 0) || Math.floor(amount) !== amount) return C.ERR_INVALID_ARGS;
+		if (amount > order.remainingAmount) return C.ERR_INVALID_ARGS;
+		let takerRoom = yourRoomName;
+		if (takerRoom == null) {
+			const rooms = myTerminalRooms();
+			if (rooms.length !== 1) return C.ERR_INVALID_ARGS;
+			takerRoom = rooms[0];
+		} else if (typeof takerRoom !== "string") {
+			return C.ERR_INVALID_ARGS;
+		}
+		const terminal = myTerminalIn(takerRoom);
+		if (!terminal) return C.ERR_INVALID_ARGS;
+		if (terminal.cooldown > 0) return C.ERR_TIRED;
+		const cost = calcTerminalEnergyCost(amount, calcRoomsDistance(takerRoom, order.roomName));
+		const energy = terminal.store[C.RESOURCE_ENERGY] || 0;
+		if (order.type === C.ORDER_SELL) {
+			// 订单在卖, 我们买入: 资源进我们终端; 付 credits + 能量费; 需容量
+			if (this.credits + 1e-9 < amount * order.price) return C.ERR_NOT_ENOUGH_RESOURCES;
+			if (energy < cost) return C.ERR_NOT_ENOUGH_RESOURCES;
+			if (terminal.store.getFreeCapacity() < amount) return C.ERR_FULL;
+		} else {
+			// 订单在买, 我们卖出: 资源离开我们终端; 收 credits; 付能量费
+			if ((terminal.store[order.resourceType] || 0) < amount) return C.ERR_NOT_ENOUGH_RESOURCES;
+			const needEnergy = order.resourceType === C.RESOURCE_ENERGY ? amount + cost : cost;
+			if (energy < needEnergy) return C.ERR_NOT_ENOUGH_RESOURCES;
+		}
+		intent("market", "deal", { orderId, amount, roomName: takerRoom });
+		return C.OK;
+	},
+	/** 官方 market.js: 撤销自己的订单 */
+	cancelOrder(orderId) {
+		if (typeof orderId !== "string") return C.ERR_INVALID_ARGS;
+		if (!this.orders[orderId]) return C.ERR_NOT_FOUND;
+		intent("market", "cancelOrder", { orderId });
+		return C.OK;
+	},
+	/** 官方 market.js: 改价 (仅自己的订单) */
+	changeOrderPrice(orderId, newPrice) {
+		if (typeof orderId !== "string") return C.ERR_INVALID_ARGS;
+		if (!this.orders[orderId]) return C.ERR_NOT_FOUND;
+		if (typeof newPrice !== "number" || !isFinite(newPrice) || newPrice < MARKET_MIN_PRICE || newPrice > MARKET_MAX_PRICE) return C.ERR_INVALID_ARGS;
+		intent("market", "changeOrderPrice", { orderId, newPrice });
+		return C.OK;
+	},
+	/** 官方 market.js: 追加数量 (仅自己的订单) */
+	extendOrder(orderId, addAmount) {
+		if (typeof orderId !== "string") return C.ERR_INVALID_ARGS;
+		if (!this.orders[orderId]) return C.ERR_NOT_FOUND;
+		if (typeof addAmount !== "number" || !(addAmount > 0) || Math.floor(addAmount) !== addAmount) return C.ERR_INVALID_ARGS;
+		intent("market", "extendOrder", { orderId, addAmount });
+		return C.OK;
+	},
+	/** 官方 market.js: 全部订单 (可按 {resourceType, type} 过滤) */
+	getAllOrders(filter) {
+		let orders = this.__orders || [];
+		if (filter && typeof filter === "object") {
+			orders = orders.filter((o) => (!filter.resourceType || o.resourceType === filter.resourceType) && (!filter.type || o.type === filter.type));
+		}
+		return orders.map(cleanOrder);
+	},
+	/** 官方 market.js: 某资源的成交历史 (本模拟器按 tick 聚合) */
+	getHistory(resourceType) {
+		const h = (__W.marketHistory && __W.marketHistory[resourceType]) || [];
+		return h.map((e) => ({ ...e }));
+	},
+	/** 官方 market.js: 按 id 取订单 (含他人订单) */
+	getOrderById(id) {
+		const o = (this.__orders || []).find((x) => x.id === id);
+		return o ? cleanOrder(o) : null;
+	},
 };
 function makeMarket() {
 	const m = Object.create(MARKET_PROTO);
-	m.credits = 0;
+	m.credits = __W.marketCredits || 0;
+	m.__orders = (__W.marketOrders || []).map((o) => ({ ...o }));
+	// 官方 Game.market.orders 只含本玩家自己的订单 (键为订单 id)
 	m.orders = {};
+	for (const o of m.__orders) if (!o.external) m.orders[o.id] = cleanOrder(o);
 	// 官方 market.js: 终端转账记录 (单玩家: 发往自己终端的转账同时出现在两侧)
 	m.incomingTransactions = (__W.transactions || []).filter((t) => t.recipient).map((t) => ({ ...t }));
 	m.outgoingTransactions = (__W.transactions || []).map((t) => ({ ...t }));

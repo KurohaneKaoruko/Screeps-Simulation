@@ -168,7 +168,11 @@ isolate 创建从「编译 540KB 源码」变为「反序列化字节码」。�
 1. **boost / 实验室**: 反应配方、`lab.runReaction`、boost 对部件数值的倍率
    (tough +100% hits / attack ×2 / heal ×2 / dismantle ×2 / move 肥劳减半 …);
    没有 boost 的战斗/搬运数值都不完整。
-2. **market**: `Game.market` 订单/成交/历史、terminal 跨房交易 (含 NPC 订单可选)。
+2. ✅ **market** (2026-10-12 交付): `Game.market` 订单 (`createOrder`/`cancelOrder`/
+   `changeOrderPrice`/`extendOrder`)、成交 (`deal`)、`getAllOrders`/`getOrderById`/`getHistory`、
+   `credits`; 下单收总价 5% 手续费, 成交运输能量费由接单方终端出, 资源卖方→买方 / credits 买方→卖方,
+   资源或 credits 不足则订单未激活。`terminal.send` 跨房交易此前已交付。`tests/market.rs` 12 项 +
+   `examples/market.sim.ts`。NPC 订单: 由场景 `market.orders` 提供外部订单 (可选);
 3. **factory/commodities**: 产业链 (对高级经济 bot)。
 4. 矿物采集 (extractor + mineral 再生 5w tick)。
 
@@ -254,7 +258,7 @@ isolate 创建从「编译 540KB 源码」变为「反序列化字节码」。�
 | P1-2 V8 startup snapshot | 中-高 | 中 | 第二批 |
 | P1-3 意图录制回放 | 高 (回归吞吐 ×100) | 低-中 | 第二批 |
 | P1-4 runner 并行 | 中 (套件吞吐) | 低 | 第二批 |
-| boost/lab + market | 高 (经济保真) | 高 | 第三批 |
+| boost/lab + market | 高 (经济保真) | 高 | 第三批 (✅ boost/lab + market 已交付) |
 | 官方对拍 harness | 极高 (正确性闭环) | 高 | 第三批 |
 | CDP 调试 (`--inspect`) | 高 (DX 质变) | 中-高 | 第四批 |
 | NPC / nuke / power | 中 | 中 | 第四批 (✅ NPC 已交付, nuke/power 待做) |

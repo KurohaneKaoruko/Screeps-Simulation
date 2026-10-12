@@ -68,8 +68,6 @@ const MISSING_APIS = [
 // 模拟器覆盖度: bot 用到但模拟器不模拟的 API
 // [匹配, 说明, 级别] —— level: 'error' 调用即抛错 / 'warn' no-op 或恒定值
 const SIM_COVERAGE = [
-	[/\bGame\.market\.(?:deal|createOrder|getAllOrders|getHistory|getOrderById|cancelOrder|changeOrderPrice|extendOrder)\b/, '市场订单为 no-op 桩: 订单永远为空, deal 永远失败 —— 市场交易不会被模拟 (terminal.send / calcTransactionCost / 转账记录已实现)', 'warn'],
-	[/\bGame\.market\.credits\b/, 'Game.market.credits 恒为 0 —— 市场交易不会被模拟', 'warn'],
 	[/\bGame\.powerCreeps\b/, 'powerCreeps 恒为空对象 —— power creep 不会被模拟 (PWR_* 效果、有等级的工厂商品均不可用)', 'warn'],
 	[/\blaunchNuke\s*\(/, 'nuker 未实现 (StructureNuker 为空类, 调用即 TypeError)', 'error'],
 ]

@@ -78,7 +78,8 @@
 |---|---|
 | PathFinder 跨房计价 | 出口格与对侧入口格按两步计价（官方为同节点），宏观行为一致 |
 | 有限世界 | 场景未定义相邻房间时，出口格上的 creep 停留原地（官方无限世界必穿越） |
-| 市场订单 / Power Creep / Nuker | 未实现：`Game.market` 的订单/`deal`/`credits` 为 no-op 桩（`terminal.send`、`calcTransactionCost`、转账记录已实现），`Game.powerCreeps` 恒空，`launchNuke` 缺失（bundle 预检会报错） |
+| 市场（部分完成） | 订单 `createOrder`/`deal`/`cancelOrder`/`changeOrderPrice`/`extendOrder`、`getAllOrders`/`getOrderById`/`getHistory`、`credits` 已对齐官方：下单收「总价 × 5%」手续费、成交运输能量费**由接单方终端出**、资源卖方→买方 / credits 买方→卖方、资源或 credits 不足则订单未激活。差异：单玩家模拟器里对手方是场景给定的「外部订单」（`market.orders`），成交在 tick 末统一结算（同 tick 内多笔成交互不可见）；`getHistory` 的 `date` 用 tick（官方为 UTC 日）、订单 `createdTimestamp` 由 tick×1000 近似 |
+| Power Creep / Nuker | 未实现：`Game.powerCreeps` 恒空，`launchNuke` 缺失（bundle 预检会报错） |
 | 工业的 Power 效果 | 不模拟任何 `PWR_*` 效果（`PWR_OPERATE_LAB/TERMINAL/FACTORY/POWER`、`PWR_REGEN_MINERAL` 等）；因此**有等级的工厂商品**（`COMMODITIES[x].level > 0`）恒失败（API 返回 `ERR_BUSY`/`ERR_INVALID_TARGET`，与官方无效果时一致），只有 0 级商品可生产；工厂等级只能由场景 `structures[].level` 给定 |
 | 矿物换密度的随机数 | 官方处理器用 `Math.random`；这里用场景 `seed` 播种的引擎随机数（splitmix64），概率分布一致、序列不同，同 seed 可复现 |
 | 转账记录 | 单玩家：发往自己终端的转账同时出现在 `incomingTransactions` 与 `outgoingTransactions`；只保留最近 100 条，`sender/recipient` 的 username 固定为 `Nexus`（敌方终端无 recipient） |
@@ -432,6 +433,7 @@ cargo test --release   # 推荐: 同时覆盖 release 优化后的代码生成 (
 | `tests/cli_cpu_bucket.rs` | CLI 级集成：bucket 耗尽跳过（官方 "CPU bucket is empty"）与 `noErrors` 失败退出码、正常场景退出码 0、tickLimit 公式与场景覆盖值 |
 | `tests/checkpoint_time_travel.rs` | 时间旅行：检查点序列化往返、落盘/发现/加载语义、"检查点 + 意图重放 == 连续运行" 每 tick 哈希对拍 |
 | `tests/npc.rs` | NPC：invader 侵袭波（按 `every/first/lifetime/squad` 周期性从房间边缘进入、攻击玩家目标、到期撤离不留痕）、source keeper（每个 lair 独立周期生成/更替自身 keeper、无仇恨时回防 source 守卫圈、仅攻击仇恨圈内玩家、贴脸近战）、lair 受损重置生成倒计时、power bank 线性衰减至归零销毁、`POWER_BANK_HIT_BACK` 半伤害反弹与掉落 power、快照字段（`ticksToSpawn`/`power`/`ticksToDecay`） |
+| `tests/market.rs` | 市场：下单 5% 手续费（买卖一致）、买入/卖出外部订单的资源与 credits 流向、运输能量费由接单方终端扣除（含卖出能量时 amount+cost 同扣）、credits 不足拒成交、撤单/改价/追加数量仅对自己订单生效、订单激活判定、`getHistory` 按 tick 聚合、快照市场字段（`marketCredits`/`marketOrders`/`marketHistory`）与快路径/Value 路径一致 |
 
 ### 复现基准
 
@@ -450,6 +452,7 @@ src/
     movement.rs  移动仲裁与疲劳 (movement.js 移植)
     intents.rs   意图结算 (creep/spawn/room intents 移植)
     npc.rs       NPC: invader 侵袭波 / source keeper / power bank
+    market.rs    市场: 订单 / 成交 / credits / 终端跨房交易
     tick.rs      Tick 推进顺序 (processor.js 对齐)
     snapshot.rs  可见世界 → JSON 快照
     scenario.rs  场景定义与加载
@@ -463,7 +466,7 @@ bin/             screeps-sim 命令入口 (test/watch/check 子命令, 其余透
 runner/          .sim.ts 测试 runner (发现/加载/运行/汇总/watch, 零依赖)
 index.mjs        编程 API (defineSim / runSim)
 index.d.ts       .sim.ts 用例的完整类型定义
-examples/        示例用例 (smoke 自包含可跑; npc 展示侵袭波/keeper/powerBank) + fixtures/min-bot.js 陪跑 bundle
+examples/        示例用例 (smoke 自包含可跑; npc 展示侵袭波/keeper/powerBank; market 展示下单/成交) + fixtures/*.js 陪跑 bundle
 scenarios/       wire JSON 场景 (--scenario 直跑用)
-tests/           回归测试 (engine_rules / shim_apis / cpu_watchdog / memory_segments / framework / checkpoint_time_travel / npc)
+tests/           回归测试 (engine_rules / shim_apis / cpu_watchdog / memory_segments / framework / checkpoint_time_travel / npc / market)
 ```

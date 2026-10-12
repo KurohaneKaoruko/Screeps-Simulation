@@ -138,6 +138,33 @@ console.log('场景静态检查 (check.mjs)')
 		'npcs.invaders 参数校验'
 	)
 	expect(r.warnings.some((w) => w.message.includes('没有 source')), 'keeperLair 无 source → 警告')
+
+	// market: 合法订单场景通过
+	r = checkScenario({
+		name: 'market-ok',
+		market: {
+			credits: 10000,
+			orders: [{ type: 'sell', resourceType: 'energy', roomName: 'W1N1', price: 0.5, totalAmount: 1000 }],
+		},
+		rooms: [{ name: 'W1N1' }],
+	})
+	expect(r.errors.length === 0, `market 场景合法 (实际: ${r.errors.map((e) => e.message).join('; ')})`)
+
+	// market: 非法 credits / 订单参数逐项报错
+	r = checkScenario({
+		name: 'market-bad',
+		market: { credits: -1, orders: [{ type: 'hold', resourceType: 'H', roomName: 'NOPE', price: 0, totalAmount: 0 }] },
+		rooms: [{ name: 'W1N1' }],
+	})
+	const marketPaths = r.errors.map((e) => e.path).join('\n')
+	expect(
+		marketPaths.includes('market.credits') &&
+			marketPaths.includes('market.orders[0].type') &&
+			marketPaths.includes('market.orders[0].roomName') &&
+			marketPaths.includes('market.orders[0].price') &&
+			marketPaths.includes('market.orders[0].totalAmount'),
+		'market 订单参数校验'
+	)
 }
 
 console.log('bundle 静态检查 (bundle-check.mjs)')
@@ -162,8 +189,9 @@ console.log('bundle 静态检查 (bundle-check.mjs)')
 	r = checkBundle(`exports.loop = function () { setTimeout(() => {}, 100); };`)
 	expect(r.warnings.some((w) => w.message.includes('setTimeout')), 'setTimeout 警告')
 
-	r = checkBundle(`exports.loop = function () { Game.market.deal(id, 1); };`)
-	expect(r.warnings.some((w) => w.message.includes('市场')), '市场覆盖度警告')
+	// 市场 API 已实现: 不再报覆盖度错误/警告
+	r = checkBundle(`exports.loop = function () { Game.market.deal(id, 1); Game.market.createOrder({ type: ORDER_BUY, resourceType: RESOURCE_ENERGY, roomName: 'W1N1', price: 1, totalAmount: 100 }); x = Game.market.credits; y = Game.market.getAllOrders(); z = Game.market.getHistory(RESOURCE_ENERGY); };`)
+	expect(r.errors.length === 0 && r.warnings.length === 0, `市场 API 不再被标为未实现 (实际: ${[...r.errors, ...r.warnings].map((e) => e.message)})`)
 
 	// 工业 API 已实现: 不再报覆盖度错误/警告
 	r = checkBundle(`exports.loop = function () { lab.runReaction(a, b); lab.boostCreep(c); lab.unboostCreep(c); terminal.send(RESOURCE_ENERGY, 100, 'W1N1'); factory.produce(RESOURCE_UTRIUM_BAR); ps.processPower(); obs.observeRoom('W1N1'); Game.market.calcTransactionCost(100, 'W1N1', 'W2N2'); x = Game.gpl.level; };`)

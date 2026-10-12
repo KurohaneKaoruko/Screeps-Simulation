@@ -691,6 +691,115 @@ fn industry_apis_via_js_inner() {
 	assert_eq!(t2["seeW5N9"], false, "观察只持续一 tick: {t2}");
 }
 
+/// 市场 API 端到端: 快照 → shim Game.market → 意图 → 引擎成交。
+const MARKET_JS_SCENE: &str = r#"{
+	"name": "market-js",
+	"seed": 1,
+	"market": { "credits": 10000, "orders": [
+		{ "type": "sell", "resourceType": "H", "roomName": "W7N8", "price": 2, "totalAmount": 1000 }
+	] },
+	"rooms": [
+		{ "name": "W5N8", "terrain": { "kind": "flat" },
+		  "controller": { "level": 6, "pos": [25, 25] },
+		  "structures": [{ "type": "terminal", "pos": [20, 20], "store": { "energy": 50000 } }] }
+	]
+}"#;
+
+#[test]
+fn market_apis_via_js() {
+	in_tokio(|| market_apis_via_js_inner());
+}
+
+fn market_apis_via_js_inner() {
+	let scenario = Scenario::from_json(MARKET_JS_SCENE).unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let mut movement = Movement::default();
+	let bundle = r#"
+		exports.loop = function() {
+			const m = Game.market;
+			const term = Game.rooms.W5N8.terminal;
+			const r = { phase: Memory.phase || 0 };
+			Memory.phase = r.phase + 1;
+			r.credits = m.credits;
+			r.orders = m.getAllOrders().map(o => [o.type, o.resourceType, o.remainingAmount, o.price, o.active]);
+			r.myOrders = Object.keys(m.orders).length;
+			r.termH = term.store[RESOURCE_HYDROGEN] || 0;
+			r.termE = term.store.energy;
+			if (r.phase === 0) {
+				const sell = m.getAllOrders({ resourceType: RESOURCE_HYDROGEN }).find(o => o.type === ORDER_SELL);
+				r.cost = m.calcTransactionCost(200, "W5N8", "W7N8");
+				r.deal = m.deal(sell.id, 200, "W5N8");
+				r.dealTooMuch = m.deal(sell.id, 99999, "W5N8");
+				r.dealBadId = m.deal("nope", 1, "W5N8");
+				r.create = m.createOrder({ type: ORDER_SELL, resourceType: RESOURCE_HYDROGEN, roomName: "W5N8", price: 3, totalAmount: 50 });
+				r.createBad = m.createOrder({ type: "hold", resourceType: RESOURCE_HYDROGEN, roomName: "W5N8", price: 3, totalAmount: 50 });
+				r.createNoRoom = m.createOrder({ type: ORDER_BUY, resourceType: RESOURCE_HYDROGEN, roomName: "nope", price: 3, totalAmount: 50 });
+			} else if (r.phase === 1) {
+				r.history = m.getHistory(RESOURCE_HYDROGEN);
+				r.termCooldown = term.cooldown;
+				r.dealTired = m.deal(m.getAllOrders({ type: ORDER_SELL })[0].id, 10, "W5N8");
+				r.orderById = m.getOrderById(m.getAllOrders()[0].id).type;
+				r.missing = m.getOrderById("nope");
+			}
+			console.log(JSON.stringify(r));
+		};
+	"#;
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let mut memory = String::from("{}");
+	let mut infos = Vec::new();
+	for _ in 0..2 {
+		let snapshot = build_snapshot(
+			&world,
+			&SnapshotOptions {
+				cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
+				always_visible: false,
+				include_terrain: true,
+			},
+		);
+		let result = bot.run_tick(snapshot, memory.clone()).unwrap();
+		assert!(result.errors.is_empty(), "bundle 不应报错: {:?}", result.errors);
+		memory = result.memory.clone();
+		infos.push(
+			serde_json::from_str::<serde_json::Value>(
+				result.console.first().map(String::as_str).unwrap_or("{}"),
+			)
+			.unwrap(),
+		);
+		tick::run_tick(&mut world, &mut movement, &result.intents);
+	}
+	let t0 = &infos[0];
+	assert_eq!(t0["credits"], 10000, "{t0}");
+	assert_eq!(t0["orders"], serde_json::json!([["sell", "H", 1000, 2, true]]), "{t0}");
+	assert_eq!(t0["myOrders"], 0, "{t0}");
+	assert_eq!(t0["termH"], 0, "{t0}");
+	assert_eq!(t0["termE"], 50000, "{t0}");
+	assert_eq!(t0["cost"], 13, "ceil(200 × (1 − e^(−2/30))): {t0}");
+	assert_eq!(t0["deal"], 0, "{t0}");
+	assert_eq!(t0["dealTooMuch"], -10, "超过剩余量 → ERR_INVALID_ARGS: {t0}");
+	assert_eq!(t0["dealBadId"], -7, "订单不存在 → ERR_INVALID_TARGET: {t0}");
+	assert_eq!(t0["create"], 0, "{t0}");
+	assert_eq!(t0["createBad"], -10, "非法订单类型 → ERR_INVALID_ARGS: {t0}");
+	assert_eq!(t0["createNoRoom"], -10, "非法房名 → ERR_INVALID_ARGS: {t0}");
+
+	let t1 = &infos[1];
+	assert_eq!(t1["credits"], 9592.5, "10000 − 200×2 (成交) − 7.5 (下单手续费): {t1}");
+	assert_eq!(
+		t1["orders"],
+		serde_json::json!([["sell", "H", 800, 2, true], ["sell", "H", 50, 3, true]]),
+		"{t1}"
+	);
+	assert_eq!(t1["myOrders"], 1, "{t1}");
+	assert_eq!(t1["termH"], 200, "{t1}");
+	assert_eq!(t1["termE"], 49987, "50000 − 13 运输费: {t1}");
+	assert_eq!(t1["history"].as_array().unwrap().len(), 1, "{t1}");
+	assert_eq!(t1["history"][0]["volume"], 200, "{t1}");
+	assert_eq!(t1["history"][0]["avgPrice"], 2, "{t1}");
+	assert_eq!(t1["termCooldown"], 9, "成交后终端进入冷却 (10 − 已过 1 tick): {t1}");
+	assert_eq!(t1["dealTired"], -11, "终端冷却中 → ERR_TIRED: {t1}");
+	assert_eq!(t1["orderById"], "sell", "{t1}");
+	assert_eq!(t1["missing"], serde_json::Value::Null, "{t1}");
+}
+
 /// reserveController: 自己的保留可以续 (此前 shim 用 !target.my 判断, 第二次起恒返回 ERR_INVALID_TARGET);
 /// reservation 字段名是 ticksToEnd
 #[test]

@@ -65,6 +65,12 @@ pub fn build_snapshot(world: &World, opts: &SnapshotOptions) -> String {
     );
     out.push_str(",\"transactions\":");
     out.push_str(&transactions_json(world).to_string());
+    out.push_str(",\"marketCredits\":");
+    put_f64(&mut out, world.market_credits);
+    out.push_str(",\"marketOrders\":");
+    out.push_str(&market_orders_json(world).to_string());
+    out.push_str(",\"marketHistory\":");
+    out.push_str(&market_history_json(world).to_string());
 
     // roomNames: 全部房间 (地图 API 的世界清单)
     out.push_str(",\"roomNames\":[");
@@ -519,6 +525,9 @@ pub fn build_snapshot_value(world: &World, opts: &SnapshotOptions) -> Value {
             "progressTotal": gpl_total,
         },
         "transactions": transactions_json(world),
+        "marketCredits": world.market_credits,
+        "marketOrders": market_orders_json(world),
+        "marketHistory": market_history_json(world),
         "terrain": Value::Object(terrain),
         "roomNames": room_names,
         "rooms": Value::Object(rooms),
@@ -822,4 +831,59 @@ fn transactions_json(world: &World) -> Value {
             })
             .collect(),
     )
+}
+
+/// 市场订单 (官方订单字段: id/type/resourceType/roomName/price/amount/remainingAmount/
+/// totalAmount/created/createdTimestamp/active; `external` 为模拟器内部标记, 用于区分本玩家订单)
+fn market_orders_json(world: &World) -> Value {
+    Value::Array(
+        world
+            .market_orders
+            .values()
+            .map(|o| {
+                let mut m = Map::new();
+                m.insert("id".into(), json!(o.id));
+                m.insert("type".into(), json!(o.order_type));
+                m.insert("resourceType".into(), json!(o.resource_type));
+                m.insert("roomName".into(), json!(o.room_name));
+                m.insert("price".into(), json!(o.price));
+                m.insert("amount".into(), json!(o.amount));
+                m.insert("remainingAmount".into(), json!(o.amount));
+                m.insert("totalAmount".into(), json!(o.total_amount));
+                m.insert("created".into(), json!(o.created));
+                m.insert("createdTimestamp".into(), json!(o.created * 1000));
+                m.insert("active".into(), json!(crate::engine::market::is_active(world, o)));
+                m.insert("external".into(), json!(o.external));
+                Value::Object(m)
+            })
+            .collect(),
+    )
+}
+
+/// 成交历史 (按资源分组, 供 Game.market.getHistory)
+fn market_history_json(world: &World) -> Value {
+    let mut resources: Vec<String> = Vec::new();
+    for d in &world.market_deals {
+        if !resources.contains(&d.resource_type) {
+            resources.push(d.resource_type.clone());
+        }
+    }
+    let mut out = Map::new();
+    for res in resources {
+        let entries: Vec<Value> = crate::engine::market::history_for(world, &res)
+            .into_iter()
+            .map(|e| {
+                json!({
+                    "resourceType": res,
+                    "date": e.date,
+                    "transactions": e.transactions,
+                    "volume": e.volume,
+                    "avgPrice": e.avg_price,
+                    "stddevPrice": e.stddev_price,
+                })
+            })
+            .collect();
+        out.insert(res, Value::Array(entries));
+    }
+    Value::Object(out)
 }

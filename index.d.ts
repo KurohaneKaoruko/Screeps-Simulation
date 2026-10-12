@@ -112,6 +112,24 @@ export interface NpcSpec {
 	invaders?: InvaderSpec
 }
 
+/** 外部市场订单 (NPC / 他玩家): 供本玩家 deal, 无需真实终端或账户 */
+export interface MarketOrderSpec {
+	type: 'buy' | 'sell'
+	resourceType: string
+	/** 订单所在房间 (形如 W5N8); 成交时运输距离由此计算 */
+	roomName: string
+	/** 单价 (Cr/单位), 0.001 .. 1e8, 最多 3 位小数 */
+	price: number
+	totalAmount: number
+}
+
+/** 市场配置: 初始账户 credits + 外部订单 (下单收订单总价 5% 手续费; 运输能量费由接单方终端出) */
+export interface MarketSpec {
+	/** 初始账户 credits (默认 0) */
+	credits?: number
+	orders?: MarketOrderSpec[]
+}
+
 export type AssertSpec =
 	| { kind: 'rclAtLeast'; value: number; room?: string }
 	| { kind: 'rclReachedBy'; value: number; tick: number }
@@ -154,6 +172,8 @@ export interface SimScenario {
 	globalResetEvery?: number
 	/** NPC: invader 侵袭波次 (keeper/powerBank 由房间结构驱动) */
 	npcs?: NpcSpec
+	/** 市场: 初始 credits + 外部订单 (下单 5% 手续费 / 接单方付运输能量费) */
+	market?: MarketSpec
 	rooms: RoomSpec[]
 	asserts?: AssertSpec[]
 	/** 本用例专用 bundle 路径 (相对 .sim.ts 文件); 缺省: --bundle → ./dist/main.js */

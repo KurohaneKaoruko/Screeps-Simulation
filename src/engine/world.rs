@@ -228,6 +228,18 @@ pub struct World {
     /// 是否有 NPC 活动 (keeperLair 存在或 invader 侵袭开启): 关时 NPC 相位零开销
     #[serde(default)]
     pub npc_enabled: bool,
+    /// 市场账户 credits (官方 Game.market.credits)
+    #[serde(default)]
+    pub market_credits: f64,
+    /// 市场订单 (id → 订单), 含外部订单与本玩家订单
+    #[serde(default)]
+    pub market_orders: BTreeMap<String, crate::engine::market::MarketOrder>,
+    /// 订单 id 序号 (确定性分配)
+    #[serde(default)]
+    pub market_order_seq: u64,
+    /// 成交记录 (新→旧), 供 Game.market.getHistory
+    #[serde(default)]
+    pub market_deals: Vec<crate::engine::market::MarketDeal>,
 }
 
 /// 终端转账记录 (官方 transactions 集合的字段子集)
@@ -266,6 +278,10 @@ impl World {
             transactions: Vec::new(),
             npc_invaders: None,
             npc_enabled: false,
+            market_credits: 0.0,
+            market_orders: BTreeMap::new(),
+            market_order_seq: 0,
+            market_deals: Vec::new(),
         }
     }
 
@@ -452,6 +468,29 @@ impl World {
                     mix_u64(&mut h, g);
                 }
             }
+        }
+        // 市场字段: 只在非默认值时混入 (无市场的场景黄金哈希保持不变)
+        if self.market_credits != 0.0 {
+            mix_u64(&mut h, self.market_credits.to_bits());
+        }
+        if self.market_order_seq > 0 {
+            mix_u64(&mut h, self.market_order_seq);
+        }
+        for (id, o) in &self.market_orders {
+            mix_str(&mut h, id);
+            mix_str(&mut h, &o.order_type);
+            mix_str(&mut h, &o.resource_type);
+            mix_str(&mut h, &o.room_name);
+            mix_u64(&mut h, o.price.to_bits());
+            mix_u64(&mut h, o.amount as u64);
+            mix_u64(&mut h, o.total_amount as u64);
+            mix_u64(&mut h, o.external as u64);
+        }
+        for d in &self.market_deals {
+            mix_u64(&mut h, d.tick);
+            mix_str(&mut h, &d.resource_type);
+            mix_u64(&mut h, d.amount as u64);
+            mix_u64(&mut h, d.price.to_bits());
         }
         h
     }

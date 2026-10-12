@@ -97,6 +97,8 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
     apply_crossings(world, &mut pending_crossings);
     // 全局阶段 (官方 global-intents/market.js): 房间结算全部完成后执行终端转账
     intents::execute_terminal_sends(world, &effects.sends);
+    // 市场阶段: 本 tick 登记的 market 操作 (下单/成交/撤单/改价/延期)
+    crate::engine::market::execute_market_ops(world, &effects.market_ops);
 
     // NPC tick 相位: invader 撤离 / powerBank 衰减 / keeper 与 invader 生成
     if world.npc_enabled {
