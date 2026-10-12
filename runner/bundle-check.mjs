@@ -43,8 +43,13 @@ const CONSTANT_PREFIXES = [
 ]
 
 // node/浏览器环境泄漏: screeps 运行时 (官方与模拟器一致) 没有这些
+// require 特例: screeps 模块系统支持 require('上传模块名') (多模块部署的官方机制),
+// 字符串字面量且非 node 内置 → 合法; 动态 require / 内置模块才是泄漏
+const NODE_REQUIRE_BUILTINS =
+	/\brequire\s*\(\s*['"](?:node:)?(?:fs|path|os|util|events|stream|http|https|crypto|child_process|worker_threads|url|querystring|zlib|net|tls|dns|dgram|cluster|v8|perf_hooks|assert|buffer)(?:\/[^'"]*)?['"]\s*\)/
 const NODE_GLOBALS = [
-	/\brequire\s*\(/, // 无模块系统 (bundler 未内联干净)
+	/\brequire\s*\(\s*[^'"\s)]/, // 动态 require (bundler 未内联干净)
+	NODE_REQUIRE_BUILTINS, // node 内置模块
 	/\bprocess\./, // process.env.NODE_ENV 残留 → 生产也会炸
 	/\bBuffer\./,
 	/\b__dirname\b/,
@@ -81,6 +86,11 @@ export function collectDeclaredNames(source) {
 		for (const d of decl.matchAll(/,\s*([A-Za-z_$][\w$]*)\s*=/g)) names.add(d[1])
 		const destr = decl.match(/^[[{]([^=]*)[\]}]\s*=/)
 		if (destr) for (const d of destr[1].matchAll(/([A-Za-z_$][\w$]*)\s*(?=[,}\]]|$)/g)) names.add(d[1])
+	}
+	// bundler 的跨行逗号声明 (如 `}, FOO_CONFIG = {`): 同一 var/let/const 语句的后续成员
+	// 逐行截断的正则吃不到, 按完整语句 (到 `;` 为止) 再收集一遍声明名
+	for (const m of source.matchAll(/\b(?:var|let|const)\s+([^;]+)/gs)) {
+		for (const d of m[1].matchAll(/(?:^|[{,]\s*)([A-Za-z_$][\w$]*)\s*=(?!=)/g)) names.add(d[1])
 	}
 	return names
 }
