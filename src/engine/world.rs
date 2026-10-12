@@ -336,6 +336,19 @@ impl World {
                 if let Some(n) = &obj.name {
                     mix_str(&mut h, n);
                 }
+                // 后加字段只在非缺省值时混入, 保持旧基线不变
+                if obj.is_public {
+                    mix_str(&mut h, "isPublic");
+                }
+                if obj.safe_mode_available > 0 || obj.safe_mode.is_some() || obj.safe_mode_cooldown.is_some() {
+                    mix_u64(&mut h, obj.safe_mode_available as u64);
+                    mix_u64(&mut h, obj.safe_mode.unwrap_or(0));
+                    mix_u64(&mut h, obj.safe_mode_cooldown.unwrap_or(0));
+                }
+                if let Some(info) = &obj.ruin {
+                    mix_u64(&mut h, info.structure_id);
+                    mix_u64(&mut h, info.destroy_time);
+                }
                 for (res, amount) in &obj.store {
                     mix_str(&mut h, res);
                     mix_u64(&mut h, *amount as u64);

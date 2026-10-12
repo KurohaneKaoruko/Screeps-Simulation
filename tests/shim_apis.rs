@@ -1035,3 +1035,85 @@ fn terrain_read_after_first_tick_is_correct() {
 		assert_eq!(v["plain"], 0, "{v}");
 	});
 }
+
+// ═════════════════════════ StructureController 属性 / activateSafeMode / unclaim ═════════════════════════
+
+/// progressTotal 在 0/8 级为 undefined; reservation 用官方 ticksToEnd; activateSafeMode 返回码与
+/// 同 tick 只保留最后一次; 另一控制器在安全模式 → ERR_BUSY; unclaim 提交意图
+#[test]
+fn controller_safe_mode_and_props() {
+	in_tokio(|| controller_safe_mode_and_props_inner());
+}
+
+fn controller_safe_mode_and_props_inner() {
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "safe", "seed": 1,
+		"rooms": [
+			{ "name": "W5N8", "terrain": { "kind": "flat" },
+			  "controller": { "level": 8, "pos": [28, 27], "safeModeAvailable": 2 },
+			  "structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 }] },
+			{ "name": "W5N7", "terrain": { "kind": "flat" },
+			  "controller": { "level": 3, "pos": [20, 20], "safeModeAvailable": 1 } },
+			{ "name": "W4N8", "terrain": { "kind": "flat" },
+			  "controller": { "level": 0, "pos": [20, 20], "mine": false },
+			  "creeps": [{ "name": "Scout", "body": ["move"], "pos": [10, 10] }] }
+		]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let mut movement = Movement::default();
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	let bundle = r#"
+		exports.loop = function() {
+			const a = Game.rooms.W5N8.controller, b = Game.rooms.W5N7.controller, n = Game.rooms.W4N8.controller;
+			if (Memory.phase === 2) {
+				console.log(JSON.stringify({ phase: 2, aSafe: a.safeMode, aCd: a.safeModeCooldown, aAvail: a.safeModeAvailable,
+					bBusy: b.activateSafeMode(), aTired: a.activateSafeMode(), unclaim: b.unclaim(), neutralUnclaim: n.unclaim() }));
+				return;
+			}
+			Memory.phase = 2;
+			console.log(JSON.stringify({
+				phase: 1,
+				pt8: a.progressTotal === undefined, p8: a.progress, pt3: b.progressTotal, pt0: n.progressTotal === undefined,
+				p0: n.progress === undefined, safe: a.safeMode === undefined, cd: a.safeModeCooldown === undefined,
+				avail: a.safeModeAvailable, nAvail: n.safeModeAvailable, notOwner: n.activateSafeMode(),
+				first: b.activateSafeMode(), second: a.activateSafeMode(),
+			}));
+		};
+	"#;
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let r1 = bot.run_tick(snapshot_of(&world), "{}".to_string()).unwrap();
+	let i: serde_json::Value = serde_json::from_str(&r1.console[0]).unwrap();
+	assert_eq!(i["pt8"], true, "{i}");
+	assert_eq!(i["p8"], 0, "{i}");
+	assert_eq!(i["pt3"], 135000, "{i}");
+	assert_eq!(i["pt0"], true, "{i}");
+	assert_eq!(i["p0"], true, "{i}");
+	assert_eq!(i["safe"], true, "{i}");
+	assert_eq!(i["cd"], true, "{i}");
+	assert_eq!(i["avail"], 2, "{i}");
+	assert_eq!(i["nAvail"], 0, "{i}");
+	assert_eq!(i["notOwner"], -1, "{i}");
+	assert_eq!(i["first"], 0, "{i}");
+	assert_eq!(i["second"], 0, "{i}");
+	let acts: Vec<&String> = r1.intents.entries.iter().filter(|(_, n, _)| n == "activateSafeMode").map(|(o, _, _)| o).collect();
+	assert_eq!(acts.len(), 1, "同 tick 只保留最后一次: {acts:?}");
+	let a_id = format!("{:024x}", world.rooms["W5N8"].controller().unwrap().id);
+	assert_eq!(acts[0], &a_id);
+	tick::run_tick(&mut world, &mut movement, &r1.intents);
+
+	let r2 = bot.run_tick(snapshot_of(&world), r1.memory.clone()).unwrap();
+	let j: serde_json::Value = serde_json::from_str(&r2.console[0]).unwrap();
+	assert_eq!(j["aSafe"], 19999, "{j}");
+	assert_eq!(j["aCd"], 49999, "{j}");
+	assert_eq!(j["aAvail"], 1, "{j}");
+	assert_eq!(j["bBusy"], -4, "另一个控制器已在安全模式 → ERR_BUSY: {j}");
+	assert_eq!(j["aTired"], -11, "冷却中 → ERR_TIRED: {j}");
+	assert_eq!(j["unclaim"], 0, "{j}");
+	assert_eq!(j["neutralUnclaim"], -1, "{j}");
+	tick::run_tick(&mut world, &mut movement, &r2.intents);
+	let b = world.rooms["W5N7"].controller().unwrap();
+	assert!(!b.mine && b.level == 0, "unclaim 生效");
+}

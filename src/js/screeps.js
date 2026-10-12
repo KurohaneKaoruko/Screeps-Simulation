@@ -567,6 +567,8 @@ let __intents = [];
 let __consoleLines = [];
 /** 本 tick 已创建的 creep 名 (官方 createdCreepNames), 每 tick 重建 */
 let __createdCreepNames = new Set();
+/** 本 tick 最后一次 activateSafeMode 的控制器 id (官方 lastActivateSafeMode) */
+let __lastActivateSafeMode = null;
 /** 本 tick 已创建的工地数 (官方把同 tick 新建计入 100 上限) */
 let __createdSiteCount = 0;
 
@@ -1622,21 +1624,46 @@ StructureSpawn.Spawning = Spawning;
 class StructureController extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
+		// 官方 E/game/structures.js:174-196 的 getter 语义
 		this.level = raw.level;
-		this.progress = raw.progress;
-		this.progressTotal = raw.progressTotal;
-		this.ticksToDowngrade = raw.ticksToDowngrade;
+		this.progress = raw.level > 0 ? raw.progress : undefined;
+		this.progressTotal = raw.level > 0 && raw.level < 8 ? C.CONTROLLER_LEVELS[raw.level] : undefined;
+		this.ticksToDowngrade = raw.ticksToDowngrade == null ? undefined : raw.ticksToDowngrade;
 		this.safeModeAvailable = raw.safeModeAvailable || 0;
-		this.safeMode = raw.safeMode || null;
-		this.safeModeCooldown = null;
-		this.upgradeBlocked = raw.upgradeBlocked || 0;
+		this.safeMode = raw.safeMode || undefined;
+		this.safeModeCooldown = raw.safeModeCooldown || undefined;
+		this.upgradeBlocked = raw.upgradeBlocked || undefined;
 		// 官方 structures.js: 没有保留时为 undefined; 字段名 ticksToEnd
 		this.reservation = raw.reservation || undefined;
-		this.sign = raw.sign || null;
+		this.sign = raw.sign || undefined;
 		this.isPowerEnabled = false;
 	}
-	activateSafeMode() { return C.ERR_INVALID_ARGS; }
-	unclaim() { return C.OK; }
+	/** 官方 E/game/structures.js:211-237 */
+	activateSafeMode() {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.safeModeAvailable <= 0) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (
+			this.safeModeCooldown ||
+			this.upgradeBlocked > 0 ||
+			this.ticksToDowngrade < C.CONTROLLER_DOWNGRADE[this.level] / 2 - C.CONTROLLER_DOWNGRADE_SAFEMODE_THRESHOLD
+		) {
+			return C.ERR_TIRED;
+		}
+		if (_.any(Game.structures, (i) => i.structureType === "controller" && i.my && i.safeMode)) return C.ERR_BUSY;
+		// 官方: 同 tick 只保留最后一次 activateSafeMode
+		if (__lastActivateSafeMode) {
+			__intents = __intents.filter((e) => !(e.o === __lastActivateSafeMode && e.n === "activateSafeMode"));
+		}
+		__lastActivateSafeMode = this.id;
+		intent(this.id, "activateSafeMode", {});
+		return C.OK;
+	}
+	/** 官方 E/game/structures.js:201-209 */
+	unclaim() {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		intent(this.id, "unclaim", {});
+		return C.OK;
+	}
 	toString() {
 		return `[controller ${this.pos.roomName}]`;
 	}
@@ -2591,6 +2618,7 @@ function __installLazyMemory() {
 function buildGame() {
 	byId = new Map();
 	__createdCreepNames = new Set();
+	__lastActivateSafeMode = null;
 	__createdSiteCount = 0;
 	Game = {
 		time: __W.time,

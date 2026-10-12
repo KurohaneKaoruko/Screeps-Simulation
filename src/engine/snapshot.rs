@@ -327,7 +327,23 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
                 }
                 None => out.push_str("null"),
             }
-            out.push_str(",\"safeModeAvailable\":0,\"safeMode\":null,\"upgradeBlocked\":");
+            out.push_str(",\"safeModeAvailable\":");
+            let _ = write!(out, "{}", obj.safe_mode_available);
+            out.push_str(",\"safeMode\":");
+            match obj.safe_mode.filter(|t| *t > world.tick) {
+                Some(t) => {
+                    let _ = write!(out, "{}", t - world.tick);
+                }
+                None => out.push_str("null"),
+            }
+            out.push_str(",\"safeModeCooldown\":");
+            match obj.safe_mode_cooldown.filter(|t| *t > world.tick) {
+                Some(t) => {
+                    let _ = write!(out, "{}", t - world.tick);
+                }
+                None => out.push_str("null"),
+            }
+            out.push_str(",\"upgradeBlocked\":");
             let _ = write!(out, "{}", obj.upgrade_blocked.saturating_sub(world.tick));
             out.push_str(",\"reservation\":");
             match obj.reservation_end_time {
@@ -639,8 +655,15 @@ fn object_json(obj: &Obj, world: &World) -> Value {
                 "ticksToDowngrade".into(),
                 json!(obj.downgrade_time.map(|t| t.saturating_sub(world.tick))),
             );
-            extra.insert("safeModeAvailable".into(), json!(0));
-            extra.insert("safeMode".into(), Value::Null);
+            extra.insert("safeModeAvailable".into(), json!(obj.safe_mode_available));
+            extra.insert(
+                "safeMode".into(),
+                json!(obj.safe_mode.filter(|t| *t > world.tick).map(|t| t - world.tick)),
+            );
+            extra.insert(
+                "safeModeCooldown".into(),
+                json!(obj.safe_mode_cooldown.filter(|t| *t > world.tick).map(|t| t - world.tick)),
+            );
             extra.insert(
                 "upgradeBlocked".into(),
                 json!(obj.upgrade_blocked.saturating_sub(world.tick)),

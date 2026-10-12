@@ -198,6 +198,7 @@ fn controller_level_and_downgrade() {
 	}
 	let level = world.rooms["W5N8"].objects[&ctrl_id].level;
 	assert_eq!(level, 2, "68 tick × 3 = 204 ≥ 200 应升 RCL2");
+	assert_eq!(world.rooms["W5N8"].objects[&ctrl_id].safe_mode_available, 1, "官方: 升级时 safeModeAvailable +1");
 
 	// 停止升级: RCL2 的降级计时 = DOWNGRADE[2]/2 = 5000 tick (升级时刷新, 上限 +10001)
 	let empty = IntentList { entries: vec![] };
@@ -215,6 +216,8 @@ fn controller_level_and_downgrade() {
 	let controller = &world.rooms["W5N8"].objects[&ctrl_id];
 	assert_eq!(controller.level, 1, "长时间不升级应降回 RCL1");
 	assert_eq!(controller.progress, 184, "降级后进度 += 90% × 200 = 180 (4+180)");
+	assert_eq!(controller.safe_mode_available, 0, "降级清空 safeModeAvailable");
+	assert!(controller.safe_mode_cooldown.map(|t| t > world.tick).unwrap_or(false), "降级进入安全模式冷却");
 }
 
 // ── 以下为 issue #1「经济主链路」回归用例 ──
@@ -1798,4 +1801,63 @@ fn suicide_frees_tile_same_tick() {
 	let w = &world.rooms["W5N8"].objects[&walker];
 	assert_eq!((w.x, w.y), (10, 10), "自杀者的格子同 tick 空出");
 	assert_eq!(world.creeps_lost, 1);
+}
+
+// ═════════════════════════ 控制器: activateSafeMode / unclaim (官方 controllers/*.js) ═════════════════════════
+
+fn ctrl_intent(world: &World, name: &str) -> IntentList {
+	let id = world.rooms["W5N8"].controller().unwrap().id;
+	IntentList::parse(&format!(r#"[{{"o":"{id:024x}","n":"{name}","d":{{}}}}]"#))
+}
+
+/// activateSafeMode: 消耗 1 次, safeMode = tick + 20000, 冷却 50000; 次数为 0 / 冷却中 / 升级封锁 → 无效
+#[test]
+fn activate_safe_mode_and_cooldown() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	let it = ctrl_intent(&world, "activateSafeMode");
+	tick::run_tick(&mut world, &mut movement, &it);
+	assert_eq!(world.rooms["W5N8"].controller().unwrap().safe_mode, None, "safeModeAvailable=0 → 无效");
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().safe_mode_available = 2;
+	let t = world.tick;
+	let it = ctrl_intent(&world, "activateSafeMode");
+	tick::run_tick(&mut world, &mut movement, &it);
+	let c = world.rooms["W5N8"].controller().unwrap();
+	assert_eq!(c.safe_mode, Some(t + constants::SAFE_MODE_DURATION));
+	assert_eq!(c.safe_mode_cooldown, Some(t + constants::SAFE_MODE_COOLDOWN));
+	assert_eq!(c.safe_mode_available, 1);
+	assert!(!c.safe_mode_activated, "标记只在本 tick 有效");
+	let it = ctrl_intent(&world, "activateSafeMode");
+	tick::run_tick(&mut world, &mut movement, &it);
+	assert_eq!(world.rooms["W5N8"].controller().unwrap().safe_mode_available, 1, "冷却中 → 无效");
+	// 升级封锁中 → 无效
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	{
+		let c = world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap();
+		c.safe_mode_available = 1;
+		c.upgrade_blocked = 500;
+	}
+	let it = ctrl_intent(&world, "activateSafeMode");
+	tick::run_tick(&mut world, &mut movement, &it);
+	assert_eq!(world.rooms["W5N8"].controller().unwrap().safe_mode_available, 1);
+}
+
+/// unclaim: 控制器归零并进入安全模式冷却
+#[test]
+fn unclaim_resets_controller() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	{
+		let c = world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap();
+		c.progress = 777;
+		c.safe_mode_available = 3;
+		c.safe_mode = Some(9999);
+	}
+	let t = world.tick;
+	let it = ctrl_intent(&world, "unclaim");
+	tick::run_tick(&mut world, &mut movement, &it);
+	let c = world.rooms["W5N8"].controller().unwrap();
+	assert!(!c.mine);
+	assert_eq!((c.level, c.progress, c.downgrade_time, c.safe_mode, c.safe_mode_available), (0, 0, None, None, 0));
+	assert_eq!(c.safe_mode_cooldown, Some(t + constants::SAFE_MODE_COOLDOWN));
 }

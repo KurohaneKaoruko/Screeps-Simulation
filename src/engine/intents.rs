@@ -575,6 +575,8 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                         if controller.level == 8 {
                             controller.progress = 0;
                         }
+                        // 官方 upgradeController.js: 每次升级 safeModeAvailable +1
+                        controller.safe_mode_available += 1;
                         world.rcl_timeline.entry(level + 1).or_insert(world.tick);
                     } else {
                         controller.progress = progress + effect;
@@ -1202,6 +1204,39 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     .unwrap_or(0)
                     .saturating_sub(constants::TOWER_ENERGY_COST);
                 tower.store.insert("energy".into(), e);
+            }
+            ("controller", "unclaim") => {
+                // 官方 controllers/unclaim.js (新手区不建模: 冷却总是生效)
+                if let Some(c) = room.objects.get_mut(&id) {
+                    if !c.mine || c.level == 0 {
+                        continue;
+                    }
+                    c.mine = false;
+                    c.level = 0;
+                    c.progress = 0;
+                    c.downgrade_time = None;
+                    c.safe_mode = None;
+                    c.safe_mode_available = 0;
+                    c.safe_mode_cooldown = Some(world.tick + constants::SAFE_MODE_COOLDOWN);
+                }
+            }
+            ("controller", "activateSafeMode") => {
+                // 官方 controllers/activateSafeMode.js: 只打标记, 控制器 tick 时才真正开启
+                let now = world.tick;
+                if let Some(c) = room.objects.get_mut(&id) {
+                    if !c.mine || c.level == 0 || c.safe_mode_available == 0 {
+                        continue;
+                    }
+                    if c.safe_mode_cooldown.map(|t| t >= now).unwrap_or(false) || c.upgrade_blocked > now {
+                        continue;
+                    }
+                    let threshold = (now + downgrade_for(c.level) / 2)
+                        .saturating_sub(constants::CONTROLLER_DOWNGRADE_SAFEMODE_THRESHOLD);
+                    if c.downgrade_time.map(|t| t < threshold).unwrap_or(false) {
+                        continue;
+                    }
+                    c.safe_mode_activated = true;
+                }
             }
             ("rampart", "setPublic") => {
                 // 官方 ramparts/set-public.js

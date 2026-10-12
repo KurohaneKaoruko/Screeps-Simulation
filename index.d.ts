@@ -41,6 +41,8 @@ export interface ControllerSpec {
 	progress?: number
 	/** 默认 true; false 构造中立控制器 (claim/reserve 验证) */
 	mine?: boolean
+	/** 初始可用安全模式次数 (官方 safeModeAvailable), 默认 0 */
+	safeModeAvailable?: number
 }
 
 export interface MineralSpec {

@@ -349,6 +349,7 @@ fn tick_controllers(world: &mut World, room_name: &str) {
         return;
     };
     let controller = world.rooms.get_mut(room_name).unwrap().objects.get_mut(&controller_id).unwrap();
+    let activated = std::mem::take(&mut controller.safe_mode_activated);
     // 官方 controllers/tick.js:10: 保留到期 (gameTime >= endTime-1) 或房间已有主人 → 清除保留
     if let Some(end) = controller.reservation_end_time {
         if tick + 1 >= end || controller.mine || controller.enemy {
@@ -357,6 +358,12 @@ fn tick_controllers(world: &mut World, room_name: &str) {
     }
     if !controller.mine {
         return;
+    }
+    // 官方 controllers/tick.js:24-30: 本 tick 通过校验的 activateSafeMode 在此生效 (升级被封锁时不生效)
+    if activated && controller.upgrade_blocked <= tick {
+        controller.safe_mode_available = controller.safe_mode_available.saturating_sub(1);
+        controller.safe_mode = Some(tick + constants::SAFE_MODE_DURATION);
+        controller.safe_mode_cooldown = Some(tick + constants::SAFE_MODE_COOLDOWN);
     }
     let level = controller.level;
     if controller.downgrade_time.is_none() {
@@ -373,10 +380,15 @@ fn tick_controllers(world: &mut World, room_name: &str) {
     while tick >= controller.downgrade_time.unwrap_or(u64::MAX).saturating_sub(1) && controller.level > 0 {
         controller.level -= 1;
         let new_level = controller.level;
+        // 官方: 每降一级清空 safeModeAvailable 并进入安全模式冷却 (新手区不建模)
+        controller.safe_mode_available = 0;
+        controller.safe_mode_cooldown = Some(tick + constants::SAFE_MODE_COOLDOWN);
         if new_level == 0 {
             controller.progress = 0;
             controller.mine = false;
             controller.downgrade_time = None;
+            controller.upgrade_blocked = 0;
+            controller.safe_mode = None;
         } else {
             controller.downgrade_time =
                 Some(controller.downgrade_time.unwrap_or(tick) + downgrade(new_level) / 2 + 1);

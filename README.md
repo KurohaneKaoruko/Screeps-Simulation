@@ -68,7 +68,7 @@
 | PathFinder 跨房计价 | 出口格与对侧入口格按两步计价（官方为同节点），宏观行为一致 |
 | 有限世界 | 场景未定义相邻房间时，出口格上的 creep 停留原地（官方无限世界必穿越） |
 | 矿物/市场/Power/实验室 | 未实现（经济阶段不需要），相关 API 为安全桩：抛出明确的"未实现"错误，而不是静默失败或 `TypeError` |
-| 战斗（近似完成） | 近战/远程/群体攻击、治疗、拆除、claim/reserve/sign/attackController 已对齐官方语义（含 hit-back、rampart 重定向、部件从头损坏、伤害 tick 末统一应用、意图互斥表）；未覆盖：Power 效果（`PWR_FORTIFY` 等护盾）、safeMode 拦截、nuker |
+| 战斗（近似完成） | 近战/远程/群体攻击、治疗、拆除、claim/reserve/sign/attackController 已对齐官方语义（含 hit-back、rampart 重定向、部件从头损坏、伤害 tick 末统一应用、意图互斥表）；未覆盖：Power 效果（`PWR_FORTIFY` 等护盾）、safeMode 拦截（`activateSafeMode` 的次数/冷却/持续时间已按官方结算，但安全模式期间不阻止敌方行动）、nuker；新手区不建模（安全模式冷却总是生效） |
 | 地形生成 | `generated` 为噪声近似，不复刻官方地形算法；可用 `rows`/`raw` 显式给定真实地形 |
 | 事件日志结构 | 已实现 `EVENT_HARVEST/BUILD/REPAIR/UPGRADE_CONTROLLER/TRANSFER/OBJECT_DESTROYED/EXIT/ATTACK/HEAL/ATTACK_CONTROLLER/RESERVE_CONTROLLER`；`objectId` 取发起动作的对象，目标 id 放在 `data.targetId`/`data.sourceId` |
 | CPU 墙钟耗时 | `usedTime` 只计 `loop()` 墙钟 + 意图计价，不含 Memory 解析/序列化；跨机器不可复现（P95 断言请留足余量）。bot 按 `getUsed()` 做决策时每次运行结果会不同，需要逐位复现（A/B 对比）时打开 `cpu.deterministic` |
@@ -320,7 +320,7 @@ cargo build --release
     "name": "W5N8",
     "terrain": { "kind": "flat" },            // flat | generated{seed} | rows | raw
     "sources": { "count": 2, "energy": 3000 },
-    "controller": { "level": 1, "pos": [28, 27] },
+    "controller": { "level": 1, "pos": [28, 27], "safeModeAvailable": 0 },  // safeModeAvailable 可省略; 每次升级 +1
     "mineral": { "pos": [38, 38], "mineral_type": "H", "amount": 30000 },
     "structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 }],
     "creeps": [{ "name": "W1", "body": ["work","carry","move"], "pos": [26, 25] }]
