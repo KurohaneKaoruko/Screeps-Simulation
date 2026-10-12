@@ -577,7 +577,15 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 // 无旁观者, 不结算
             }
             ("creep", "suicide") => {
-                effects.deaths.push((room_name.clone(), id));
+                // 官方 suicide.js → _die: 立刻从 roomObjects 删除, 本 tick 不再挡路、不再能被 transfer/withdraw
+                if room.objects.get(&id).is_some_and(|o| o.spawning) {
+                    continue;
+                }
+                if let Some(obj) = room.objects.remove(&id) {
+                    world.creeps_lost += 1;
+                    bury_creep(world, &room_name, obj, constants::CREEP_CORPSE_RATE);
+                }
+                return;
             }
             // ── 战斗 (官方 processor/intents/creeps/{attack,rangedAttack,...}.js) ──
             ("creep", "attack") => {

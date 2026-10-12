@@ -1344,3 +1344,39 @@ fn reservation_renew_expire_and_source_capacity() {
 	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
 	assert_eq!(src_cap(&world, "W5N8"), 1500, "到期回中立 1500");
 }
+
+/// 多房间移动仲裁: 本房被挡的移动只取消本房的, 不能误删另一房间同坐标的移动
+#[test]
+fn blocked_move_cancels_only_same_room() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	// A 在 W4N8 (先仲裁), id 最小, 走向空格 (10,10)
+	let a = add_creep(&mut world, "A", 10, 11, &["move"]);
+	let obj = world.rooms.get_mut("W5N8").unwrap().objects.remove(&a).unwrap();
+	world.rooms.get_mut("W4N8").unwrap().objects.insert(a, obj);
+	// B 在 W5N8 走向被静止 creep 占着的 (10,10)
+	let b = add_creep(&mut world, "B", 10, 11, &["move"]);
+	let _blocker = add_creep(&mut world, "Blocker", 10, 10, &["move"]);
+	let json = format!(
+		r#"[{{"o":"{a:024x}","n":"move","d":{{"direction":1}}}},{{"o":"{b:024x}","n":"move","d":{{"direction":1}}}}]"#
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let pos = |room: &str, id: u64| (world.rooms[room].objects[&id].x, world.rooms[room].objects[&id].y);
+	assert_eq!(pos("W4N8", a), (10, 10), "W4N8 的 A 不受 W5N8 的阻挡影响");
+	assert_eq!(pos("W5N8", b), (10, 11), "W5N8 的 B 被挡住, 不能叠到 Blocker 身上");
+}
+
+/// suicide 在意图阶段立即生效 (官方 _die 删除 roomObjects): 同 tick 别的 creep 可以走进它的格子
+#[test]
+fn suicide_frees_tile_same_tick() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let dead = add_creep(&mut world, "Dead", 10, 10, &["move"]);
+	let walker = add_creep(&mut world, "Walker", 10, 11, &["move"]);
+	let json = format!(
+		r#"[{{"o":"{dead:024x}","n":"suicide","d":{{}}}},{{"o":"{walker:024x}","n":"move","d":{{"direction":1}}}}]"#
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert!(!world.rooms["W5N8"].objects.contains_key(&dead));
+	let w = &world.rooms["W5N8"].objects[&walker];
+	assert_eq!((w.x, w.y), (10, 10), "自杀者的格子同 tick 空出");
+	assert_eq!(world.creeps_lost, 1);
+}
