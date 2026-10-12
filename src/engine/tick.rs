@@ -22,7 +22,7 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
     // 每 tick 重置: 控制器升级计数 / extension 容量 / 事件日志 / spawn 停用标记
     for room in world.rooms.values_mut() {
         room.refresh_extension_capacity();
-        room.refresh_structure_activity();
+        room.refresh_spawn_off();
         room.events.clear();
         for o in room.objects.values_mut() {
             if o.obj_type == "controller" {
@@ -72,13 +72,17 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
         tick_dropped_energy(world, room_name);
         tick_sources(world, room_name);
         tick_minerals(world, room_name);
+        // 官方 processor.js:326: 房间 energyAvailable 在移动仲裁之后、逐对象 tick 之前算一次,
+        // 所有 spawn 的自动回能共用这一个值 (不随前一个 spawn 回能而变)
+        let energy_available = world.rooms[room_name].energy_available();
         moved_count += tick_creeps(world, room_name, &mut movement, &mut deaths, &mut pending_crossings);
-        tick_spawns(world, room_name, &mut movement);
+        tick_spawns(world, room_name, &mut movement, energy_available);
         tick_controllers(world, room_name);
         tick_decay_structures(world, room_name);
         tick_cooldowns(world, room_name);
         tick_store_capacity(world, room_name);
         tick_tombstones(world, room_name);
+        tick_ruins(world, room_name);
     }
     apply_crossings(world, &mut pending_crossings);
     // 全局阶段 (官方 global-intents/market.js): 房间结算全部完成后执行终端转账
@@ -323,8 +327,9 @@ fn tick_creeps(
     moved_count
 }
 
-/// spawn: 出生结算 + 能量自动回复 (energyAvailable<300 时每 tick +1)
-fn tick_spawns(world: &mut World, room_name: &str, movement: &mut Movement) {
+/// spawn: 出生结算 + 能量自动回复 (energyAvailable<300 时每 tick +1)。
+/// `energy_available` 为本 tick 逐对象阶段开始前算好的房间能量 (官方 scope.energyAvailable)。
+fn tick_spawns(world: &mut World, room_name: &str, movement: &mut Movement, energy_available: u32) {
     let spawn_ids: Vec<u64> = world.rooms[room_name]
         .objects
         .values()
@@ -337,11 +342,24 @@ fn tick_spawns(world: &mut World, room_name: &str, movement: &mut Movement) {
         let job = world.rooms[room_name].objects[&spawn_id].spawn_job.clone();
         if let Some(job) = job {
             if tick >= job.spawn_time.saturating_sub(1) {
-                let birth = {
+                let mut birth = {
                     let room = &world.rooms[room_name];
                     let spawn = &room.objects[&spawn_id];
                     movement::find_birth_tile(room, spawn, movement, job.directions.as_deref())
                 };
+                if birth.is_none() {
+                    // 官方 _born-creep.js: 四周全堵且方向序内有敌方 creep → 踩死它 (_die 正常留墓碑) 并在其格出生
+                    let stomp = {
+                        let room = &world.rooms[room_name];
+                        movement::find_spawn_stomp_target(room, &room.objects[&spawn_id], movement, job.directions.as_deref())
+                    };
+                    if let Some(hid) = stomp {
+                        if let Some(dead) = world.rooms.get_mut(room_name).unwrap().objects.remove(&hid) {
+                            birth = Some((dead.x, dead.y));
+                            intents::bury_creep(world, room_name, dead, constants::CREEP_CORPSE_RATE);
+                        }
+                    }
+                }
                 let room = world.rooms.get_mut(room_name).unwrap();
                 if let Some((x, y)) = birth {
                     // 找到孵化中的 creep 并落位
@@ -372,11 +390,13 @@ fn tick_spawns(world: &mut World, room_name: &str, movement: &mut Movement) {
                 }
             }
         }
-        // 自动能量回复 (被停用的 spawn 不回能, 官方 spawns/tick.js:35-42)
+        // 自动能量回复 (官方 spawns/tick.js:30-48): 控制器须 level ≥ 1 且与 spawn 同归属;
+        // 超出 RCL 上限 (按距控制器远近被裁掉) 的 spawn 不回能
         let room = world.rooms.get_mut(room_name).unwrap();
-        let energy_available = room.energy_available();
-        let spawn = room.objects.get_mut(&spawn_id).unwrap();
-        if spawn.mine
+        let ctrl_owned = room.controller().map(|c| c.level >= 1 && c.mine).unwrap_or(false);
+        let Some(spawn) = room.objects.get_mut(&spawn_id) else { continue };
+        if ctrl_owned
+            && spawn.mine
             && !spawn.off
             && energy_available < constants::SPAWN_ENERGY_CAPACITY
             && spawn.store.get("energy").copied().unwrap_or(0) < constants::SPAWN_ENERGY_CAPACITY
@@ -399,6 +419,7 @@ fn tick_controllers(world: &mut World, room_name: &str) {
         return;
     };
     let controller = world.rooms.get_mut(room_name).unwrap().objects.get_mut(&controller_id).unwrap();
+    let activated = std::mem::take(&mut controller.safe_mode_activated);
     // 官方 controllers/tick.js:10: 保留到期 (gameTime >= endTime-1) 或房间已有主人 → 清除保留
     if let Some(end) = controller.reservation_end_time {
         if tick + 1 >= end || controller.mine || controller.enemy {
@@ -407,6 +428,12 @@ fn tick_controllers(world: &mut World, room_name: &str) {
     }
     if !controller.mine {
         return;
+    }
+    // 官方 controllers/tick.js:24-30: 本 tick 通过校验的 activateSafeMode 在此生效 (升级被封锁时不生效)
+    if activated && controller.upgrade_blocked <= tick {
+        controller.safe_mode_available = controller.safe_mode_available.saturating_sub(1);
+        controller.safe_mode = Some(tick + constants::SAFE_MODE_DURATION);
+        controller.safe_mode_cooldown = Some(tick + constants::SAFE_MODE_COOLDOWN);
     }
     let level = controller.level;
     if controller.downgrade_time.is_none() {
@@ -423,10 +450,15 @@ fn tick_controllers(world: &mut World, room_name: &str) {
     while tick >= controller.downgrade_time.unwrap_or(u64::MAX).saturating_sub(1) && controller.level > 0 {
         controller.level -= 1;
         let new_level = controller.level;
+        // 官方: 每降一级清空 safeModeAvailable 并进入安全模式冷却 (新手区不建模)
+        controller.safe_mode_available = 0;
+        controller.safe_mode_cooldown = Some(tick + constants::SAFE_MODE_COOLDOWN);
         if new_level == 0 {
             controller.progress = 0;
             controller.mine = false;
             controller.downgrade_time = None;
+            controller.upgrade_blocked = 0;
+            controller.safe_mode = None;
         } else {
             controller.downgrade_time =
                 Some(controller.downgrade_time.unwrap_or(tick) + downgrade(new_level) / 2 + 1);
@@ -456,11 +488,10 @@ fn controller_levels(level: u8) -> u32 {
 /// 道路/容器/rampart 衰减
 fn tick_decay_structures(world: &mut World, room_name: &str) {
     let tick = world.tick;
-    let owned = world.rooms[room_name]
-        .controller()
-        .map(|c| c.mine && c.level > 0)
-        .unwrap_or(false);
-    let rcl = world.rooms[room_name].rcl();
+    // 官方 containers/tick.js: 只看 roomController.level > 0 (不论归属) 决定 500t / 100t 衰减周期
+    let ctrl_leveled = world.rooms[room_name].controller().map(|c| c.level > 0).unwrap_or(false);
+    // 官方 ramparts/tick.js: (控制器归属, 等级); 无控制器时不改 hitsMax
+    let ctrl_info = world.rooms[room_name].controller().map(|c| (c.mine, c.enemy, c.level));
     let ids: Vec<u64> = world.rooms[room_name]
         .objects
         .values()
@@ -470,6 +501,17 @@ fn tick_decay_structures(world: &mut World, room_name: &str) {
     for id in ids {
         let room = world.rooms.get_mut(room_name).unwrap();
         let Some(obj) = room.objects.get_mut(&id) else { continue };
+        // 官方 ramparts/tick.js:19-24: 每 tick 先刷新 hitsMax (在衰减判定之前);
+        // rampart 与控制器不同归属 → 0
+        if obj.obj_type == "rampart" {
+            if let Some((c_mine, c_enemy, level)) = ctrl_info {
+                obj.hits_max = if obj.mine == c_mine && obj.enemy == c_enemy {
+                    constants::rampart_hits_max(level)
+                } else {
+                    0
+                };
+            }
+        }
         let due = obj
             .next_decay_time
             .map(|t| tick >= t.saturating_sub(1))
@@ -488,11 +530,8 @@ fn tick_decay_structures(world: &mut World, room_name: &str) {
                 }
                 amount
             }
-            "rampart" => {
-                // 官方 ramparts/tick.js:19-40: 每 100t 减 300, hitsMax 按 RCL
-                obj.hits_max = constants::rampart_hits_max(rcl);
-                constants::RAMPART_DECAY_AMOUNT
-            }
+            // 官方 ramparts/tick.js:26-40: 每 100t 减 300
+            "rampart" => constants::RAMPART_DECAY_AMOUNT,
             _ => constants::CONTAINER_DECAY,
         };
         obj.hits = obj.hits.saturating_sub(decay_amount);
@@ -511,7 +550,7 @@ fn tick_decay_structures(world: &mut World, room_name: &str) {
             let interval = match obj.obj_type.as_str() {
                 "road" => constants::ROAD_DECAY_TIME,
                 "rampart" => constants::RAMPART_DECAY_TIME,
-                _ if owned => constants::CONTAINER_DECAY_TIME_OWNED,
+                _ if ctrl_leveled => constants::CONTAINER_DECAY_TIME_OWNED,
                 _ => constants::CONTAINER_DECAY_TIME,
             };
             obj.next_decay_time = Some(tick + interval);
@@ -564,6 +603,25 @@ fn tick_tombstones(world: &mut World, room_name: &str) {
         .filter(|o| {
             o.obj_type == "tombstone" && o.next_decay_time.map(|t| tick >= t.saturating_sub(1)).unwrap_or(true)
         })
+        .map(|o| (o.id, o.x, o.y, o.store.clone()))
+        .collect();
+    for (id, x, y, store) in ids {
+        world.rooms.get_mut(room_name).unwrap().objects.remove(&id);
+        for (resource, amount) in store {
+            if amount > 0 {
+                intents::create_dropped(world, room_name, x, y, &resource, amount);
+            }
+        }
+    }
+}
+
+/// 废墟消散 (官方 ruins/tick.js): 到期后内含资源散落原地 (先入同格容器)
+fn tick_ruins(world: &mut World, room_name: &str) {
+    let tick = world.tick;
+    let ids: Vec<(u64, u8, u8, objects::Store)> = world.rooms[room_name]
+        .objects
+        .values()
+        .filter(|o| o.obj_type == "ruin" && o.next_decay_time.map(|t| tick >= t.saturating_sub(1)).unwrap_or(true))
         .map(|o| (o.id, o.x, o.y, o.store.clone()))
         .collect();
     for (id, x, y, store) in ids {

@@ -76,57 +76,81 @@ impl Room {
             .sum()
     }
 
-    /// 官方 `utils.checkStructureAgainstController` + `_calc_spawns`: 每类自有结构按到控制器的
-    /// 切比雪夫距离由近到远占用 CONTROLLER_STRUCTURES 名额, 超出的标记 off (isActive() = false)。
-    /// 距离相同按 id 序 (官方 roomObjects 键序) 先到先得; 全服上限为 1 的类型 (storage/terminal/
-    /// extractor/observer/powerSpawn/nuker/factory) 只要当前 RCL 名额非 0 就全部激活 (官方特例)。
-    /// 无主结构 (路/容器/墙) 恒为激活; 控制器不参与。
-    pub fn refresh_structure_activity(&mut self) {
-        let ctrl = self
-            .controller()
-            .filter(|c| c.mine && c.level > 0)
-            .map(|c| (c.x as i32, c.y as i32, c.level));
-        let mut types: Vec<String> = Vec::new();
-        for o in self.objects.values() {
-            if o.mine && o.obj_type != "controller" && constants::is_owned_structure(&o.obj_type) && !types.contains(&o.obj_type) {
-                types.push(o.obj_type.clone());
-            }
-        }
+    /// 官方 _calc_spawns: spawn / extension 数量超过 RCL 上限时, 按到控制器的切比雪夫距离
+    /// **升序**稳定排序, 保留最近的 `limit` 个, 其余标记 off (距离相同按 id 序)。
+    /// 官方 roomSpawns/roomExtensions 不区分归属, 这里同样按类型统计。
+    pub fn refresh_spawn_off(&mut self) {
+        let rcl = self.rcl();
+        let ctrl = self.controller().map(|c| (c.x as i32, c.y as i32));
         let mut off_ids: Vec<u64> = Vec::new();
-        for t in &types {
-            let ids: Vec<(u64, i32)> = self
+        for st in ["spawn", "extension"] {
+            let limit = constants::controller_structure_limit(st, rcl) as usize;
+            // (id, 到控制器距离); BTreeMap 迭代即 id 序
+            let mut items: Vec<(u64, i32)> = self
                 .objects
                 .values()
-                .filter(|o| o.mine && &o.obj_type == t)
+                .filter(|o| o.obj_type == st)
                 .map(|o| {
                     let dist = ctrl
-                        .map(|(cx, cy, _)| (o.x as i32 - cx).abs().max((o.y as i32 - cy).abs()))
+                        .map(|(cx, cy)| (o.x as i32 - cx).abs().max((o.y as i32 - cy).abs()))
                         .unwrap_or(0);
                     (o.id, dist)
                 })
                 .collect();
-            let Some((_, _, level)) = ctrl else {
-                off_ids.extend(ids.iter().map(|(id, _)| *id));
-                continue;
-            };
-            let allowed = constants::controller_structure_limit(t, level) as usize;
-            if allowed == 0 {
-                off_ids.extend(ids.iter().map(|(id, _)| *id));
+            if items.len() <= limit {
                 continue;
             }
-            if constants::controller_structure_limit(t, 8) == 1 {
-                continue;
-            }
-            let mut sorted = ids.clone();
-            // 稳定排序: 距离升序, 同距离保持 id 序
-            sorted.sort_by_key(|(_, d)| *d);
-            off_ids.extend(sorted.iter().skip(allowed).map(|(id, _)| *id));
+            // sort_by_key 是稳定排序: 同距离保持 id 序 (官方 Array.sort 在 roomObjects 序上稳定)
+            items.sort_by_key(|&(_, dist)| dist);
+            off_ids.extend(items.into_iter().skip(limit).map(|(id, _)| id));
         }
         for o in self.objects.values_mut() {
-            if o.mine && o.obj_type != "controller" && constants::is_owned_structure(&o.obj_type) {
+            if o.obj_type == "spawn" || o.obj_type == "extension" {
                 o.off = off_ids.contains(&o.id);
             }
         }
+    }
+
+    /// 官方 `utils.checkStructureAgainstController`: 结构在当前 RCL 下是否可用。
+    /// 无主对象恒为 true; 控制器缺失 / 等级 < 1 / 归属不同 → false; 否则统计同类型、同归属且
+    /// 距控制器更近的结构数 (同距离时迭代序在前者算更近), 不超过 `CONTROLLER_STRUCTURES` 才可用。
+    /// 不受该表约束的类型 (controller 等) 恒为 true (对应官方 `isActive()` 的前置判断)。
+    pub fn structure_active(&self, obj: &Obj) -> bool {
+        if !obj.mine && !obj.enemy {
+            return true;
+        }
+        if !constants::has_controller_structure_limit(&obj.obj_type) {
+            return true;
+        }
+        let Some(ctrl) = self.controller() else { return false };
+        if ctrl.level < 1 || ctrl.mine != obj.mine {
+            return false;
+        }
+        let mut allowed = constants::controller_structure_limit(&obj.obj_type, ctrl.level);
+        if allowed == 0 {
+            return false;
+        }
+        if constants::controller_structure_limit(&obj.obj_type, 8) == 1 {
+            return true;
+        }
+        let dist_of = |o: &Obj| (o.x as i32 - ctrl.x as i32).abs().max((o.y as i32 - ctrl.y as i32).abs());
+        let dist = dist_of(obj);
+        let mut found_self = false;
+        for o in self.objects.values() {
+            if o.obj_type != obj.obj_type || o.mine != obj.mine || o.enemy != obj.enemy {
+                continue;
+            }
+            let d = dist_of(o);
+            if d < dist || (!found_self && d == dist && o.id != obj.id) {
+                allowed -= 1;
+                if allowed == 0 {
+                    return false;
+                }
+            } else if d == dist && o.id == obj.id {
+                found_self = true;
+            }
+        }
+        true
     }
 
     /// 我方单位/自有结构/工地在场 → 可见。
@@ -391,6 +415,19 @@ impl World {
                 if let Some(n) = &obj.name {
                     mix_str(&mut h, n);
                 }
+                // 后加字段只在非缺省值时混入, 保持旧基线不变
+                if obj.is_public {
+                    mix_str(&mut h, "isPublic");
+                }
+                if obj.safe_mode_available > 0 || obj.safe_mode.is_some() || obj.safe_mode_cooldown.is_some() {
+                    mix_u64(&mut h, obj.safe_mode_available as u64);
+                    mix_u64(&mut h, obj.safe_mode.unwrap_or(0));
+                    mix_u64(&mut h, obj.safe_mode_cooldown.unwrap_or(0));
+                }
+                if let Some(info) = &obj.ruin {
+                    mix_u64(&mut h, info.structure_id);
+                    mix_u64(&mut h, info.destroy_time);
+                }
                 for (res, amount) in &obj.store {
                     mix_str(&mut h, res);
                     mix_u64(&mut h, *amount as u64);
@@ -517,7 +554,7 @@ pub fn prime_world(world: &mut World) {
     }
     // 超 RCL 上限的 spawn/extension 停用 (官方 _calc_spawns)
     for room in world.rooms.values_mut() {
-        room.refresh_structure_activity();
+        room.refresh_spawn_off();
     }
 }
 
