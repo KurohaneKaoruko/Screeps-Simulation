@@ -1496,7 +1496,10 @@ class StructureSpawn extends OwnedStructure {
 	/** 官方 E/game/structures.js:1237-1266 */
 	renewCreep(target) {
 		if (this.spawning) return C.ERR_BUSY;
-		if (!target || !target.id || !(target instanceof Creep) || target.spawning) return C.ERR_INVALID_TARGET;
+		// 官方: 带 CLAIM 部件的 creep 不能续命 → ERR_INVALID_TARGET
+		if (!target || !target.id || !(target instanceof Creep) || target.spawning || target.body.some((p) => p.type === C.CLAIM)) {
+			return C.ERR_INVALID_TARGET;
+		}
 		if (!this.my || !target.my) return C.ERR_NOT_OWNER;
 		if (this.__off) return C.ERR_RCL_NOT_ENOUGH;
 		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
@@ -1635,18 +1638,28 @@ class StructureLink extends OwnedStructure {
 		this.energyCapacity = raw.energyCapacity;
 		this.cooldown = raw.cooldown || 0;
 	}
-	/** 官方 E/game/structures.js:488-540 */
+	/** 官方 E/game/structures.js:488-537 (检查顺序逐条照搬) */
 	transferEnergy(target, amount) {
 		if (amount < 0) return C.ERR_INVALID_ARGS;
 		if (!target || !target.id || !(target instanceof Structure) || target === this || target.structureType !== C.STRUCTURE_LINK) {
 			return C.ERR_INVALID_TARGET;
 		}
 		if (!target.my) return C.ERR_NOT_OWNER;
+		if (this.my === false && this.room.lookForAt(C.LOOK_STRUCTURES, this.pos).some((s) => s.structureType === C.STRUCTURE_RAMPART)) {
+			return C.ERR_NOT_OWNER;
+		}
 		if (this.cooldown > 0) return C.ERR_TIRED;
 		if (!this.room.controller) return C.ERR_RCL_NOT_ENOUGH;
-		if (!this.store || !this.store.energy) return C.ERR_NOT_ENOUGH_ENERGY;
-		if (!amount) amount = Math.min(this.store.energy, (target.energyCapacity || 0) - (target.energy || 0));
-		if (this.store.energy < amount) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
+		const energy = this.store ? this.store.energy : 0;
+		if (!energy) return C.ERR_NOT_ENOUGH_ENERGY;
+		const targetCap = target.energyCapacity || 0;
+		const targetEnergy = target.store ? target.store.energy : 0;
+		if (!amount) amount = Math.min(energy, targetCap ? targetCap - targetEnergy : 0);
+		if (this.energy < amount) return C.ERR_NOT_ENOUGH_ENERGY;
+		// 显式 amount 超过目标剩余容量 → ERR_FULL (官方不会替你截断)
+		if (!targetCap || targetEnergy + amount > targetCap) return C.ERR_FULL;
+		if (target.pos.roomName !== this.pos.roomName) return C.ERR_NOT_IN_RANGE;
 		intent(this.id, "transferEnergy", { id: target.id, amount });
 		return C.OK;
 	}

@@ -696,6 +696,8 @@ fn tower_repair_spends_energy() {
 #[test]
 fn link_transfer_energy_with_loss_and_cooldown() {
 	let (mut world, mut movement) = setup(TWO_ROOMS);
+	// RCL5 才有 2 个 link 名额 (官方 links/transfer.js 检查 checkStructureAgainstController)
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 5;
 	let a = add_structure(&mut world, "W5N8", "link", 10, 10);
 	let b = add_structure(&mut world, "W5N8", "link", 12, 10);
 	set_store(&mut world, a, 500);
@@ -1541,4 +1543,43 @@ fn birth_tile_directions_and_road_on_wall() {
 	world.rooms.get_mut("W5N8").unwrap().objects.insert(road, objects::structure(road, "road", 26, 26, false));
 	let room = &world.rooms["W5N8"];
 	assert_eq!(find_birth_tile(room, &room.objects[&spawn], &movement, None), Some((26, 26)), "墙上路可出生");
+}
+
+// ═════════════════════════ tower / link 结算细节 ═════════════════════════
+
+/// 官方 links/transfer.js: 超出 RCL 上限的源 link 不能发送 (RCL1 无 link 名额)
+#[test]
+fn link_transfer_requires_rcl() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let a = add_structure(&mut world, "W5N8", "link", 10, 10);
+	let b = add_structure(&mut world, "W5N8", "link", 12, 10);
+	set_store(&mut world, a, 500);
+	let json = format!(r#"[{{"o":"{a:024x}","n":"transferEnergy","d":{{"id":"{b:024x}","amount":200}}}}]"#);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(store_of(&world, a), 500, "RCL1 link 不可用, 不转移");
+	assert_eq!(store_of(&world, b), 0);
+	// RCL5: 目标剩 100 空间时, 处理器把 200 截到 100 (官方行为)
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 5;
+	set_store(&mut world, b, 700);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(store_of(&world, a), 400, "截到目标剩余容量 100");
+	assert_eq!(store_of(&world, b), 797, "700 + 100 - ceil(3)");
+}
+
+/// 官方 towers/attack.js: 不攻击孵化中的 creep
+#[test]
+fn tower_does_not_attack_spawning_creep() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let tower = add_structure(&mut world, "W5N8", "tower", 20, 20);
+	set_store(&mut world, tower, 100);
+	let target = add_creep(&mut world, "Baby", 22, 20, &["move", "move", "move", "move", "move", "move", "move"]);
+	mark_enemy(&mut world, target);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&target).unwrap().spawning = true;
+	let spawn = spawn_of(&world, "W5N8");
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&spawn).unwrap().spawn_job =
+		Some(objects::SpawnJob { name: "Baby".into(), need_time: 21, spawn_time: 100, directions: None });
+	let json = format!(r#"[{{"o":"{tower:024x}","n":"attack","d":{{"id":"{target:024x}"}}}}]"#);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(hits_of(&world, target), 700, "孵化中不受伤");
+	assert_eq!(store_of(&world, tower), 100, "攻击未执行不扣能");
 }

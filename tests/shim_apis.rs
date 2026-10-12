@@ -708,3 +708,63 @@ fn spawning_object_and_spawn_creep_semantics_inner() {
 	);
 	assert!(world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "spawn").unwrap().spawn_job.is_none());
 }
+
+// ═════════════════════════ renewCreep / link.transferEnergy 返回码 ═════════════════════════
+
+/// renewCreep: CLAIM creep → ERR_INVALID_TARGET。link.transferEnergy: 显式 amount 超过目标剩余 → ERR_FULL;
+/// 跨房 → ERR_NOT_IN_RANGE; 超出 RCL 上限 → ERR_RCL_NOT_ENOUGH; 缺省 amount 自动取 min(自身, 目标剩余)
+#[test]
+fn renew_claim_and_link_transfer_codes() {
+	in_tokio(|| renew_claim_and_link_transfer_codes_inner());
+}
+
+fn renew_claim_and_link_transfer_codes_inner() {
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "links", "seed": 1,
+		"rooms": [
+			{ "name": "W5N8", "terrain": { "kind": "flat" },
+			  "controller": { "level": 5, "pos": [28, 27] },
+			  "structures": [
+				{ "type": "spawn", "pos": [25, 25], "energy": 300 },
+				{ "type": "link", "pos": [30, 30], "energy": 500 },
+				{ "type": "link", "pos": [32, 30], "energy": 700 },
+				{ "type": "link", "pos": [45, 45], "energy": 500 }
+			  ],
+			  "creeps": [{ "name": "Claimer", "body": ["claim", "move"], "pos": [26, 25] }] },
+			{ "name": "W5N7", "terrain": { "kind": "flat" },
+			  "structures": [{ "type": "link", "pos": [10, 10], "energy": 0 }] }
+		]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let bundle = r#"
+		exports.loop = function() {
+			const spawn = Game.spawns[Object.keys(Game.spawns)[0]];
+			const links = Game.rooms.W5N8.find(FIND_MY_STRUCTURES, { filter: { structureType: STRUCTURE_LINK } });
+			const at = (x) => links.find(l => l.pos.x === x);
+			const a = at(30), b = at(32), far = at(45);
+			const other = Game.rooms.W5N7.find(FIND_MY_STRUCTURES)[0];
+			console.log(JSON.stringify({
+				renewClaim: spawn.renewCreep(Game.creeps.Claimer),
+				full: a.transferEnergy(b, 200),
+				farActive: far.isActive(),
+				rcl: far.transferEnergy(b),
+				cross: a.transferEnergy(other, 100),
+				auto: a.transferEnergy(b),
+			}));
+		};
+	"#;
+	let (entries, console) = run_once(bundle, &mut world);
+	let info: serde_json::Value = serde_json::from_str(console.first().map(String::as_str).unwrap_or("{}")).unwrap();
+	assert_eq!(info["renewClaim"], -7, "{info}");
+	assert_eq!(info["full"], -8, "700 + 200 > 800 → ERR_FULL: {info}");
+	assert_eq!(info["farActive"], false, "RCL5 只有 2 个 link 名额, 最远的停用: {info}");
+	assert_eq!(info["rcl"], -14, "{info}");
+	assert_eq!(info["cross"], -9, "跨房 ERR_NOT_IN_RANGE: {info}");
+	assert_eq!(info["auto"], 0, "{info}");
+	let t = entries.iter().find(|(_, n, _)| n == "transferEnergy").expect("应提交 transferEnergy");
+	assert_eq!(t.2["amount"], 100, "缺省 amount = min(500, 800-700)");
+	assert_eq!(entries.iter().filter(|(_, n, _)| n == "transferEnergy" || n == "renewCreep").count(), 1);
+}

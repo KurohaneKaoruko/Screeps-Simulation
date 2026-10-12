@@ -1149,8 +1149,16 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     }
                     _ => continue,
                 };
+                // 官方 towers/attack.js: 孵化中的 creep 不能被攻击
                 let (tx, ty) = match room.objects.get(&target_id) {
-                    Some(o) if o.id != id && o.hits > 0 && o.obj_type != "controller" => (o.x, o.y),
+                    Some(o)
+                        if o.id != id
+                            && o.hits > 0
+                            && o.obj_type != "controller"
+                            && !(o.obj_type == "creep" && o.spawning) =>
+                    {
+                        (o.x, o.y)
+                    }
                     _ => continue,
                 };
                 let amount = tower_power(constants::TOWER_POWER_ATTACK, ox, oy, tx, ty);
@@ -1172,9 +1180,10 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
             ("link", "transferEnergy") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
                 let amount_req = data.get("amount").and_then(Value::as_u64).unwrap_or(0) as u32;
-                // 官方 links/transfer.js: 同房 link 间转移, 有冷却与 3% 损耗
+                // 官方 links/transfer.js: 同房 link 间转移, 有冷却与 3% 损耗;
+                // 源 link 须通过 checkStructureAgainstController (超出 RCL 上限的 link 不能发)
                 let (ox, oy, have, cooldown) = match room.objects.get(&id) {
-                    Some(l) if l.mine && l.obj_type == "link" => {
+                    Some(l) if l.mine && l.obj_type == "link" && room.structure_active(l) => {
                         (l.x, l.y, l.store.get("energy").copied().unwrap_or(0), l.cooldown)
                     }
                     _ => continue,
@@ -1192,6 +1201,7 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 if target_energy >= cap {
                     continue;
                 }
+                // 官方处理器在目标放不下时把 amount 截到剩余容量 (API 层已对显式超量返回 ERR_FULL)
                 let amount = amount_req.min(cap - target_energy).min(have);
                 if amount == 0 {
                     continue;
