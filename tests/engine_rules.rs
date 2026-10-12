@@ -916,13 +916,13 @@ fn tower_attack_destroys_structure_and_drops_store() {
 	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
 	let room = &world.rooms["W5N8"];
 	assert!(!room.objects.contains_key(&ext), "600 > 500 应销毁");
-	let dropped: u32 = room
-		.objects
-		.values()
-		.filter(|o| o.obj_type == "energy")
-		.map(|o| o.store.get("energy").copied().unwrap_or(0))
-		.sum();
-	assert_eq!(dropped, 199, "掉落 200 后当 tick 衰减 1");
+	// 官方 _damage.js → structures/_destroy.js: 仓储留在 ruin 里 (不直接落地)
+	assert!(!room.objects.values().any(|o| o.obj_type == "energy"), "不再直接掉落");
+	let ruin = room.objects.values().find(|o| o.obj_type == "ruin").expect("应留下 ruin");
+	assert_eq!(ruin.store.get("energy").copied(), Some(200));
+	assert_eq!((ruin.x, ruin.y), (22, 20));
+	assert_eq!(ruin.next_decay_time, Some(constants::RUIN_DECAY), "decayTime = 摧毁 tick(0) + 500");
+	assert!(room.events.iter().any(|e| e.event == screeps_sim::engine::intents::EVENT_OBJECT_DESTROYED && e.object_id == ext));
 }
 
 /// claimController: 中立控制器 → 归属我方 level 1
@@ -1209,6 +1209,15 @@ fn snapshot_direct_serializer_matches_value_tree() {
 		room.objects.insert(id2, objects::tombstone(id2, 16, 16, "w\"q", world.tick + 300));
 		room.objects
 			.insert(id3, objects::construction_site(id3, "road", 20, 20, 300));
+		// 废墟: 有主 (tower) 与无主 (container) 两种 structure 形态
+		let mut next = world.next_id;
+		let (r1, r2) = (alloc_id(&mut next), alloc_id(&mut next));
+		world.next_id = next;
+		let mut tower = objects::structure(9001, "tower", 30, 30, true);
+		tower.store.insert("energy".into(), 70);
+		room.objects.insert(r1, objects::ruin(r1, &tower, 0));
+		let cont = objects::structure(9002, "container", 31, 31, false);
+		room.objects.insert(r2, objects::ruin(r2, &cont, 0));
 		if let Some(c) = room.controller_mut() {
 			c.sign = Some("签名 \"引号\" & <tag>".to_string());
 			c.reservation_end_time = Some(world.tick + 500);
@@ -1582,4 +1591,75 @@ fn tower_does_not_attack_spawning_creep() {
 	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
 	assert_eq!(hits_of(&world, target), 700, "孵化中不受伤");
 	assert_eq!(store_of(&world, tower), 100, "攻击未执行不扣能");
+}
+
+// ═════════════════════════ destroyStructure / ruin (官方 room/destroy-structure.js, structures/_destroy.js, ruins/tick.js) ═════════════════════════
+
+fn destroy_intent(id: u64) -> IntentList {
+	IntentList::parse(&format!(r#"[{{"o":"room","n":"destroyStructure","d":{{"room":"W5N8","id":"{id:024x}"}}}}]"#))
+}
+
+/// destroyStructure: 留下继承仓储的 ruin, 500t 后消散并把资源散落原地; 不记 EVENT_OBJECT_DESTROYED
+#[test]
+fn destroy_structure_leaves_ruin_that_decays() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let tower = add_structure(&mut world, "W5N8", "tower", 20, 20);
+	set_store(&mut world, tower, 400);
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(tower));
+	let room = &world.rooms["W5N8"];
+	assert!(!room.objects.contains_key(&tower));
+	assert!(room.events.iter().all(|e| e.event != screeps_sim::engine::intents::EVENT_OBJECT_DESTROYED));
+	let ruin = room.objects.values().find(|o| o.obj_type == "ruin").expect("应留下 ruin");
+	let ruin_id = ruin.id;
+	let info = ruin.ruin.as_ref().unwrap();
+	assert_eq!((info.structure_id, info.structure_type.as_str(), info.destroy_time), (tower, "tower", 0));
+	assert_eq!(info.hits_max, 3000);
+	assert_eq!(ruin.store.get("energy").copied(), Some(400));
+	// decayTime = 0 + 500 → 第 499 tick 消散
+	for _ in 1..499 {
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	}
+	assert!(world.rooms["W5N8"].objects.contains_key(&ruin_id), "tick 498 仍在");
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	let room = &world.rooms["W5N8"];
+	assert!(!room.objects.contains_key(&ruin_id), "tick 499 消散");
+	let pile = room.objects.values().find(|o| o.obj_type == "energy" && o.x == 20 && o.y == 20).expect("资源落地");
+	assert_eq!(pile.store.get("energy").copied(), Some(400), "ruin tick 中新落地的资源本 tick 不再衰减");
+}
+
+/// destroyStructure 的官方前置: 控制器非我方 / 房内有敌方 creep / 目标无建造成本 → 不执行
+#[test]
+fn destroy_structure_preconditions() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let ext = add_structure(&mut world, "W5N8", "extension", 20, 20);
+	let foe = add_creep(&mut world, "Foe", 40, 40, &["move"]);
+	mark_enemy(&mut world, foe);
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(ext));
+	assert!(world.rooms["W5N8"].objects.contains_key(&ext), "有敌方 creep → 不摧毁");
+	world.rooms.get_mut("W5N8").unwrap().objects.remove(&foe);
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().mine = false;
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(ext));
+	assert!(world.rooms["W5N8"].objects.contains_key(&ext), "控制器非我方 → 不摧毁");
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().mine = true;
+	let ctrl = world.rooms["W5N8"].controller().unwrap().id;
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(ctrl));
+	assert!(world.rooms["W5N8"].objects.contains_key(&ctrl), "controller 无建造成本 → 不摧毁");
+	let site = alloc_id(&mut world.next_id);
+	world.rooms.get_mut("W5N8").unwrap().objects.insert(site, objects::construction_site(site, "road", 5, 5, 300));
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(site));
+	assert!(world.rooms["W5N8"].objects.contains_key(&site), "工地走 removeConstructionSite, destroyStructure 无效");
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(ext));
+	assert!(!world.rooms["W5N8"].objects.contains_key(&ext), "条件满足 → 摧毁");
+}
+
+/// 摧毁正在孵化的 spawn: 孵化中的 creep 一并移除 (官方 _destroy.js)
+#[test]
+fn destroy_spawning_spawn_removes_creep() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move","move"],"name":"Kid"}"#));
+	assert!(creep_named(&world, "Kid").is_some());
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(spawn));
+	assert!(creep_named(&world, "Kid").is_none(), "孵化中的 creep 随 spawn 一起消失");
+	assert!(world.rooms["W5N8"].objects.values().any(|o| o.obj_type == "ruin"));
 }

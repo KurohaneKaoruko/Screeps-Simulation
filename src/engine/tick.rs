@@ -76,6 +76,7 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
         tick_decay_structures(world, room_name);
         tick_cooldowns(world, room_name);
         tick_tombstones(world, room_name);
+        tick_ruins(world, room_name);
     }
     apply_crossings(world, &mut pending_crossings);
 
@@ -478,6 +479,25 @@ fn tick_tombstones(world: &mut World, room_name: &str) {
         .filter(|o| {
             o.obj_type == "tombstone" && o.next_decay_time.map(|t| tick >= t.saturating_sub(1)).unwrap_or(true)
         })
+        .map(|o| (o.id, o.x, o.y, o.store.clone()))
+        .collect();
+    for (id, x, y, store) in ids {
+        world.rooms.get_mut(room_name).unwrap().objects.remove(&id);
+        for (resource, amount) in store {
+            if amount > 0 {
+                intents::create_dropped(world, room_name, x, y, &resource, amount);
+            }
+        }
+    }
+}
+
+/// 废墟消散 (官方 ruins/tick.js): 到期后内含资源散落原地 (先入同格容器)
+fn tick_ruins(world: &mut World, room_name: &str) {
+    let tick = world.tick;
+    let ids: Vec<(u64, u8, u8, objects::Store)> = world.rooms[room_name]
+        .objects
+        .values()
+        .filter(|o| o.obj_type == "ruin" && o.next_decay_time.map(|t| tick >= t.saturating_sub(1)).unwrap_or(true))
         .map(|o| (o.id, o.x, o.y, o.store.clone()))
         .collect();
     for (id, x, y, store) in ids {

@@ -1283,33 +1283,43 @@ fn apply_room_intent(world: &mut World, room_name: &str, name: &str, data: &Valu
             let site = objects::construction_site(id, st, x, y, progress_total);
             room.objects.insert(id, site);
         }
-        "removeConstructionSite" | "destroyStructure" => {
+        "removeConstructionSite" => {
             let Some(target_id) = id_of(data, "id") else { return };
+            // 官方 room/remove-construction-site.js: 只处理工地
+            if room.objects.get(&target_id).map(|o| o.obj_type != "constructionSite").unwrap_or(true) {
+                return;
+            }
             if let Some(removed) = room.objects.remove(&target_id) {
                 let type_name = removed
                     .structure_type
                     .clone()
                     .unwrap_or_else(|| removed.obj_type.clone());
                 // 官方 room/remove-construction-site.js:17-19: 拆除工地掉落 floor(progress/2) 能量
-                if removed.obj_type == "constructionSite" {
-                    let refund = removed.progress / 2;
-                    let (x, y) = (removed.x, removed.y);
-                    room.push_event(
-                        EVENT_OBJECT_DESTROYED,
-                        target_id,
-                        json!({ "type": type_name }),
-                    );
-                    if refund > 0 {
-                        create_dropped(world, room_name, x, y, "energy", refund);
-                    }
-                } else {
-                    room.push_event(
-                        EVENT_OBJECT_DESTROYED,
-                        target_id,
-                        json!({ "type": type_name }),
-                    );
+                let refund = removed.progress / 2;
+                let (x, y) = (removed.x, removed.y);
+                room.push_event(EVENT_OBJECT_DESTROYED, target_id, json!({ "type": type_name }));
+                if refund > 0 {
+                    create_dropped(world, room_name, x, y, "energy", refund);
                 }
             }
+        }
+        "destroyStructure" => {
+            // 官方 room/destroy-structure.js: 目标须有 CONSTRUCTION_COST、控制器归我方、
+            // 房内没有敌方 creep / powerCreep; 摧毁走 structures/_destroy (留下 ruin), 不记事件
+            let Some(target_id) = id_of(data, "id") else { return };
+            let ok = match room.objects.get(&target_id) {
+                Some(o) => constants::construction_cost(&o.obj_type).is_some(),
+                None => false,
+            };
+            let owned = room.controller().map(|c| c.mine).unwrap_or(false);
+            let hostiles = room
+                .objects
+                .values()
+                .any(|o| (o.obj_type == "creep" || o.obj_type == "powerCreep") && !o.mine);
+            if !ok || !owned || hostiles {
+                return;
+            }
+            destroy_structure(world, room_name, target_id, None);
         }
         "createFlag" => {
             // 旗标仅做最小支持: 不入 world (bot 未使用)
@@ -1559,16 +1569,10 @@ fn apply_damage(
             t.hits == 0
         };
         if destroyed {
-            let room = world.rooms.get_mut(room_name).unwrap();
-            if let Some(removed) = room.objects.remove(&target_id) {
-                let type_name = removed.obj_type.clone();
-                let (x, y) = (removed.x, removed.y);
-                room.push_event(EVENT_OBJECT_DESTROYED, target_id, json!({ "type": type_name }));
-                for (resource, amt) in removed.store {
-                    if amt > 0 {
-                        create_dropped(world, room_name, x, y, &resource, amt);
-                    }
-                }
+            // 官方 _damage.js: 走 structures/_destroy (仓储留在 ruin 里), 随后记 EVENT_OBJECT_DESTROYED
+            if let Some(removed) = destroy_structure(world, room_name, target_id, Some(attack_type)) {
+                let room = world.rooms.get_mut(room_name).unwrap();
+                room.push_event(EVENT_OBJECT_DESTROYED, target_id, json!({ "type": removed.obj_type }));
             }
         }
     }
@@ -1599,6 +1603,30 @@ fn apply_damage(
             "attackType": attack_type,
         }),
     );
+}
+
+/// 官方 `processor/intents/structures/_destroy.js`: 移除结构; 正在孵化的 spawn 连带移除孵化中的 creep;
+/// 非核弹摧毁时原地留下 ruin (继承仓储, decayTime = 当前 tick + RUIN_DECAY_STRUCTURES[type] || RUIN_DECAY)。
+/// 返回被移除的结构。
+pub fn destroy_structure(world: &mut World, room_name: &str, id: u64, attack_type: Option<u32>) -> Option<objects::Obj> {
+    let tick = world.tick;
+    let ruin_id = alloc_id(&mut world.next_id);
+    let room = world.rooms.get_mut(room_name)?;
+    let removed = room.objects.remove(&id)?;
+    if let Some(job) = &removed.spawn_job {
+        let spawning = room
+            .objects
+            .values()
+            .find(|o| o.obj_type == "creep" && o.mine == removed.mine && o.name.as_deref() == Some(job.name.as_str()))
+            .map(|o| o.id);
+        if let Some(cid) = spawning {
+            room.objects.remove(&cid);
+        }
+    }
+    if attack_type != Some(constants::EVENT_ATTACK_TYPE_NUKE) {
+        room.objects.insert(ruin_id, objects::ruin(ruin_id, &removed, tick));
+    }
+    Some(removed)
 }
 
 /// 官方 heal / rangedHeal / towers.heal: 治疗量累积到 `_healToApply` (tick 阶段统一应用)

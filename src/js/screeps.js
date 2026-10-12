@@ -1323,9 +1323,15 @@ class Structure extends RoomObject {
 		if (!this.room || !this.room.controller) return false;
 		return checkStructureAgainstController(this);
 	}
+	/** 官方 E/game/structures.js:72-86: 看房间控制器归属而不是结构归属; 房内有敌方单位 → ERR_BUSY */
 	destroy() {
-		if (!this.my) return C.ERR_NOT_OWNER;
-		intent("room", "destroyStructure", { id: this.id, room: this.pos.roomName });
+		const room = this.room;
+		if (!room) return C.ERR_INVALID_TARGET;
+		if (!room.controller || !room.controller.my) return C.ERR_NOT_OWNER;
+		if (room.find(C.FIND_HOSTILE_CREEPS).length > 0 || room.find(C.FIND_HOSTILE_POWER_CREEPS).length > 0) {
+			return C.ERR_BUSY;
+		}
+		intent("room", "destroyStructure", { id: this.id, room: room.name });
 		return C.OK;
 	}
 	notifyWhenAttacked() {
@@ -2798,12 +2804,35 @@ class Deposit extends RoomObject {
 		this.ticksToDecay = raw.ticksToDecay;
 	}
 }
+/** 官方 E/game/ruins.js: 结构被摧毁后留下的废墟 */
 class Ruin extends RoomObject {
 	constructor(raw) {
 		super(raw);
-		this.store = makeStore(raw.store, Infinity, null);
-		this.structure = raw.structureType ? { structureType: raw.structureType } : undefined;
+		// 官方 ruin 对象没有 structureType 字段 (getter 恒为 undefined), 原类型在 structure.structureType
+		this.structureType = undefined;
+		this.destroyTime = raw.destroyTime;
 		this.ticksToDecay = raw.ticksToDecay;
+		// 官方 new Store(o): 无 storeCapacity → getCapacity() 为 null
+		this.store = makeStore(raw.store, null, null);
+		const st = raw.structure || {};
+		// 官方: 原结构有主 → OwnedStructure 实例 (带 owner/my), 否则 Structure 实例; 都没有 pos/room
+		const structure = Object.create(st.my === undefined ? Structure.prototype : OwnedStructure.prototype);
+		Object.defineProperties(structure, {
+			id: { enumerable: true, value: st.id },
+			hits: { enumerable: true, value: st.hits || 0 },
+			hitsMax: { enumerable: true, value: st.hitsMax },
+			structureType: { enumerable: true, value: st.type },
+		});
+		if (st.my !== undefined) {
+			Object.defineProperties(structure, {
+				owner: { enumerable: true, value: { username: st.my ? "Nexus" : "Invader" } },
+				my: { enumerable: true, value: !!st.my },
+			});
+		}
+		this.structure = structure;
+	}
+	toString() {
+		return `[ruin (${this.structure.structureType}) #${this.id}]`;
 	}
 }
 class Nuke extends RoomObject {

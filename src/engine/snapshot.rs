@@ -370,6 +370,30 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
                 None => out.push_str("null"),
             }
         }
+        "ruin" => {
+            out.push_str(",\"store\":");
+            write_store(out, &obj.store);
+            if let Some(t) = obj.next_decay_time {
+                out.push_str(",\"ticksToDecay\":");
+                let _ = write!(out, "{}", t.saturating_sub(world.tick));
+            }
+            if let Some(info) = &obj.ruin {
+                out.push_str(",\"destroyTime\":");
+                let _ = write!(out, "{}", info.destroy_time);
+                out.push_str(",\"structure\":{\"id\":\"");
+                let _ = write!(out, "{:024x}", info.structure_id);
+                out.push_str("\",\"type\":");
+                put_str(out, &info.structure_type);
+                out.push_str(",\"hits\":0,\"hitsMax\":");
+                let _ = write!(out, "{}", info.hits_max);
+                // 原结构有主时才带 my (官方 ruin.structure.user)
+                if info.mine || info.enemy {
+                    out.push_str(",\"my\":");
+                    let _ = write!(out, "{}", info.mine);
+                }
+                out.push('}');
+            }
+        }
         _ => {}
     }
     out.push('}');
@@ -658,6 +682,27 @@ fn object_json(obj: &Obj, world: &World) -> Value {
                 extra.insert("ticksToDecay".into(), json!(t.saturating_sub(world.tick)));
             }
             extra.insert("creepName".into(), json!(obj.creep_name.clone()));
+            base(extra)
+        }
+        "ruin" => {
+            let mut extra = Map::new();
+            extra.insert("store".into(), store_json(&obj.store));
+            if let Some(t) = obj.next_decay_time {
+                extra.insert("ticksToDecay".into(), json!(t.saturating_sub(world.tick)));
+            }
+            if let Some(info) = &obj.ruin {
+                extra.insert("destroyTime".into(), json!(info.destroy_time));
+                let mut st = json!({
+                    "id": World::id_string(info.structure_id),
+                    "type": info.structure_type,
+                    "hits": 0,
+                    "hitsMax": info.hits_max,
+                });
+                if info.mine || info.enemy {
+                    st["my"] = json!(info.mine);
+                }
+                extra.insert("structure".into(), st);
+            }
             base(extra)
         }
         other => {

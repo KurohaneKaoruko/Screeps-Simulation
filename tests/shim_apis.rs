@@ -768,3 +768,91 @@ fn renew_claim_and_link_transfer_codes_inner() {
 	assert_eq!(t.2["amount"], 100, "缺省 amount = min(500, 800-700)");
 	assert_eq!(entries.iter().filter(|(_, n, _)| n == "transferEnergy" || n == "renewCreep").count(), 1);
 }
+
+// ═════════════════════════ Structure.destroy / Ruin ═════════════════════════
+
+/// destroy(): 看控制器归属 (不是结构归属), 房内有敌方 creep → ERR_BUSY; 摧毁后下一 tick 出现 Ruin
+#[test]
+fn destroy_and_ruin_object() {
+	in_tokio(|| destroy_and_ruin_object_inner());
+}
+
+fn destroy_and_ruin_object_inner() {
+	let scene = |enemy: bool| {
+		format!(
+			r#"{{
+		"name": "ruin", "seed": 1,
+		"rooms": [{{ "name": "W5N8", "terrain": {{ "kind": "flat" }},
+			"controller": {{ "level": 3, "pos": [28, 27] }},
+			"structures": [
+				{{ "type": "spawn", "pos": [25, 25], "energy": 300 }},
+				{{ "type": "tower", "pos": [30, 30], "energy": 250 }},
+				{{ "type": "road", "pos": [10, 10] }}
+			],
+			"creeps": [{{ "name": "Foe", "body": ["move"], "pos": [40, 40], "enemy": {enemy} }}]
+		}}]
+	}}"#
+		)
+	};
+	let bundle = r#"
+		exports.loop = function() {
+			const room = Game.rooms.W5N8;
+			// FIND_RUINS 尚未接入 (find/look 由另一分支改动), 这里直接扫房间对象
+			const ruins = room.__objects.filter(o => o instanceof Ruin);
+			if (ruins.length) {
+				const desc = (r) => ({
+					st: r.structureType, type: r.structure.structureType, sid: r.structure.id,
+					hits: r.structure.hits, hitsMax: r.structure.hitsMax, my: r.structure.my,
+					owned: r.structure instanceof OwnedStructure, isStructure: r.structure instanceof Structure,
+					energy: r.store[RESOURCE_ENERGY], cap: r.store.getCapacity(), ttd: r.ticksToDecay,
+					destroyTime: r.destroyTime, byId: Game.getObjectById(r.id) === r, str: String(r),
+				});
+				const t = ruins.find(r => r.structure.structureType === "tower");
+				const rd = ruins.find(r => r.structure.structureType === "road");
+				console.log(JSON.stringify({ phase: "ruin", tower: desc(t), road: desc(rd), towerId: Memory.towerId }));
+				return;
+			}
+			const tower = room.find(FIND_MY_STRUCTURES, { filter: { structureType: STRUCTURE_TOWER } })[0];
+			const road = room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_ROAD } })[0];
+			Memory.towerId = tower.id;
+			console.log(JSON.stringify({ phase: "destroy", road: road.destroy(), tower: tower.destroy() }));
+		};
+	"#;
+	// 有敌方 creep: ERR_BUSY
+	let mut world = build_world(&Scenario::from_json(&scene(true)).unwrap()).unwrap();
+	let (entries, console) = run_once(bundle, &mut world);
+	let info: serde_json::Value = serde_json::from_str(&console[0]).unwrap();
+	assert_eq!(info["tower"], -4, "{info}");
+	assert_eq!(info["road"], -4, "{info}");
+	assert!(entries.is_empty());
+	// 无敌方: 无主的路也能拆 (官方只看控制器归属)
+	let mut world = build_world(&Scenario::from_json(&scene(false)).unwrap()).unwrap();
+	let mut movement = Movement::default();
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let r1 = bot.run_tick(snapshot_of(&world), "{}".to_string()).unwrap();
+	let info: serde_json::Value = serde_json::from_str(&r1.console[0]).unwrap();
+	assert_eq!((info["road"].as_i64(), info["tower"].as_i64()), (Some(0), Some(0)), "{info}");
+	tick::run_tick(&mut world, &mut movement, &r1.intents);
+	let r2 = bot.run_tick(snapshot_of(&world), r1.memory.clone()).unwrap();
+	let all: serde_json::Value = serde_json::from_str(&r2.console[0]).unwrap();
+	assert_eq!(all["phase"], "ruin", "{all}");
+	let t = &all["tower"];
+	assert_eq!(t["st"], serde_json::Value::Null, "Ruin.structureType 为 undefined: {all}");
+	assert_eq!(t["type"], "tower");
+	assert_eq!(t["sid"], all["towerId"], "structure.id 是原结构 id: {all}");
+	assert_eq!(t["hits"], 0);
+	assert_eq!(t["hitsMax"], 3000);
+	assert_eq!(t["my"], true);
+	assert_eq!(t["owned"], true, "有主结构 → OwnedStructure: {all}");
+	assert_eq!(t["isStructure"], true);
+	assert_eq!(t["energy"], 250, "仓储留在 ruin: {all}");
+	assert_eq!(t["cap"], serde_json::Value::Null, "Ruin store 无容量: {all}");
+	assert_eq!(t["ttd"], 499, "decayTime(0+500) - time(1): {all}");
+	assert_eq!(t["destroyTime"], 0);
+	assert_eq!(t["byId"], true);
+	assert!(t["str"].as_str().unwrap().starts_with("[ruin (tower) #"), "{all}");
+	let r = &all["road"];
+	assert_eq!(r["my"], serde_json::Value::Null, "无主结构的 ruin.structure 无 my: {all}");
+	assert_eq!(r["owned"], false);
+	assert_eq!(r["isStructure"], true);
+}
