@@ -2363,16 +2363,32 @@ var Game = null;
 // Memory: 官方是 globalThis 上的**可配置**属性 (delete global.Memory 不抛错,
 // issue #1 §3.4)。var 创建的属性 configurable:false 且无法重定义, 故用访问器。
 var __memoryValue = null;
-Object.defineProperty(globalThis, "Memory", {
-	configurable: true,
-	enumerable: true,
-	get() {
-		return __memoryValue;
-	},
-	set(v) {
-		__memoryValue = v;
-	},
-});
+/**
+ * 官方 game.js:479-500: Memory 是惰性访问器 —— 第一次读取时 JSON.parse(RawMemory.get()),
+ * 结果挂在 RawMemory._parsed 上, 并把全局 Memory 换成这个值。解析发生在用户代码里, 计入本 tick CPU。
+ * tick 末尾 runtime 序列化的是 RawMemory._parsed (不是全局 Memory) —— memhack 靠这一点把上一 tick 的对象装回去。
+ */
+function __installLazyMemory() {
+	Object.defineProperty(globalThis, "Memory", {
+		configurable: true,
+		enumerable: true,
+		get() {
+			let parsed;
+			try {
+				parsed = JSON.parse(rawMemoryData || "{}");
+			} catch {
+				parsed = null;
+			}
+			RawMemory._parsed = parsed;
+			__memoryValue = parsed;
+			Object.defineProperty(globalThis, "Memory", { configurable: true, enumerable: true, writable: true, value: parsed });
+			return parsed;
+		},
+		set(v) {
+			Object.defineProperty(globalThis, "Memory", { configurable: true, enumerable: true, writable: true, value: v });
+		},
+	});
+}
 
 function buildGame() {
 	byId = new Map();
@@ -2616,12 +2632,9 @@ const RawMemory = {
 		if (typeof value !== "string") throw new Error("Raw memory value is not a string");
 		if (value.length > RAW_MEMORY_MAX_LENGTH) throw new Error("Raw memory length exceeded 2 MB limit");
 		rawMemoryData = value;
-		// 官方 Memory 是 rawMemory 的惰性解析视图: set 之后立即反映新内容
-		try {
-			globalThis.Memory = value ? JSON.parse(value) : {};
-		} catch {
-			globalThis.Memory = {};
-		}
+		// 原始串被替换: 丢弃已解析的对象, 下一次读 Memory 重新解析新内容; 不再读的话保存这段原始串
+		delete RawMemory._parsed;
+		__installLazyMemory();
 	},
 	segments: {},
 	foreignSegment: null,
@@ -2648,6 +2661,10 @@ const RawMemory = {
 		__activeForeignSegment = { username, id: id === undefined ? undefined : __segmentId(id) };
 	},
 };
+// bundle 加载期 (全局代码) 也可能读 Memory: 先装一次惰性访问器
+__installLazyMemory();
+// bundle 加载期 (全局代码) 也可能读 Memory: 先装一次惰性访问器
+__installLazyMemory();
 const InterShardMemory = {
 	getLocal() { return ""; },
 	setLocal() {},
@@ -2772,19 +2789,9 @@ function __runTick() {
 	__controllersClaimedInTick = 0;
 	__consoleLines = [];
 	try {
-		// bot 上一 tick 可能 delete global.Memory: 每 tick 确保访问器存在 (官方由 runtime 重建)
-		if (!Object.getOwnPropertyDescriptor(globalThis, "Memory")) {
-			Object.defineProperty(globalThis, "Memory", {
-				configurable: true,
-				enumerable: true,
-				get() {
-					return __memoryValue;
-				},
-				set(v) {
-					__memoryValue = v;
-				},
-			});
-		}
+		// 每 tick 重建惰性 Memory 访问器 (官方 runtime 每 tick 重新 defineProperty), 清掉上一 tick 的 _parsed
+		delete RawMemory._parsed;
+		__memoryValue = null;
 		// 运行时数据先取 (确定性 CPU 要在 buildGame → makeCpu 取起点之前生效)
 		let rt = {};
 		try {
@@ -2798,11 +2805,7 @@ function __runTick() {
 		__W = JSON.parse(__ops.op_sim_get_snapshot());
 		buildGame();
 		rawMemoryData = __ops.op_sim_get_memory();
-		try {
-			globalThis.Memory = rawMemoryData ? JSON.parse(rawMemoryData) : {};
-		} catch {
-			globalThis.Memory = {};
-		}
+		__installLazyMemory();
 		// 内存段: 宿主注入本 tick 激活的段 (官方 driver 的 data.memorySegments)
 		__nextActiveSegments = null;
 		__publicSegments = null;
@@ -2837,8 +2840,10 @@ function __runTick() {
 	}
 	let memoryOut = "";
 	try {
-		// 官方: 读 rawMemory._parsed (delete global.Memory 只删属性, 底层数据保留并照常保存)
-		memoryOut = JSON.stringify(__memoryValue || {});
+		// 官方: 序列化 RawMemory._parsed (bot 可以把它换成自己的对象, 即 memhack);
+		// 本 tick 没碰过 Memory 时保存原始串 (含 RawMemory.set 写入的)
+		const parsed = RawMemory._parsed;
+		memoryOut = parsed !== undefined && parsed !== null ? JSON.stringify(parsed) : rawMemoryData || "{}";
 	} catch {
 		memoryOut = "{}";
 	}
