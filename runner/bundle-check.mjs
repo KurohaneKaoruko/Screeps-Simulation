@@ -77,6 +77,22 @@ const SIM_COVERAGE = [
 	[/\bobserveRoom\s*\(/, 'observer.observeRoom 为 no-op', 'warn'],
 ]
 
+/// bundle 里声明过的标识符 (var/let/const/function/class, 含 `var A = 1, B = 2` 与解构)。
+export function collectDeclaredNames(source) {
+	const names = new Set()
+	for (const m of source.matchAll(/\b(?:function\*?|class)\s+([A-Za-z_$][\w$]*)/g)) names.add(m[1])
+	// var/let/const 后到语句结束 (; 或换行) 的声明列表: 取每个 `NAME =` / 解构里的 NAME
+	for (const m of source.matchAll(/\b(?:var|let|const)\s+([^;\n]*)/g)) {
+		const decl = m[1]
+		const head = decl.match(/^([A-Za-z_$][\w$]*)/)
+		if (head) names.add(head[1])
+		for (const d of decl.matchAll(/,\s*([A-Za-z_$][\w$]*)\s*=/g)) names.add(d[1])
+		const destr = decl.match(/^[[{]([^=]*)[\]}]\s*=/)
+		if (destr) for (const d of destr[1].matchAll(/([A-Za-z_$][\w$]*)\s*(?=[,}\]]|$)/g)) names.add(d[1])
+	}
+	return names
+}
+
 // 资源字符串 (transfer/withdraw 第一参数若为资源 → 顺序颠倒了)
 const RESOURCE_LITERAL = /^(energy|[KUZLXOH](?:[KUZLXOH]{1,2})?|power|ops|silicon|metal|biomass|mist|utrium|lemergium|zynthium|keanium|oxidant|hydrogen|ghodium)$/
 
@@ -117,12 +133,19 @@ export function checkBundle(source, opts = {}) {
 	})
 
 	// ── 官方常量拼写 (命中前缀但不在常量表) ──
+	// bot 自己声明的同前缀常量 (const CREEP_LIFE = 1500 / function POWER_X) 不是官方常量, 不报;
+	// 属性访问 (cfg.TOWER_X)、对象键 ({ TOWER_X: 1 })、字符串里的 ('TOWER_X') 也不是全局引用。
+	const declared = collectDeclaredNames(source)
 	const identRe = /\b[A-Z][A-Z0-9_]{2,}\b/g
 	lines.forEach((line, i) => {
 		if (isComment(line)) return
 		for (const m of line.matchAll(identRe)) {
 			const tok = m[0]
-			if (SCREEPS_CONSTANTS.has(tok)) continue
+			if (SCREEPS_CONSTANTS.has(tok) || declared.has(tok)) continue
+			const before = line[m.index - 1]
+			const after = line.slice(m.index + tok.length)
+			if (before === '.' || before === "'" || before === '"' || before === '`') continue
+			if (/^\s*:(?!:)/.test(after) && !/\?[^:]*$/.test(line.slice(0, m.index))) continue
 			if (CONSTANT_PREFIXES.some((p) => tok === p || tok.startsWith(p))) {
 				errors.push({ line: i + 1, message: `常量 ${tok} 不在官方常量表中 —— 疑似拼写错误 (运行时为 undefined, 比较永远失败)` })
 			}

@@ -138,6 +138,15 @@ console.log('bundle 静态检查 (bundle-check.mjs)')
 	r = checkBundle(`exports.loop = function () { WebAssembly.instantiate(bytes); };`)
 	expect(r.warnings.some((w) => w.message.includes('异步')), 'WebAssembly.instantiate 异步警告')
 
+	// bot 自己声明的同前缀常量 / 属性访问 / 对象键 / 字符串 不是官方常量引用
+	r = checkBundle(`var CREEP_LIFE = 1500, POWER_BATCH = 2;
+const { TOWER_URGENT } = cfg;
+function LAB_HELPER() {}
+exports.loop = function () { x = CREEP_LIFE + POWER_BATCH + TOWER_URGENT + o.SPAWN_Q + LAB_HELPER(); y = { ENERGY_Z: 1 }; z = 'BOOST_Q'; };`)
+	expect(r.errors.length === 0, `bot 自定义常量不误报 (实际: ${r.errors.map((e) => e.message)})`)
+	r = checkBundle(`var CREEP_LIFE = 1500;\nexports.loop = function () { w = c ? FIND_SOURCEZ : 0; };`)
+	expect(r.errors.some((e) => e.message.includes('FIND_SOURCEZ')), '三元表达式里的拼写错误仍报')
+
 	// 注释里的命中不应报错
 	r = checkBundle('// TODO: process.env 优化\nexports.loop = function () {};')
 	expect(r.errors.length === 0, '注释中的命中不误报')

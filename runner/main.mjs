@@ -16,7 +16,7 @@ const SKIP_DIRS = new Set(['node_modules', 'target', '.git', '.cargo', 'dist', '
 // ── 参数解析 ──────────────────────────────────────────────
 
 export function parseTestArgs(args) {
-	const opts = { patterns: [], bundle: undefined, ticks: undefined, verbose: false, list: false, strict: false, jobs: 1 }
+	const opts = { patterns: [], bundle: undefined, ticks: undefined, verbose: false, list: false, strict: false, jobs: 1, bundleCheck: true }
 	for (let i = 0; i < args.length; i++) {
 		const a = args[i]
 		switch (a) {
@@ -38,6 +38,9 @@ export function parseTestArgs(args) {
 				break
 			case '--strict':
 				opts.strict = true
+				break
+			case '--no-bundle-check':
+				opts.bundleCheck = false
 				break
 			case '--jobs':
 			case '-j':
@@ -192,6 +195,7 @@ export function readProjectConfig(cwd) {
 		return {
 			bundle: typeof cfg.bundle === 'string' ? resolve(cwd, cfg.bundle) : undefined,
 			include: Array.isArray(cfg.include) ? cfg.include.filter((p) => typeof p === 'string') : undefined,
+			bundleCheck: typeof cfg.bundleCheck === 'boolean' ? cfg.bundleCheck : undefined,
 		}
 	} catch {
 		return {}
@@ -354,11 +358,16 @@ export async function runTests(opts) {
 
 	const bin = ensureBinary()
 	// bundle 静态预检: 每个 bundle 检查一次, 警告打印一次, 错误挂到使用它的用例上
+	// --no-bundle-check 或 package.json "screeps-sim".bundleCheck = false: 预检错误降级为警告, 不再判用例失败
+	// (误报时的逃生口; 真炸的调用照样会在运行时以 noErrors 断言暴露)。
+	const bundleCheck = opts.bundleCheck !== false && cfg.bundleCheck !== false
 	const { perBundle, perCase } = preflightBundles(allCases, { ...opts, bundle: bundleOpt }, cfg)
+	if (!bundleCheck) perCase.clear()
 	for (const [bundle, diag] of perBundle) {
-		if (!diag?.warnings.length) continue
-		console.log(c.yellow(`⚠ bundle 预检 ${relative(cwd, bundle) || bundle}:`))
-		for (const w of diag.warnings.slice(0, 10)) console.log(c.dim(`    L${w.line}  ${w.message}`))
+		const shown = bundleCheck ? diag?.warnings ?? [] : [...(diag?.errors ?? []), ...(diag?.warnings ?? [])]
+		if (!shown.length) continue
+		console.log(c.yellow(`⚠ bundle 预检 ${relative(cwd, bundle) || bundle}${bundleCheck ? '' : ' (已关闭, 仅提示)'}:`))
+		for (const w of shown.slice(0, 10)) console.log(c.dim(`    L${w.line}  ${w.message}`))
 	}
 	const totalStart = performance.now()
 	let passed = 0
