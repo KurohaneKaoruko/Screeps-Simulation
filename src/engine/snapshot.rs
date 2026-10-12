@@ -142,7 +142,51 @@ pub fn build_snapshot(world: &World, opts: &SnapshotOptions) -> String {
         }
         out.push_str("]}");
     }
-    out.push_str("}}");
+    out.push('}');
+
+    // constructionSites: 无视野房间里自己的工地 (官方 userObjects; 工地不提供视野,
+    // 但仍在 Game.constructionSites / getObjectById 中, .room 为 undefined)
+    out.push_str(",\"constructionSites\":[");
+    let mut first_site = true;
+    for (name, room) in &world.rooms {
+        if opts.always_visible || room.visible() {
+            continue;
+        }
+        for obj in room.objects.values() {
+            if obj.obj_type != "constructionSite" || !obj.mine {
+                continue;
+            }
+            if !first_site {
+                out.push(',');
+            }
+            first_site = false;
+            let mut tmp = String::new();
+            write_object(&mut tmp, obj, world);
+            out.push_str("{\"room\":");
+            put_str(&mut out, name);
+            out.push(',');
+            out.push_str(&tmp[1..]);
+        }
+    }
+    out.push(']');
+
+    // flags: 全部旗 (与视野无关)
+    out.push_str(",\"flags\":[");
+    for (i, f) in world.flags.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"name\":");
+        put_str(&mut out, &f.name);
+        out.push_str(",\"room\":");
+        put_str(&mut out, &f.room);
+        let _ = write!(
+            out,
+            ",\"x\":{},\"y\":{},\"color\":{},\"secondaryColor\":{}}}",
+            f.x, f.y, f.color, f.secondary_color
+        );
+    }
+    out.push_str("]}");
     out
 }
 
@@ -263,6 +307,9 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             out.push_str(",\"hitsMax\":");
             let _ = write!(out, "{}", obj.hits_max);
             if obj.obj_type == "rampart" {
+                // rampart 是 OwnedStructure: 归属来自引擎 (此前 shim 一律当作自己的)
+                out.push_str(",\"my\":");
+                let _ = write!(out, "{}", obj.mine);
                 out.push_str(",\"isPublic\":false");
                 if let Some(t) = obj.next_decay_time {
                     out.push_str(",\"ticksToDecay\":");
@@ -340,6 +387,10 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             let _ = write!(out, "{}", obj.progress_total);
             out.push_str(",\"my\":");
             let _ = write!(out, "{}", obj.mine);
+            if let Some(n) = &obj.name {
+                out.push_str(",\"name\":");
+                put_str(out, n);
+            }
         }
         "energy" => {
             out.push_str(",\"energy\":");
@@ -441,8 +492,38 @@ pub fn build_snapshot_value(world: &World, opts: &SnapshotOptions) -> Value {
         );
     }
 
+    let mut sites = Vec::new();
+    for (name, room) in &world.rooms {
+        if opts.always_visible || room.visible() {
+            continue;
+        }
+        for obj in room.objects.values() {
+            if obj.obj_type == "constructionSite" && obj.mine {
+                let mut v = object_json(obj, world);
+                v.as_object_mut().unwrap().insert("room".into(), json!(name));
+                sites.push(v);
+            }
+        }
+    }
+    let flags: Vec<Value> = world
+        .flags
+        .iter()
+        .map(|f| {
+            json!({
+                "name": f.name,
+                "room": f.room,
+                "x": f.x,
+                "y": f.y,
+                "color": f.color,
+                "secondaryColor": f.secondary_color,
+            })
+        })
+        .collect();
+
     let (gcl_progress, gcl_total) = world.gcl_level_progress();
     json!({
+        "constructionSites": sites,
+        "flags": flags,
         "time": world.tick,
         "cpu": {
             "limit": opts.cpu.limit,
@@ -552,6 +633,7 @@ fn object_json(obj: &Obj, world: &World) -> Value {
             extra.insert("hits".into(), json!(obj.hits));
             extra.insert("hitsMax".into(), json!(obj.hits_max));
             if obj.obj_type == "rampart" {
+                extra.insert("my".into(), json!(obj.mine));
                 extra.insert("isPublic".into(), json!(false));
                 if let Some(t) = obj.next_decay_time {
                     extra.insert("ticksToDecay".into(), json!(t.saturating_sub(world.tick)));
@@ -628,6 +710,9 @@ fn object_json(obj: &Obj, world: &World) -> Value {
             extra.insert("progress".into(), json!(obj.progress));
             extra.insert("progressTotal".into(), json!(obj.progress_total));
             extra.insert("my".into(), json!(obj.mine));
+            if let Some(n) = &obj.name {
+                extra.insert("name".into(), json!(n));
+            }
             base(extra)
         }
         "energy" => {

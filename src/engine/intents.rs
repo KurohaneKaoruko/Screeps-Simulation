@@ -184,10 +184,75 @@ pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
         i = j;
     }
 
+    // 官方 processor/intents/room/intents.js 的处理顺序: removeFlag → createFlag →
+    // createConstructionSite → removeConstructionSite → destroyStructure (同类保持提交序)
+    room_intents.sort_by_key(|(_, name, _)| room_intent_rank(name));
     for (room_name, name, data) in room_intents {
         apply_room_intent(world, &room_name, &name, &data, &mut effects);
     }
     effects
+}
+
+fn room_intent_rank(name: &str) -> usize {
+    match name {
+        "removeFlag" => 0,
+        "createFlag" => 1,
+        "createConstructionSite" => 2,
+        "removeConstructionSite" => 3,
+        "destroyStructure" => 4,
+        _ => 5,
+    }
+}
+
+/// 合法房名 (W|E)数字(N|S)数字
+fn valid_room_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    if b.len() < 4 || !(b[0] == b'W' || b[0] == b'E') {
+        return false;
+    }
+    let mut i = 1;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 1 || i >= b.len() || !(b[i] == b'N' || b[i] == b'S') {
+        return false;
+    }
+    let rest = &b[i + 1..];
+    !rest.is_empty() && rest.iter().all(u8::is_ascii_digit)
+}
+
+/// 官方 room/remove-flag.js / create-flag.js: 旗不依赖房间对象, 可放在无视野/场景外房间
+fn apply_flag_intent(world: &mut World, room_name: &str, name: &str, data: &Value) {
+    let Some(flag_name) = data.get("name").and_then(Value::as_str) else { return };
+    match name {
+        "removeFlag" => {
+            world.flags.retain(|f| !(f.name == flag_name && f.room == room_name));
+        }
+        "createFlag" => {
+            if world.flags.iter().any(|f| f.name == flag_name) {
+                return;
+            }
+            let color = data.get("color").and_then(Value::as_u64).unwrap_or(0);
+            let secondary = data.get("secondaryColor").and_then(Value::as_u64).unwrap_or(0);
+            if !(1..=10).contains(&color) || !(1..=10).contains(&secondary) {
+                return;
+            }
+            let x = data.get("x").and_then(Value::as_i64).unwrap_or(-1);
+            let y = data.get("y").and_then(Value::as_i64).unwrap_or(-1);
+            if !(0..=49).contains(&x) || !(0..=49).contains(&y) || !valid_room_name(room_name) {
+                return;
+            }
+            world.flags.push(crate::engine::world::Flag {
+                name: flag_name.to_string(),
+                room: room_name.to_string(),
+                x: x as u8,
+                y: y as u8,
+                color: color as u8,
+                secondary_color: secondary as u8,
+            });
+        }
+        _ => {}
+    }
 }
 
 fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)], effects: &mut TickEffects) {
@@ -1227,47 +1292,33 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
 }
 
 fn apply_room_intent(world: &mut World, room_name: &str, name: &str, data: &Value, _effects: &mut TickEffects) {
+    if name == "removeFlag" || name == "createFlag" {
+        apply_flag_intent(world, room_name, name, data);
+        return;
+    }
     let Some(room) = world.rooms.get_mut(room_name) else { return };
     match name {
+        // 官方 processor/intents/room/create-construction-site.js
         "createConstructionSite" => {
-            let x = data.get("x").and_then(Value::as_u64).unwrap_or(99) as u8;
-            let y = data.get("y").and_then(Value::as_u64).unwrap_or(99) as u8;
+            let x = data.get("x").and_then(Value::as_i64).unwrap_or(-1);
+            let y = data.get("y").and_then(Value::as_i64).unwrap_or(-1);
+            if x <= 0 || x >= 49 || y <= 0 || y >= 49 {
+                return;
+            }
+            let (x, y) = (x as u8, y as u8);
             let st = data.get("structureType").and_then(Value::as_str).unwrap_or("");
-            if x == 0 || x >= 49 || y == 0 || y >= 49 {
-                return;
-            }
             let Some(base_cost) = constants::construction_cost(st) else { return };
-            // RCL 数量上限 (建成的 + 工地)
-            let rcl = room.rcl();
-            let limit = constants::controller_structure_limit(st, rcl) as usize;
-            if st != "road" && room.count_of_type(st) >= limit {
-                return;
-            }
-            // 地形与占位检查 (官方只豁免 road/extractor; 容器不能建在墙上)
-            if st != "road" && st != "extractor" && room.terrain.is_wall(x as usize, y as usize) {
-                return;
-            }
-            if st != "container" && room.site_blocked(st, x, y) {
-                return;
-            }
-            // 边界规则: 非路/容器的结构在 1/48 行列时, 外圈对应 3 格需为墙
-            if st != "road" && st != "container" && (x == 1 || x == 48 || y == 1 || y == 48) {
-                let tiles: Vec<(i32, i32)> = if x == 1 {
-                    vec![(0, y as i32 - 1), (0, y as i32), (0, y as i32 + 1)]
-                } else if x == 48 {
-                    vec![(49, y as i32 - 1), (49, y as i32), (49, y as i32 + 1)]
-                } else if y == 1 {
-                    vec![(x as i32 - 1, 0), (x as i32, 0), (x as i32 + 1, 0)]
-                } else {
-                    vec![(x as i32 - 1, 49), (x as i32, 49), (x as i32 + 1, 49)]
-                };
-                if tiles.iter().any(|&(tx, ty)| {
-                    !(0..50).contains(&tx)
-                        || !(0..50).contains(&ty)
-                        || !room.terrain.is_wall(tx as usize, ty as usize)
-                }) {
+            // 他人的控制器 (单玩家: 非我方且有等级, 或场景标记的敌方) → 拒绝
+            if let Some(c) = room.controller() {
+                if (!c.mine && c.level > 0) || c.enemy {
                     return;
                 }
+            }
+            if !room.controller_availability(st) {
+                return;
+            }
+            if !room.construction_site_allowed(st, x, y) {
+                return;
             }
             let mut progress_total = base_cost;
             if st == "road" {
@@ -1279,7 +1330,11 @@ fn apply_room_intent(world: &mut World, room_name: &str, name: &str, data: &Valu
                 }
             }
             let id = alloc_id(&mut world.next_id);
-            let site = objects::construction_site(id, st, x, y, progress_total);
+            let mut site = objects::construction_site(id, st, x, y, progress_total);
+            // 官方: spawn 工地记录名字, 建成时成为 spawn 名
+            if st == "spawn" {
+                site.name = data.get("name").and_then(Value::as_str).map(str::to_string);
+            }
             room.objects.insert(id, site);
         }
         "removeConstructionSite" | "destroyStructure" => {
@@ -1309,9 +1364,6 @@ fn apply_room_intent(world: &mut World, room_name: &str, name: &str, data: &Valu
                     );
                 }
             }
-        }
-        "createFlag" => {
-            // 旗标仅做最小支持: 不入 world (bot 未使用)
         }
         _ => {}
     }
@@ -1728,10 +1780,28 @@ pub fn create_dropped(world: &mut World, room_name: &str, x: u8, y: u8, resource
 
 /// 工地完成 → 建成结构 (engine build.js 的结构初始化表)
 fn complete_site(world: &mut World, room_name: &str, site_id: u64) {
-    let (st, x, y) = {
+    let (st, x, y, site_name) = {
         let room = world.rooms.get_mut(room_name).unwrap();
         let site = &room.objects[&site_id];
-        (site.structure_type.clone().unwrap_or_default(), site.x, site.y)
+        (site.structure_type.clone().unwrap_or_default(), site.x, site.y, site.name.clone())
+    };
+    // spawn 名: 取工地上记录的名字 (官方 build.js:121); 缺失时 (旧快照/场景直接放置的工地) 自动命名
+    let spawn_name = if st == "spawn" {
+        Some(site_name.unwrap_or_else(|| {
+            let taken: Vec<String> = world
+                .rooms
+                .values()
+                .flat_map(|r| r.objects.values())
+                .filter(|o| o.obj_type == "spawn" || o.obj_type == "constructionSite")
+                .filter_map(|o| o.name.clone())
+                .collect();
+            (1..)
+                .map(|n| format!("Spawn{n}"))
+                .find(|n| !taken.contains(n))
+                .unwrap()
+        }))
+    } else {
+        None
     };
     let room = world.rooms.get_mut(room_name).unwrap();
     room.objects.remove(&site_id);
@@ -1741,6 +1811,7 @@ fn complete_site(world: &mut World, room_name: &str, site_id: u64) {
     match st.as_str() {
         "spawn" => {
             obj.energy_capacity = constants::SPAWN_ENERGY_CAPACITY;
+            obj.name = spawn_name;
         }
         "extension" => {
             obj.energy_capacity = constants::extension_capacity(room.rcl());

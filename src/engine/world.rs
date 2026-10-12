@@ -116,51 +116,94 @@ impl Room {
         }
     }
 
-    /// 我方单位/自有结构/工地在场 → 可见。
-    /// 官方可见性来自带 `user` 的对象: 只有 creep、controller、OwnedStructure、自己的工地算数;
-    /// 路 / 容器 / 墙 / 墓碑没有 user, 不能单独让房间可见。
+    /// 我方单位/自有结构在场 → 可见。
+    /// 官方可见性来自带 `user` 的 creep、controller、OwnedStructure (driver 按这些对象下发房间);
+    /// 工地不提供视野 (它只作为 userObjects 下发), 路 / 容器 / 墙 / 墓碑没有 user, 也不能让房间可见。
     pub fn visible(&self) -> bool {
         self.objects.values().any(|o| {
             if !o.mine {
                 return false;
             }
             match o.obj_type.as_str() {
-                "creep" | "controller" | "constructionSite" => true,
+                "creep" | "controller" => true,
                 t => constants::is_owned_structure(t),
             }
         })
     }
 
-    /// 建成结构 + 工地按 structureType 计数 (checkControllerAvailability)
-    pub fn count_of_type(&self, structure_type: &str) -> usize {
-        self.objects
+    /// 官方 utils.checkControllerAvailability: 只有自己的控制器按等级计, 否则 RCL 0;
+    /// 数量统计房间内全部同类建筑 + 同类工地 (不分归属, 含本 tick 已建的工地)。
+    pub fn controller_availability(&self, structure_type: &str) -> bool {
+        let rcl = self
+            .controller()
+            .filter(|c| c.mine && c.level > 0)
+            .map(|c| c.level)
+            .unwrap_or(0);
+        let count = self
+            .objects
             .values()
-            .filter(|o| match o.obj_type.as_str() {
-                "constructionSite" => {
-                    o.structure_type.as_deref() == Some(structure_type)
-                }
-                other => other == structure_type,
+            .filter(|o| {
+                o.obj_type == structure_type
+                    || (o.obj_type == "constructionSite" && o.structure_type.as_deref() == Some(structure_type))
             })
-            .count()
+            .count();
+        count < constants::controller_structure_limit(structure_type, rcl) as usize
     }
 
-    /// 指定格是否有同类型结构 / 工地 / 阻挡结构 (checkConstructionSite 的对象部分)
-    pub fn site_blocked(&self, structure_type: &str, x: u8, y: u8) -> bool {
-        for o in self.objects.values() {
-            if o.x != x || o.y != y {
-                continue;
-            }
-            match o.obj_type.as_str() {
-                "constructionSite" => return true,
-                "rampart" | "road" => {}
-                t if constants::construction_cost(t).is_some() && structure_type != "rampart" && structure_type != "road" => {
-                    return true;
-                }
-                t if t == structure_type => return true,
-                _ => {}
+    /// 官方 utils.checkConstructionSite (对象分支 + 地形分支, 两者都要通过):
+    /// - 同格已有同类型对象 / 任意工地 → 拒绝 (路上不能再建路, rampart 上不能再建 rampart)
+    /// - extractor 必须建在没有 extractor 的矿上
+    /// - 非路非 rampart 的建筑不能与任何可建造结构 (路/rampart 除外) 同格 (容器同样受限)
+    /// - x/y 为 0 或 49 拒绝; 1/48 行列的非路/容器建筑要求外侧相邻 3 格都是墙
+    /// - 墙上只能建路和 extractor
+    pub fn construction_site_allowed(&self, structure_type: &str, x: u8, y: u8) -> bool {
+        let at: Vec<&Obj> = self.objects.values().filter(|o| o.x == x && o.y == y).collect();
+        if at.iter().any(|o| o.obj_type == structure_type) {
+            return false;
+        }
+        if at.iter().any(|o| o.obj_type == "constructionSite") {
+            return false;
+        }
+        let objects_ok = if structure_type == "extractor" {
+            at.iter().any(|o| o.obj_type == "mineral") && !at.iter().any(|o| o.obj_type == "extractor")
+        } else if structure_type != "rampart"
+            && structure_type != "road"
+            && at.iter().any(|o| {
+                o.obj_type != "rampart" && o.obj_type != "road" && constants::construction_cost(&o.obj_type).is_some()
+            })
+        {
+            false
+        } else {
+            !(x == 0 || y == 0 || x >= 49 || y >= 49)
+        };
+        if !objects_ok {
+            return false;
+        }
+        // 地形分支
+        if structure_type != "road" && structure_type != "container" && (x == 1 || x == 48 || y == 1 || y == 48) {
+            let (x, y) = (x as i32, y as i32);
+            let tiles: [(i32, i32); 3] = if x == 1 {
+                [(0, y - 1), (0, y), (0, y + 1)]
+            } else if x == 48 {
+                [(49, y - 1), (49, y), (49, y + 1)]
+            } else if y == 1 {
+                [(x - 1, 0), (x, 0), (x + 1, 0)]
+            } else {
+                [(x - 1, 49), (x, 49), (x + 1, 49)]
+            };
+            if tiles.iter().any(|&(tx, ty)| {
+                !(0..50).contains(&tx) || !(0..50).contains(&ty) || !self.terrain.is_wall(tx as usize, ty as usize)
+            }) {
+                return false;
             }
         }
-        false
+        if structure_type == "extractor" {
+            return true;
+        }
+        if structure_type != "road" && self.terrain.is_wall(x as usize, y as usize) {
+            return false;
+        }
+        true
     }
 
     /// extension 容量按当前 RCL 刷新 (RCL 变化时生效)
@@ -174,9 +217,23 @@ impl Room {
     }
 }
 
+/// 旗 (官方 rooms.flags 的 `name~color~secondaryColor~x~y` 记录)。旗不是房间对象:
+/// 不提供视野, 无视野房间里的旗照样出现在 Game.flags。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Flag {
+    pub name: String,
+    pub room: String,
+    pub x: u8,
+    pub y: u8,
+    pub color: u8,
+    pub secondary_color: u8,
+}
+
 pub struct World {
     pub tick: u64,
     pub rooms: BTreeMap<String, Room>,
+    /// 全部旗 (按创建顺序; 名字全局唯一)
+    pub flags: Vec<Flag>,
     pub next_id: u64,
     /// GCL 累计升级量 (等级由阈值推导)
     pub gcl_progress: u64,
@@ -197,6 +254,7 @@ impl World {
         World {
             tick: 0,
             rooms: BTreeMap::new(),
+            flags: Vec::new(),
             next_id: 1,
             gcl_progress: 0,
             creeps_produced: 0,
@@ -272,6 +330,12 @@ impl World {
         for (level, t) in &self.rcl_timeline {
             mix_u64(&mut h, *level as u64);
             mix_u64(&mut h, *t);
+        }
+        // 旗只在存在时参与哈希 (不改变无旗场景的黄金基线)
+        for f in &self.flags {
+            mix_str(&mut h, &f.name);
+            mix_str(&mut h, &f.room);
+            mix(&mut h, &[f.x, f.y, f.color, f.secondary_color]);
         }
         for (name, room) in &self.rooms {
             mix_str(&mut h, name);
