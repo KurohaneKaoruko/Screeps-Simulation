@@ -640,3 +640,751 @@ fn terrain_read_after_first_tick_is_correct() {
 		assert_eq!(v["plain"], 0, "{v}");
 	});
 }
+
+// ═════════════════════════ 官方 API 保真回归 (审计条目 1-17) ═════════════════════════
+
+/// 保真测试场景: W5N8 (RCL3, 有视野) + W5N7 (南侧, 无视野) + W6N8 (西侧, 中立控制器, 靠侦察兵可见)
+const FIDELITY_ROOMS: &str = r#"{
+	"name": "fidelity",
+	"seed": 1,
+	"rooms": [
+		{ "name": "W5N8", "terrain": { "kind": "flat" },
+		  "sources": { "positions": [[18, 22]] },
+		  "mineral": { "pos": [40, 40], "mineral_type": "H" },
+		  "controller": { "level": 3, "pos": [28, 27] },
+		  "structures": [
+			{ "type": "spawn", "pos": [25, 25], "energy": 300 },
+			{ "type": "road", "pos": [10, 10] },
+			{ "type": "rampart", "pos": [12, 10] },
+			{ "type": "rampart", "pos": [14, 10], "enemy": true }
+		  ],
+		  "creeps": [
+			{ "name": "A", "body": ["move", "work", "carry"], "pos": [20, 20] },
+			{ "name": "B", "body": ["move"], "pos": [22, 20] },
+			{ "name": "Foe", "body": ["move"], "pos": [30, 20], "enemy": true }
+		  ] },
+		{ "name": "W5N7", "terrain": { "kind": "flat" } },
+		{ "name": "W6N8", "terrain": { "kind": "flat" },
+		  "controller": { "level": 0, "pos": [25, 25], "mine": false },
+		  "creeps": [{ "name": "Scout", "body": ["move"], "pos": [10, 10] }] }
+	]
+}"#;
+
+fn fidelity_world() -> screeps_sim::engine::world::World {
+	build_world(&Scenario::from_json(FIDELITY_ROOMS).unwrap()).unwrap()
+}
+
+fn snapshot_of(world: &screeps_sim::engine::world::World) -> String {
+	build_snapshot(
+		world,
+		&SnapshotOptions {
+			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
+			always_visible: false,
+			include_terrain: true,
+		},
+	)
+}
+
+/// 跑一 tick bundle, 返回 (第一行 console 解析的 JSON, 意图, 全部 console, errors)
+fn run_json(
+	bundle: &str,
+	world: &screeps_sim::engine::world::World,
+) -> (serde_json::Value, Vec<(String, String, serde_json::Value)>, Vec<String>) {
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let result = bot.run_tick(snapshot_of(world), "{}".to_string()).unwrap();
+	assert!(result.errors.is_empty(), "bundle 不应抛错: {:?}", result.errors);
+	let info: serde_json::Value =
+		serde_json::from_str(result.console.first().map(String::as_str).unwrap_or("{}")).unwrap();
+	(info, result.intents.entries, result.console)
+}
+
+/// 多 tick: 同一 isolate 跑 bundle → 意图交引擎结算 → 下一 tick 快照, 返回每 tick 第一行 console JSON
+fn run_ticks(bundle: &str, world: &mut screeps_sim::engine::world::World, n: usize) -> Vec<serde_json::Value> {
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let mut memory = String::from("{}");
+	let mut movement = Movement::default();
+	let mut out = Vec::new();
+	for _ in 0..n {
+		let result = bot.run_tick(snapshot_of(world), memory.clone()).unwrap();
+		assert!(result.errors.is_empty(), "bundle 不应抛错: {:?}", result.errors);
+		memory = result.memory.clone();
+		out.push(
+			serde_json::from_str::<serde_json::Value>(result.console.first().map(String::as_str).unwrap_or("{}"))
+				.unwrap(),
+		);
+		tick::run_tick(world, &mut movement, &result.intents);
+	}
+	out
+}
+
+/// 审计 #1/#14/#15: fetchXYArguments 重载、RoomPosition 构造校验、无视野时官方抛错
+#[test]
+fn roompos_fetch_xy_and_no_vision_semantics() {
+	in_tokio(|| {
+		let world = fidelity_world();
+		let bundle = r#"
+			exports.loop = function() {
+				const a = Game.creeps.A, b = Game.creeps.B, r = a.room;
+				const out = {};
+				out.ccsPos = r.createConstructionSite(new RoomPosition(21, 21, "W5N8"), STRUCTURE_ROAD);
+				out.ccsObj = r.createConstructionSite(b, STRUCTURE_ROAD);
+				out.ccsPlain = r.createConstructionSite({ x: 23, y: 23 }, STRUCTURE_ROAD);
+				out.nearXY = a.pos.isNearTo(21, 21);
+				out.nearXYFar = a.pos.isNearTo(22, 22);
+				out.nearObj = a.pos.isNearTo(b);
+				out.inRangeXY = a.pos.inRangeTo(22, 20, 2);
+				out.inRangeObj = a.pos.inRangeTo(b, 1);
+				out.rangeObj = a.pos.getRangeTo(b);
+				out.rangeXY = a.pos.getRangeTo(22, 23);
+				out.rangeOtherRoom = a.pos.getRangeTo(new RoomPosition(20, 20, "W5N7"));
+				out.lookObj = r.lookForAt(LOOK_CREEPS, b).length;
+				out.lookAtObj = r.lookAt(b).map((i) => i.type);
+				const err = (f) => { try { f(); return "no-throw"; } catch (e) { return e.message; } };
+				out.ctorRange = err(() => new RoomPosition(50, 1, "W5N8"));
+				out.ctorNaN = err(() => new RoomPosition(NaN, 1, "W5N8"));
+				out.ctorRoom = err(() => new RoomPosition(1, 1, "nowhere"));
+				const c = new RoomPosition("7", 8.9, "W5N8");
+				out.coerced = [c.x, c.y, typeof c.x];
+				const far = new RoomPosition(10, 10, "W5N7");
+				out.noVision = {
+					findInRange: err(() => far.findInRange(FIND_CREEPS, 3)),
+					findClosestByRange: err(() => far.findClosestByRange(FIND_CREEPS)),
+					findClosestByPath: err(() => far.findClosestByPath(FIND_CREEPS)),
+					findPathTo: err(() => far.findPathTo(12, 12)),
+					look: err(() => far.look()),
+					lookFor: err(() => far.lookFor(LOOK_CREEPS)),
+					createFlag: err(() => far.createFlag("X")),
+					createConstructionSite: err(() => far.createConstructionSite(STRUCTURE_ROAD)),
+				};
+				out.terrainNoVision = far.lookFor(LOOK_TERRAIN);
+				console.log(JSON.stringify(out));
+			};
+		"#;
+		let (info, entries, _) = run_json(bundle, &world);
+		assert_eq!(info["ccsPos"], 0, "createConstructionSite(RoomPosition, type) 应 OK: {info}");
+		assert_eq!(info["ccsObj"], 0, "createConstructionSite(RoomObject, type) 取 .pos 并 OK: {info}");
+		assert_eq!(info["ccsPlain"], -10, "普通 {{x,y}} 对象官方不接受 → ERR_INVALID_ARGS: {info}");
+		let sites: Vec<(u64, u64)> = entries
+			.iter()
+			.filter(|(_, n, _)| n == "createConstructionSite")
+			.map(|(_, _, d)| (d["x"].as_u64().unwrap(), d["y"].as_u64().unwrap()))
+			.collect();
+		assert_eq!(sites, vec![(21, 21), (22, 20)], "对象形式的坐标应来自 pos: {sites:?}");
+		assert_eq!(info["nearXY"], true, "isNearTo(x, y) 此前恒 false: {info}");
+		assert_eq!(info["nearXYFar"], false);
+		assert_eq!(info["nearObj"], false, "B 距离 2: {info}");
+		assert_eq!(info["inRangeXY"], true);
+		assert_eq!(info["inRangeObj"], false);
+		assert_eq!(info["rangeObj"], 2);
+		assert_eq!(info["rangeXY"], 3);
+		assert_eq!(info["rangeOtherRoom"], serde_json::Value::Null, "跨房 Infinity (JSON 为 null): {info}");
+		assert_eq!(info["lookObj"], 1, "lookForAt(type, RoomObject): {info}");
+		assert_eq!(info["lookAtObj"], serde_json::json!(["creep", "terrain"]), "{info}");
+		for k in ["ctorRange", "ctorNaN", "ctorRoom"] {
+			assert_eq!(info[k], "Invalid arguments in RoomPosition constructor", "{k}: {info}");
+		}
+		assert_eq!(info["coerced"], serde_json::json!([7, 8, "number"]), "坐标按 packed 存储截断为整数: {info}");
+		for (k, v) in info["noVision"].as_object().unwrap() {
+			assert_eq!(v, "Could not access room W5N7", "{k} 无视野应抛官方错误: {info}");
+		}
+		assert_eq!(info["terrainNoVision"], serde_json::json!(["plain"]), "LOOK_TERRAIN 不需要视野: {info}");
+	});
+}
+
+/// 审计 #2: Room.createConstructionSite 的校验顺序与 checkConstructionSite / checkControllerAvailability
+#[test]
+fn construction_site_validation_matches_official() {
+	in_tokio(|| {
+		let mut world = fidelity_world();
+		let bundle = r#"
+			exports.loop = function() {
+				const r = Game.rooms.W5N8, w = Game.rooms.W6N8;
+				const out = {};
+				if (Game.time > 1) {
+					out.siteNames = Object.values(Game.constructionSites)
+						.filter((s) => s.structureType === STRUCTURE_SPAWN).map((s) => s.name).sort();
+					console.log(JSON.stringify(out));
+					return;
+				}
+				out.roadOnRoad = r.createConstructionSite(10, 10, STRUCTURE_ROAD);
+				out.rampartOnRampart = r.createConstructionSite(12, 10, STRUCTURE_RAMPART);
+				out.containerOnSpawn = r.createConstructionSite(25, 25, STRUCTURE_CONTAINER);
+				out.rampartOnSpawn = r.createConstructionSite(25, 25, STRUCTURE_RAMPART);
+				out.roadOnRampart = r.createConstructionSite(12, 10, STRUCTURE_ROAD);
+				out.siteOnSite = r.createConstructionSite(12, 10, STRUCTURE_WALL);
+				out.edge0 = r.createConstructionSite(0, 20, STRUCTURE_ROAD);
+				out.edge49 = r.createConstructionSite(20, 49, STRUCTURE_CONTAINER);
+				out.border1Ext = r.createConstructionSite(1, 20, STRUCTURE_EXTENSION);
+				out.border1Road = r.createConstructionSite(1, 20, STRUCTURE_ROAD);
+				out.extractorNoMineral = r.createConstructionSite(33, 33, STRUCTURE_EXTRACTOR);
+				out.spawnDupName = r.createConstructionSite(30, 30, STRUCTURE_SPAWN, "Spawn1");
+				out.spawnLongName = r.createConstructionSite(30, 30, STRUCTURE_SPAWN, "x".repeat(101));
+				out.spawnRcl = r.createConstructionSite(30, 30, STRUCTURE_SPAWN);
+				out.badType = r.createConstructionSite(30, 30, "nope");
+				// 中立控制器房间按 RCL 0: extension 0 个, container 5 个, spawn 0 个 (但名字校验在前)
+				out.neutralExt = w.createConstructionSite(20, 20, STRUCTURE_EXTENSION);
+				out.neutralContainer = w.createConstructionSite(20, 20, STRUCTURE_CONTAINER);
+				out.neutralSpawn = w.createConstructionSite(22, 22, STRUCTURE_SPAWN);
+				out.neutralCtrlMy = w.controller.my === undefined && w.controller.owner === undefined;
+				console.log(JSON.stringify(out));
+			};
+		"#;
+		let infos = run_ticks(bundle, &mut world, 2);
+		let info = &infos[0];
+		assert_eq!(info["roadOnRoad"], -7, "路上不能再建路: {info}");
+		assert_eq!(info["rampartOnRampart"], -7, "rampart 上不能再建 rampart: {info}");
+		assert_eq!(info["containerOnSpawn"], -7, "容器不能与 spawn 同格: {info}");
+		assert_eq!(info["rampartOnSpawn"], 0, "rampart 可以盖在 spawn 上: {info}");
+		assert_eq!(info["roadOnRampart"], 0, "路可以修在 rampart 下: {info}");
+		assert_eq!(info["siteOnSite"], 0, "本 tick 新建的工地不进快照 (官方同样只看 tick 开始的对象): {info}");
+		assert_eq!(info["edge0"], -7, "x=0 的出口格拒绝: {info}");
+		assert_eq!(info["edge49"], -7, "y=49 的出口格拒绝: {info}");
+		assert_eq!(info["border1Ext"], -7, "1 行列外侧不是墙 → 拒绝: {info}");
+		assert_eq!(info["border1Road"], 0, "路不受 1/48 规则限制: {info}");
+		assert_eq!(info["extractorNoMineral"], -14, "RCL3 extractor 上限为 0 (可用性先于位置检查): {info}");
+		assert_eq!(info["spawnDupName"], -10, "已有 spawn 同名 → ERR_INVALID_ARGS: {info}");
+		assert_eq!(info["spawnLongName"], -10, "名字超过 100: {info}");
+		assert_eq!(info["spawnRcl"], -14, "RCL3 只能有 1 个 spawn: {info}");
+		assert_eq!(info["badType"], -10);
+		assert_eq!(info["neutralExt"], -14, "无自有控制器按 RCL 0: {info}");
+		assert_eq!(info["neutralContainer"], 0, "{info}");
+		assert_eq!(info["neutralSpawn"], -14, "{info}");
+		assert_eq!(info["neutralCtrlMy"], true, "中立控制器 my/owner 为 undefined: {info}");
+		// 引擎侧: siteOnSite (墙叠在同 tick 新建的路工地上) 被处理器拒绝; 路/rampart 工地落地
+		let sites: Vec<(String, u8, u8)> = world.rooms["W5N8"]
+			.objects
+			.values()
+			.filter(|o| o.obj_type == "constructionSite")
+			.map(|o| (o.structure_type.clone().unwrap(), o.x, o.y))
+			.collect();
+		assert!(sites.contains(&("rampart".into(), 25, 25)), "{sites:?}");
+		assert!(sites.contains(&("road".into(), 12, 10)), "{sites:?}");
+		assert!(!sites.iter().any(|s| s.0 == "constructedWall"), "同格已有工地时处理器拒绝: {sites:?}");
+		assert!(sites.contains(&("road".into(), 1, 20)), "{sites:?}");
+	});
+}
+
+/// 审计 #2/#11: spawn 工地自动命名 / 名字随工地下发; 工地不提供视野但仍在 Game.constructionSites;
+/// MAX_CONSTRUCTION_SITES 在位置校验之后检查
+#[test]
+fn spawn_site_names_and_sites_without_vision() {
+	in_tokio(|| {
+		let mut world = fidelity_world();
+		// W5N7 (无视野) 放 99 个自己的工地 → 只剩 1 个名额
+		{
+			use screeps_sim::engine::objects::construction_site;
+			let mut next = world.next_id;
+			let room = world.rooms.get_mut("W5N7").unwrap();
+			for i in 0..99u8 {
+				let id = screeps_sim::engine::world::alloc_id(&mut next);
+				room.objects.insert(id, construction_site(id, "road", 2 + i % 45, 2 + i / 45, 300));
+			}
+			world.next_id = next;
+		}
+		assert!(!world.rooms["W5N7"].visible(), "只有工地的房间不可见");
+		// RCL 7 允许第二个 spawn
+		world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 7;
+		let bundle = r#"
+			exports.loop = function() {
+				const r = Game.rooms.W5N8;
+				const out = {};
+				const sites = Object.values(Game.constructionSites);
+				out.total = sites.length;
+				const far = sites.find((s) => s.pos.roomName === "W5N7");
+				out.farRoomUndefined = far ? far.room === undefined : null;
+				out.farById = far ? Game.getObjectById(far.id) === far : null;
+				out.w5n7Visible = !!Game.rooms.W5N7;
+				out.spawnSites = sites.filter((s) => s.structureType === STRUCTURE_SPAWN).map((s) => s.name);
+				if (!global.__firstTickDone) {
+					global.__firstTickDone = true;
+					out.auto = r.createConstructionSite(30, 30, STRUCTURE_SPAWN);
+					// 满额后: 位置非法仍先报 ERR_INVALID_TARGET, 合法才报 ERR_FULL
+					out.fullInvalid = r.createConstructionSite(10, 10, STRUCTURE_ROAD);
+					out.fullValid = r.createConstructionSite(31, 31, STRUCTURE_ROAD);
+				}
+				console.log(JSON.stringify(out));
+			};
+		"#;
+		let infos = run_ticks(bundle, &mut world, 2);
+		let t1 = &infos[0];
+		assert_eq!(t1["total"], 99, "无视野房间的工地也在 Game.constructionSites: {t1}");
+		assert_eq!(t1["farRoomUndefined"], true, "{t1}");
+		assert_eq!(t1["farById"], true, "{t1}");
+		assert_eq!(t1["w5n7Visible"], false, "工地不提供视野: {t1}");
+		assert_eq!(t1["auto"], 0, "{t1}");
+		assert_eq!(t1["fullInvalid"], -7, "{t1}");
+		assert_eq!(t1["fullValid"], -8, "99 + 本 tick 1 = 100 → ERR_FULL: {t1}");
+		let t2 = &infos[1];
+		assert_eq!(t2["total"], 100, "{t2}");
+		assert_eq!(t2["spawnSites"], serde_json::json!(["Spawn2"]), "未给名字时按官方自动命名 Spawn2: {t2}");
+		let site = world.rooms["W5N8"]
+			.objects
+			.values()
+			.find(|o| o.obj_type == "constructionSite" && o.structure_type.as_deref() == Some("spawn"))
+			.unwrap();
+		assert_eq!(site.name.as_deref(), Some("Spawn2"), "引擎工地记录 spawn 名");
+	});
+}
+
+/// 审计 #3: findInRange / findClosestByRange / findClosestByPath 的数组形式与 opts.filter
+#[test]
+fn find_helpers_accept_arrays_and_filters() {
+	in_tokio(|| {
+		let world = fidelity_world();
+		let bundle = r#"
+			exports.loop = function() {
+				const a = Game.creeps.A;
+				const all = a.room.find(FIND_CREEPS);
+				const out = {};
+				out.inRangeArr = a.pos.findInRange(all, 2).map((c) => c.name).sort();
+				out.inRangeFilter = a.pos.findInRange(all, 2, { filter: (c) => c.name === "B" }).map((c) => c.name);
+				out.inRangePositions = a.pos.findInRange([new RoomPosition(21, 21, "W5N8"), new RoomPosition(30, 30, "W5N8")], 1).length;
+				out.closestRangeFilter = a.pos.findClosestByRange(all, { filter: (c) => c.name !== "A" }).name;
+				out.closestRangeObjFilter = a.pos.findClosestByRange(all, { filter: { name: "Foe" } }).name;
+				out.closestPathFilter = a.pos.findClosestByPath(all, { filter: { name: "Foe" } }).name;
+				console.log(JSON.stringify(out));
+			};
+		"#;
+		let (info, _, _) = run_json(bundle, &world);
+		assert_eq!(info["inRangeArr"], serde_json::json!(["A", "B"]), "数组形式此前恒为 []: {info}");
+		assert_eq!(info["inRangeFilter"], serde_json::json!(["B"]), "{info}");
+		assert_eq!(info["inRangePositions"], 1, "{info}");
+		assert_eq!(info["closestRangeFilter"], "B", "数组形式应用 filter: {info}");
+		assert_eq!(info["closestRangeObjFilter"], "Foe", "{info}");
+		assert_eq!(info["closestPathFilter"], "Foe", "{info}");
+	});
+}
+
+/// 审计 #4: FIND_* 语义 (孵化中的 creep 不计入, 出口顺序 TOP/BOTTOM/RIGHT/LEFT, 敌方建筑/工地)
+#[test]
+fn find_constants_match_official() {
+	in_tokio(|| {
+		let mut world = fidelity_world();
+		{
+			use screeps_sim::engine::objects::{construction_site, creep_obj, BodyPart};
+			let mut next = world.next_id;
+			let room = world.rooms.get_mut("W5N8").unwrap();
+			let id = screeps_sim::engine::world::alloc_id(&mut next);
+			let mut baby = creep_obj(id, "Baby", 25, 26, vec![BodyPart { part_type: "move".into(), hits: 100 }]);
+			baby.spawning = true;
+			room.objects.insert(id, baby);
+			let id = screeps_sim::engine::world::alloc_id(&mut next);
+			let mut hostile = construction_site(id, "road", 33, 33, 300);
+			hostile.mine = false;
+			hostile.enemy = true;
+			room.objects.insert(id, hostile);
+			let id = screeps_sim::engine::world::alloc_id(&mut next);
+			room.objects.insert(id, construction_site(id, "road", 34, 34, 300));
+			world.next_id = next;
+		}
+		let bundle = r#"
+			exports.loop = function() {
+				const r = Game.rooms.W5N8;
+				const names = (l) => l.map((c) => c.name).sort();
+				const out = {};
+				out.gameCreeps = Object.keys(Game.creeps).sort();
+				out.creeps = names(r.find(FIND_CREEPS));
+				out.myCreeps = names(r.find(FIND_MY_CREEPS));
+				out.hostileCreeps = names(r.find(FIND_HOSTILE_CREEPS));
+				out.sites = r.find(FIND_CONSTRUCTION_SITES).length;
+				out.mySites = r.find(FIND_MY_CONSTRUCTION_SITES).length;
+				out.hostileSites = r.find(FIND_HOSTILE_CONSTRUCTION_SITES).length;
+				out.hostileStructures = r.find(FIND_HOSTILE_STRUCTURES).map((s) => s.structureType);
+				out.myStructures = r.find(FIND_MY_STRUCTURES).map((s) => s.structureType).sort();
+				out.empty = [FIND_RUINS, FIND_NUKES, FIND_DEPOSITS, FIND_POWER_CREEPS, FIND_MY_POWER_CREEPS, FIND_HOSTILE_POWER_CREEPS]
+					.map((t) => r.find(t).length);
+				const exits = r.find(FIND_EXIT);
+				out.exitCount = exits.length;
+				out.exitOrder = [exits[0], exits[50], exits[100], exits[150]].map((p) => [p.x, p.y]);
+				console.log(JSON.stringify(out));
+			};
+		"#;
+		let (info, _, _) = run_json(bundle, &world);
+		assert_eq!(info["gameCreeps"], serde_json::json!(["A", "B", "Baby", "Scout"]), "Game.creeps 含孵化中: {info}");
+		assert_eq!(info["creeps"], serde_json::json!(["A", "B", "Foe"]), "FIND_CREEPS 排除孵化中: {info}");
+		assert_eq!(info["myCreeps"], serde_json::json!(["A", "B"]), "{info}");
+		assert_eq!(info["hostileCreeps"], serde_json::json!(["Foe"]), "{info}");
+		assert_eq!(info["sites"], 2, "FIND_CONSTRUCTION_SITES 含全部工地: {info}");
+		assert_eq!(info["mySites"], 1, "{info}");
+		assert_eq!(info["hostileSites"], 1, "{info}");
+		assert_eq!(info["hostileStructures"], serde_json::json!(["rampart"]), "{info}");
+		assert_eq!(
+			info["myStructures"],
+			serde_json::json!(["controller", "rampart", "spawn"]),
+			"FIND_MY_STRUCTURES 只含 my===true (路/敌方 rampart 不在): {info}"
+		);
+		assert_eq!(info["empty"], serde_json::json!([0, 0, 0, 0, 0, 0]), "{info}");
+		assert_eq!(info["exitCount"], 200, "四条边各 50 (角格在两条边上各算一次): {info}");
+		assert_eq!(
+			info["exitOrder"],
+			serde_json::json!([[0, 0], [0, 49], [49, 0], [0, 0]]),
+			"官方顺序 TOP, BOTTOM, RIGHT, LEFT: {info}"
+		);
+	});
+}
+
+/// 审计 #5/#6: findClosestByPath 官方算法 (不可达 null, 多个相邻取最后一个, maxRooms 1) 与
+/// costCallback / portal / 工地障碍 / serialize / Room.findPath 房间检查
+#[test]
+fn closest_by_path_and_cost_callback() {
+	in_tokio(|| {
+		let mut world = fidelity_world();
+		{
+			let room = world.rooms.get_mut("W5N8").unwrap();
+			// (40,10) 四周一圈墙: 不可达
+			for dx in -1i32..=1 {
+				for dy in -1i32..=1 {
+					if dx != 0 || dy != 0 {
+						room.terrain.set((40 + dx) as usize, (10 + dy) as usize, 1);
+					}
+				}
+			}
+			use screeps_sim::engine::objects::{construction_site, structure};
+			let mut next = world.next_id;
+			let id = screeps_sim::engine::world::alloc_id(&mut next);
+			room.objects.insert(id, structure(id, "portal", 30, 35, false));
+			let id = screeps_sim::engine::world::alloc_id(&mut next);
+			room.objects.insert(id, construction_site(id, "spawn", 30, 40, 15000));
+			// 工地两侧是墙: 只有穿过工地格才是直线
+			room.terrain.set(30, 39, 1);
+			room.terrain.set(30, 41, 1);
+			room.refresh_terrain_cache();
+			world.next_id = next;
+		}
+		let bundle = r#"
+			exports.loop = function() {
+				const a = Game.creeps.A, r = a.room;
+				const out = {};
+				const p = (x, y, n) => new RoomPosition(x, y, n || "W5N8");
+				out.unreachable = a.pos.findClosestByPath([p(40, 10)]);
+				out.rangeStillFinds = !!a.pos.findClosestByRange([p(40, 10)]);
+				out.tie = String(a.pos.findClosestByPath([p(21, 21), p(21, 20), p(18, 18)]));
+				out.otherRoom = a.pos.findClosestByPath([p(20, 1, "W5N7")]);
+				out.blockedByCallback = a.pos.findClosestByPath([p(30, 20)], {
+					costCallback: (name, m) => { for (let y = 0; y < 50; y++) m.set(25, y, 255); },
+				});
+				let sawClone = null;
+				const cached = PathFinder.CostMatrix;
+				const path = a.pos.findPathTo(26, 20, {
+					costCallback: (name, m) => { sawClone = m instanceof cached; for (let y = 0; y < 50; y++) if (y !== 5) m.set(23, y, 255); },
+				});
+				out.detour = path.some((s) => s.x === 23 && s.y === 5);
+				out.sawCostMatrix = sawClone;
+				out.noCallbackStraight = a.pos.findPathTo(26, 20).length;
+				out.portalStep = JSON.stringify(p(29, 35).findPathTo(31, 35)[0]);
+				out.siteBlocks = JSON.stringify(p(29, 40).findPathTo(31, 40)[0]);
+				out.siteIgnored = JSON.stringify(p(29, 40).findPathTo(31, 40, { ignoreDestructibleStructures: true })[0]);
+				out.serializeSame = r.findPath(a.pos, a.pos, { serialize: true });
+				out.otherRoomFrom = r.findPath(p(1, 1, "W5N7"), a.pos);
+				out.otherRoomFromSer = r.findPath(p(1, 1, "W5N7"), a.pos, { serialize: true });
+				console.log(JSON.stringify(out));
+			};
+		"#;
+		let (info, _, _) = run_json(bundle, &world);
+		assert_eq!(info["unreachable"], serde_json::Value::Null, "不可达目标返回 null: {info}");
+		assert_eq!(info["rangeStillFinds"], true);
+		assert_eq!(info["tie"], "[room W5N8 pos 21,20]", "多个相邻目标取列表中最后一个: {info}");
+		assert_eq!(info["otherRoom"], serde_json::Value::Null, "maxRooms 1: 邻房目标找不到: {info}");
+		assert_eq!(info["blockedByCallback"], serde_json::Value::Null, "costCallback 生效: {info}");
+		assert_eq!(info["detour"], true, "findPathTo 的 costCallback 生效 (绕行缺口): {info}");
+		assert_eq!(info["sawCostMatrix"], true, "{info}");
+		assert_eq!(info["noCallbackStraight"], 6, "回调改的是克隆, 缓存矩阵不受影响: {info}");
+		let portal: serde_json::Value = serde_json::from_str(info["portalStep"].as_str().unwrap()).unwrap();
+		assert_ne!((portal["x"].as_u64(), portal["y"].as_u64()), (Some(30), Some(35)), "portal 是障碍: {info}");
+		let blocked: serde_json::Value = serde_json::from_str(info["siteBlocks"].as_str().unwrap()).unwrap();
+		assert_ne!((blocked["x"].as_u64(), blocked["y"].as_u64()), (Some(30), Some(40)), "自己的障碍类工地挡路: {info}");
+		let ignored: serde_json::Value = serde_json::from_str(info["siteIgnored"].as_str().unwrap()).unwrap();
+		assert_eq!((ignored["x"].as_u64(), ignored["y"].as_u64()), (Some(30), Some(40)), "ignoreDestructibleStructures 时工地不挡路: {info}");
+		assert_eq!(info["serializeSame"], "", "起终点相同 + serialize → '': {info}");
+		assert_eq!(info["otherRoomFrom"], serde_json::json!([]), "{info}");
+		assert_eq!(info["otherRoomFromSer"], "", "{info}");
+	});
+}
+
+/// 审计 #7/#8: PathFinder flee 语义、边界格不能横走、选项 clamp、CostMatrix._bits、无全局 CostMatrix
+#[test]
+fn pathfinder_native_semantics() {
+	in_tokio(|| {
+		let mut world = fidelity_world();
+		{
+			// W5N8 底边 (y=48) 9..13 一排墙: (10,49) → (12,49) 只能经 W5N7 绕行
+			let room = world.rooms.get_mut("W5N8").unwrap();
+			for x in 9..=13 {
+				room.terrain.set(x, 48, 1);
+			}
+			room.refresh_terrain_cache();
+		}
+		let bundle = r#"
+			exports.loop = function() {
+				const out = {};
+				const p = (x, y, n) => new RoomPosition(x, y, n || "W5N8");
+				const fl = PathFinder.search(p(20, 20), { pos: p(22, 22), range: 3 }, { flee: true });
+				out.flee = { len: fl.path.length, incomplete: fl.incomplete, last: String(fl.path[fl.path.length - 1]) };
+				const already = PathFinder.search(p(20, 20), { pos: p(25, 25), range: 3 }, { flee: true });
+				out.fleeNoop = [already.path.length, already.incomplete];
+				const edge = PathFinder.search(p(10, 49), p(12, 49));
+				out.edge = edge.path.map((q) => q.roomName + ":" + q.x + "," + q.y);
+				out.edgeIncomplete = edge.incomplete;
+				out.costClamp = PathFinder.search(p(20, 20), p(23, 20), { plainCost: 300 }).cost;
+				out.costFloor = PathFinder.search(p(20, 20), p(23, 20), { plainCost: 2.7 }).cost;
+				out.costZero = PathFinder.search(p(20, 20), p(23, 20), { plainCost: 0 }).cost;
+				out.emptyGoal = PathFinder.search(p(20, 20), []);
+				const m = new PathFinder.CostMatrix();
+				m.set(1, 2, 300);
+				out.bits = [typeof m._bits, m.__bits === undefined, m._bits[1 * 50 + 2]];
+				out.globalCostMatrix = typeof CostMatrix;
+				console.log(JSON.stringify(out));
+			};
+		"#;
+		let (info, _, _) = run_json(bundle, &world);
+		assert_eq!(info["flee"]["len"], 1, "flee: 一步离开 range 3 即停: {info}");
+		assert_eq!(info["flee"]["incomplete"], false, "{info}");
+		assert_eq!(info["fleeNoop"], serde_json::json!([0, false]), "起点已在 range 外: 空路径且完整: {info}");
+		assert_eq!(
+			info["edge"],
+			serde_json::json!(["W5N7:10,0", "W5N7:11,1", "W5N7:12,0", "W5N8:12,49"]),
+			"边界格只能笔直跨房或退回房内, 不能沿出口格横走: {info}"
+		);
+		assert_eq!(info["edgeIncomplete"], false);
+		assert_eq!(info["costClamp"], 3 * 254, "plainCost clamp 到 254: {info}");
+		assert_eq!(info["costFloor"], 3 * 2, "plainCost 取整: {info}");
+		assert_eq!(info["costZero"], 3, "plainCost 0 → 默认 1: {info}");
+		assert_eq!(info["emptyGoal"], serde_json::json!({ "path": [], "ops": 0 }), "{info}");
+		assert_eq!(info["bits"], serde_json::json!(["object", true, 255]), "{info}");
+		assert_eq!(info["globalCostMatrix"], "undefined", "官方只有 PathFinder.CostMatrix: {info}");
+	});
+}
+
+/// 审计 #9: 旗经引擎持久化 (createFlag / setColor / setPosition / remove), 参数前移, COLORS_ALL, 名字长度
+#[test]
+fn flags_persist_through_engine() {
+	in_tokio(|| {
+		let mut world = fidelity_world();
+		let bundle = r#"
+			exports.loop = function() {
+				const r = Game.rooms.W5N8;
+				const out = { t: Game.time };
+				const step = Memory.step || 0;
+				Memory.step = step + 1;
+				out.step = step;
+				if (step === 0) {
+					out.colorsAll = COLORS_ALL.length;
+					out.f1 = r.createFlag(10, 12, "F1");
+					out.sameTick = Game.flags.F1 instanceof Flag && Game.flags.F1.color === COLOR_WHITE;
+					out.f2 = r.createFlag(new RoomPosition(11, 11, "W5N8"), "F2", COLOR_RED, COLOR_BLUE);
+					out.auto = r.createFlag(5, 5);
+					out.dup = r.createFlag(6, 6, "F1");
+					out.badColor = r.createFlag(6, 6, "F3", 11);
+					out.longName = r.createFlag(6, 6, "x".repeat(101));
+					out.badPos = r.createFlag(50, 6, "F4");
+					out.posForm = new RoomPosition(7, 7, "W5N8").createFlag("F5", COLOR_GREEN);
+				} else if (step === 1) {
+					out.names = Object.keys(Game.flags).sort();
+					out.f2 = [Game.flags.F2.color, Game.flags.F2.secondaryColor];
+					out.f5 = [Game.flags.F5.color, Game.flags.F5.secondaryColor];
+					out.look = r.lookForAt(LOOK_FLAGS, 11, 11).map((f) => f.name);
+					out.find = r.find(FIND_FLAGS).length;
+					out.byId = Game.getObjectById("flag_F1") === Game.flags.F1;
+					out.setColor = Game.flags.F1.setColor(COLOR_GREEN);
+					out.setColorBad = Game.flags.F1.setColor(0);
+					out.move = Game.flags.F2.setPosition(new RoomPosition(5, 5, "W5N7"));
+					out.remove = Game.flags.Flag1.remove();
+				} else {
+					out.names = Object.keys(Game.flags).sort();
+					out.f1 = [Game.flags.F1.color, Game.flags.F1.secondaryColor];
+					out.f2Room = Game.flags.F2.pos.roomName;
+					out.f2RoomUndefined = Game.flags.F2.room === undefined;
+					out.find = r.find(FIND_FLAGS).length;
+				}
+				console.log(JSON.stringify(out));
+			};
+		"#;
+		let infos = run_ticks(bundle, &mut world, 3);
+		let t = &infos[0];
+		assert_eq!(t["colorsAll"], 10, "{t}");
+		assert_eq!(t["f1"], "F1", "{t}");
+		assert_eq!(t["sameTick"], true, "同 tick 就进 Game.flags: {t}");
+		assert_eq!(t["f2"], "F2", "对象形式参数前移: {t}");
+		assert_eq!(t["auto"], "Flag1", "{t}");
+		assert_eq!(t["dup"], -3, "ERR_NAME_EXISTS: {t}");
+		assert_eq!(t["badColor"], -10, "{t}");
+		assert_eq!(t["longName"], -10, "名字 > 100: {t}");
+		assert_eq!(t["badPos"], -10, "{t}");
+		assert_eq!(t["posForm"], "F5", "{t}");
+		let t = &infos[1];
+		assert_eq!(t["names"], serde_json::json!(["F1", "F2", "F5", "Flag1"]), "旗经引擎持久化: {t}");
+		assert_eq!(t["f2"], serde_json::json!([1, 3]), "{t}");
+		assert_eq!(t["f5"], serde_json::json!([5, 5]), "secondaryColor 缺省 = color: {t}");
+		assert_eq!(t["look"], serde_json::json!(["F2"]), "{t}");
+		assert_eq!(t["find"], 4, "{t}");
+		assert_eq!(t["byId"], true, "{t}");
+		assert_eq!(t["setColor"], 0, "{t}");
+		assert_eq!(t["setColorBad"], -10, "{t}");
+		assert_eq!(t["move"], 0, "{t}");
+		assert_eq!(t["remove"], 0, "{t}");
+		let t = &infos[2];
+		assert_eq!(t["names"], serde_json::json!(["F1", "F2", "F5"]), "{t}");
+		assert_eq!(t["f1"], serde_json::json!([5, 5]), "{t}");
+		assert_eq!(t["f2Room"], "W5N7", "旗可移到无视野房间: {t}");
+		assert_eq!(t["f2RoomUndefined"], true, "{t}");
+		assert_eq!(t["find"], 2, "{t}");
+		assert_eq!(world.flags.len(), 3);
+	});
+}
+
+/// 审计 #10/#15: look / lookFor / lookForAt 全类型、未知类型 ERR_INVALID_ARGS、lookAt 顺序、
+/// RoomObject 参数、越界抛错、LOOK_TERRAIN 无需视野
+#[test]
+fn look_apis_match_official() {
+	in_tokio(|| {
+		let mut world = fidelity_world();
+		{
+			let room = world.rooms.get_mut("W5N8").unwrap();
+			room.terrain.set(0, 0, 1);
+			room.refresh_terrain_cache();
+		}
+		screeps_sim::engine::intents::create_dropped(&mut world, "W5N8", 20, 20, "energy", 40);
+		let bundle = r#"
+			exports.loop = function() {
+				const r = Game.rooms.W5N8;
+				const a = Game.creeps.A;
+				const out = {};
+				out.lookAtTypes = r.lookAt(a).map((i) => i.type);
+				out.posLookTypes = a.pos.look().map((i) => i.type);
+				out.creepByObj = r.lookForAt(LOOK_CREEPS, a).map((c) => c.name);
+				out.energy = r.lookForAt(LOOK_ENERGY, 20, 20).map((e) => [e.resourceType, e.amount]);
+				out.resources = a.pos.lookFor(LOOK_RESOURCES).length;
+				out.unknown = r.lookForAt("bogus", 20, 20);
+				out.empty = [LOOK_SOURCES, LOOK_MINERALS, LOOK_DEPOSITS, LOOK_STRUCTURES, LOOK_FLAGS, LOOK_CONSTRUCTION_SITES,
+					LOOK_NUKES, LOOK_TOMBSTONES, LOOK_RUINS, LOOK_POWER_CREEPS].map((t) => r.lookForAt(t, 20, 20).length);
+				out.terrain = r.lookForAt(LOOK_TERRAIN, 0, 0);
+				out.mineral = r.lookForAt(LOOK_MINERALS, 40, 40).map((m) => m.mineralType);
+				try { r.lookForAt(LOOK_CREEPS, 50, 10); out.oob = "no throw"; } catch (e) { out.oob = e.message; }
+				out.farTerrain = new RoomPosition(3, 3, "W5N7").lookFor(LOOK_TERRAIN);
+				try { new RoomPosition(3, 3, "W5N7").lookFor(LOOK_CREEPS); out.farLook = "no throw"; } catch (e) { out.farLook = e.message; }
+				const area = r.lookForAtArea(LOOK_CREEPS, 19, 19, 21, 23, true).map((i) => i.creep.name).sort();
+				out.area = area;
+				console.log(JSON.stringify(out));
+			};
+		"#;
+		let (info, _, _) = run_json(bundle, &world);
+		assert_eq!(
+			info["lookAtTypes"],
+			serde_json::json!(["creep", "energy", "resource", "terrain"]),
+			"官方 lookAt 顺序 (energy 与 resource 都列出掉落资源): {info}"
+		);
+		assert_eq!(info["posLookTypes"], info["lookAtTypes"], "{info}");
+		assert_eq!(info["creepByObj"], serde_json::json!(["A"]), "RoomObject 参数: {info}");
+		assert_eq!(info["energy"], serde_json::json!([["energy", 40]]), "{info}");
+		assert_eq!(info["resources"], 1, "{info}");
+		assert_eq!(info["unknown"], -10, "{info}");
+		assert_eq!(info["empty"], serde_json::json!([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), "{info}");
+		assert_eq!(info["terrain"], serde_json::json!(["wall"]), "{info}");
+		assert_eq!(info["mineral"], serde_json::json!(["H"]), "{info}");
+		assert_eq!(info["oob"], "look coords are out of bounds", "{info}");
+		assert_eq!(info["farTerrain"], serde_json::json!(["plain"]), "LOOK_TERRAIN 无需视野: {info}");
+		assert_eq!(info["farLook"], "Could not access room W5N7", "{info}");
+		assert_eq!(info["area"], serde_json::json!(["A", "B"]), "{info}");
+	});
+}
+
+/// 审计 #12/#13: Room.Terrain / getRoomTerrain (未知房间抛错, 掩码, getRawBuffer(dest)) 与 Game.map
+#[test]
+fn terrain_and_map_match_official() {
+	in_tokio(|| {
+		let mut world = fidelity_world();
+		{
+			let room = world.rooms.get_mut("W5N7").unwrap();
+			room.terrain.set(3, 4, 1);
+			room.terrain.set(4, 4, 2);
+			room.refresh_terrain_cache();
+		}
+		let bundle = r#"
+			exports.loop = function() {
+				const out = {};
+				const t = Game.map.getRoomTerrain("W5N7");
+				out.values = [t.get(3, 4), t.get(4, 4), t.get(5, 4)];
+				out.viaRoom = new Room.Terrain("W5N7").get(3, 4);
+				const dest = new Uint8Array(2500);
+				out.sameDest = t.getRawBuffer(dest) === dest;
+				out.destWall = dest[4 * 50 + 3];
+				const copy = t.getRawBuffer();
+				out.copyLen = copy.length;
+				copy[0] = 1;
+				out.copyIsolated = t.get(0, 0);
+				try { new Room.Terrain("W40N40"); out.unknown = "no throw"; } catch (e) { out.unknown = e.message; }
+				try { Game.map.getRoomTerrain("W40N40"); out.unknownMap = "no throw"; } catch (e) { out.unknownMap = e.message; }
+				out.terrainAt = [Game.map.getTerrainAt(3, 4, "W5N7"), Game.map.getTerrainAt(new RoomPosition(4, 4, "W5N7")),
+					Game.map.getTerrainAt(1, 1, "W40N40")];
+				out.status = [Game.map.getRoomStatus("W5N8").status, Game.map.getRoomStatus("W40N40").status,
+					Game.map.getRoomStatus("nope") === undefined];
+				out.exits = Game.map.describeExits("W5N8");
+				out.exitsUnknown = Game.map.describeExits("bad");
+				out.dist = [Game.map.getRoomLinearDistance("W5N8", "W5N7"),
+					Game.map.getRoomLinearDistance("E0N0", "W150N0"),
+					Game.map.getRoomLinearDistance("E0N0", "W150N0", true)];
+				console.log(JSON.stringify(out));
+			};
+		"#;
+		let (info, _, _) = run_json(bundle, &world);
+		assert_eq!(info["values"], serde_json::json!([1, 2, 0]), "{info}");
+		assert_eq!(info["viaRoom"], 1, "{info}");
+		assert_eq!(info["sameDest"], true, "{info}");
+		assert_eq!(info["destWall"], 1, "{info}");
+		assert_eq!(info["copyLen"], 2500, "{info}");
+		assert_eq!(info["copyIsolated"], 0, "getRawBuffer() 返回副本: {info}");
+		assert_eq!(info["unknown"], "Could not access room W40N40", "{info}");
+		assert_eq!(info["unknownMap"], "Could not access room W40N40", "{info}");
+		assert_eq!(info["terrainAt"], serde_json::json!(["wall", "swamp", null]), "{info}");
+		assert_eq!(info["status"], serde_json::json!(["normal", "closed", true]), "{info}");
+		assert_eq!(info["exits"], serde_json::json!({ "5": "W5N7", "7": "W6N8" }), "{info}");
+		assert_eq!(info["exitsUnknown"], serde_json::Value::Null, "{info}");
+		assert_eq!(info["dist"], serde_json::json!([1, 151, 49]), "continuous 按环绕世界取短边: {info}");
+	});
+}
+
+/// 审计 #16/#17: rampart / 敌方结构归属来自引擎; Store toString 与 `in`; Game.notify 上限; getDirection(0,0); console 格式
+#[test]
+fn ownership_store_notify_console_match_official() {
+	in_tokio(|| {
+		let world = fidelity_world();
+		let bundle = r#"
+			exports.loop = function() {
+				const r = Game.rooms.W5N8;
+				const out = {};
+				const ramps = r.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_RAMPART } })
+					.sort((a, b) => a.pos.x - b.pos.x);
+				out.ramps = ramps.map((s) => [s.pos.x, s.my, s.owner && s.owner.username]);
+				out.road = (() => { const s = r.lookForAt(LOOK_STRUCTURES, 10, 10)[0]; return [s.my === undefined, s.owner === undefined]; })();
+				out.foeOwner = r.find(FIND_HOSTILE_CREEPS)[0].owner.username;
+				out.neutralController = [Game.rooms.W6N8.controller.my === undefined, Game.rooms.W6N8.controller.owner === undefined];
+				const st = Game.creeps.A.store;
+				out.storeStr = String(st);
+				out.inEmpty = "energy" in st;
+				out.zero = st.energy;
+				out.notify = [];
+				for (let i = 0; i < 21; i++) out.notify.push(Game.notify("hi"));
+				out.dir0 = Game.creeps.A.pos.getDirectionTo(Game.creeps.A.pos) === undefined;
+				console.log(JSON.stringify(out));
+				console.log(undefined, null, { a: 1 }, [1, 2], "s", 5, Game.creeps.A.pos);
+			};
+		"#;
+		let (info, _, console) = run_json(bundle, &world);
+		assert_eq!(
+			info["ramps"],
+			serde_json::json!([[12, true, "Nexus"], [14, false, "Invader"]]),
+			"rampart 归属来自引擎: {info}"
+		);
+		assert_eq!(info["road"], serde_json::json!([true, true]), "{info}");
+		assert_eq!(info["foeOwner"], "Invader", "{info}");
+		assert_eq!(info["neutralController"], serde_json::json!([true, true]), "{info}");
+		assert_eq!(info["storeStr"], "[store]", "{info}");
+		assert_eq!(info["inEmpty"], false, "官方 Store 没有 has 陷阱: {info}");
+		assert_eq!(info["zero"], 0, "{info}");
+		let notify = info["notify"].as_array().unwrap();
+		assert!(notify[..20].iter().all(|v| v == 0), "{info}");
+		assert_eq!(notify[20], -8, "第 21 条 ERR_FULL: {info}");
+		assert_eq!(info["dir0"], true, "{info}");
+		assert_eq!(console[1], "undefined null [object Object] 1,2 s 5 [room W5N8 pos 20,20]");
+	});
+}
