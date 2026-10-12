@@ -98,6 +98,19 @@ struct TickOutcome {
     memory_segments: Option<std::collections::BTreeMap<String, String>>,
     #[serde(rename = "activeSegments", default)]
     active_segments: Vec<u32>,
+    /// shim 内部分相计时 (ms): 快照 parse / Game 重建 / 收尾序列化
+    #[serde(default)]
+    timing: Option<JsPhaseTiming>,
+}
+
+#[derive(serde::Deserialize, Clone, Copy, Default)]
+pub struct JsPhaseTiming {
+    #[serde(default)]
+    pub parse: f64,
+    #[serde(default)]
+    pub rebuild: f64,
+    #[serde(default)]
+    pub finish: f64,
 }
 
 pub struct TickResult {
@@ -109,6 +122,8 @@ pub struct TickResult {
     pub console: Vec<String>,
     /// 当 tick 因超出 tickLimit 被强制中断
     pub timed_out: bool,
+    /// shim 内部分相计时 (None = 中断 tick / 旧 shim)
+    pub js_timing: Option<JsPhaseTiming>,
 }
 
 pub struct BotRuntime {
@@ -304,6 +319,7 @@ impl BotRuntime {
                 errors: vec!["Script execution timed out ungracefully".to_string()],
                 console,
                 timed_out: true,
+                js_timing: None,
             });
         }
 
@@ -326,6 +342,7 @@ impl BotRuntime {
             errors: outcome.errors,
             console: outcome.console,
             timed_out: false,
+            js_timing: outcome.timing,
         })
     }
 

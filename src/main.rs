@@ -19,12 +19,16 @@ use screeps_sim::engine::world::World;
 use std::io::Write as _;
 use std::time::Instant;
 
-/// 分相耗时累计 (快照序列化 / JS 执行含结果解析 / 引擎结算)
+/// 分相耗时累计 (快照序列化 / JS 执行含结果解析 / 引擎结算 + shim 内部细分)
 #[derive(Default)]
 struct PhaseTiming {
     snapshot_us: u64,
     js_us: u64,
     engine_us: u64,
+    js_parse_us: u64,
+    js_rebuild_us: u64,
+    js_finish_us: u64,
+    js_timed_ticks: u64,
 }
 
 impl PhaseTiming {
@@ -33,9 +37,15 @@ impl PhaseTiming {
             let us = us as f64 / ticks.max(1) as f64;
             serde_json::json!({ "avgMs": (us / 1000.0 * 1000.0).round() / 1000.0 })
         };
+        let jt = self.js_timed_ticks.max(1) as f64;
         serde_json::json!({
             "snapshot": per(self.snapshot_us),
-            "js": per(self.js_us),
+            "js": {
+                "avgMs": (self.js_us as f64 / ticks.max(1) as f64 / 1000.0 * 1000.0).round() / 1000.0,
+                "parseMs": (self.js_parse_us as f64 / jt / 1000.0 * 1000.0).round() / 1000.0,
+                "rebuildMs": (self.js_rebuild_us as f64 / jt / 1000.0 * 1000.0).round() / 1000.0,
+                "finishMs": (self.js_finish_us as f64 / jt / 1000.0 * 1000.0).round() / 1000.0,
+            },
             "engine": per(self.engine_us),
         })
     }
@@ -338,6 +348,7 @@ async fn async_main() {
                 errors: Vec::new(),
                 console: Vec::new(),
                 timed_out: false,
+                js_timing: None,
             };
         } else {
             let bot = bot.as_mut().expect("非回放模式必有 runtime");
@@ -392,6 +403,12 @@ async fn async_main() {
                 };
             phases.js_us += t_js.elapsed().as_micros() as u64;
             cpu_used = result.cpu_used;
+            if let Some(t) = result.js_timing {
+                phases.js_parse_us += (t.parse * 1000.0) as u64;
+                phases.js_rebuild_us += (t.rebuild * 1000.0) as u64;
+                phases.js_finish_us += (t.finish * 1000.0) as u64;
+                phases.js_timed_ticks += 1;
+            }
             tick_result = result;
         }
         if tick_result.timed_out {
@@ -576,9 +593,12 @@ async fn async_main() {
         100.0 * total_moved as f64 / total_moves.max(1) as f64
     ));
     say(format!(
-        "分相耗时/tick: 快照 {:.3}ms · JS {:.3}ms · 引擎 {:.3}ms (状态哈希 0x{:016x})",
+        "分相耗时/tick: 快照 {:.3}ms · JS {:.3}ms (parse {:.3} / 重建 {:.3} / 收尾 {:.3}) · 引擎 {:.3}ms (状态哈希 0x{:016x})",
         phases.snapshot_us as f64 / 1000.0 / actual_ticks.max(1) as f64,
         phases.js_us as f64 / 1000.0 / actual_ticks.max(1) as f64,
+        phases.js_parse_us as f64 / 1000.0 / phases.js_timed_ticks.max(1) as f64,
+        phases.js_rebuild_us as f64 / 1000.0 / phases.js_timed_ticks.max(1) as f64,
+        phases.js_finish_us as f64 / 1000.0 / phases.js_timed_ticks.max(1) as f64,
         phases.engine_us as f64 / 1000.0 / actual_ticks.max(1) as f64,
         world.state_hash()
     ));

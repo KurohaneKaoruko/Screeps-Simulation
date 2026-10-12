@@ -820,8 +820,21 @@ function makeStore(raw, storeCapacity, capacities) {
 class RoomObject {
 	constructor(raw) {
 		this.id = raw.id;
-		this.pos = new RoomPosition(raw.x, raw.y, raw.roomName);
 		this.__raw = raw;
+	}
+	// pos 懒创建 (同一实例内身份稳定, 与官方"构造时创建一次"语义一致;
+	// 每 tick 大量对象从不读 pos → 省一次 RoomPosition 分配。
+	// 首次访问后升级为自有可枚举属性, JSON.stringify 形状与官方一致)
+	get pos() {
+		let p = this.__pos;
+		if (!p) {
+			p = new RoomPosition(this.__raw.x, this.__raw.y, this.__raw.roomName);
+			this.__pos = p;
+			Object.defineProperty(this, "pos", {
+				value: p, enumerable: true, writable: true, configurable: true,
+			});
+		}
+		return p;
 	}
 	get room() {
 		return Game.rooms[this.pos.roomName];
@@ -1086,7 +1099,7 @@ class Creep extends RoomObject {
 		if (!this.pos.inRangeTo(target.pos, 3)) return C.ERR_NOT_IN_RANGE;
 		// 官方 creeps.js build: 障碍类建筑的格子上有 creep 或其他障碍 → ERR_INVALID_TARGET
 		if (C.OBSTACLE_OBJECT_TYPES.includes(target.structureType)) {
-			const cell = this.room.__occupied.get(`${target.pos.x},${target.pos.y}`) || [];
+			const cell = this.room.__occupied.get(target.pos.x * 50 + target.pos.y) || [];
 			const blocked = cell.some(
 				(o) => !(o instanceof ConstructionSite) && (o instanceof Creep || C.OBSTACLE_OBJECT_TYPES.includes(o.structureType))
 			);
@@ -1867,22 +1880,22 @@ class Room {
 		this.controller = null;
 		this.storage = null;
 		this.terminal = null;
-		this.visual = new RoomVisual(name);
-		// 分类索引
+		// 分类索引: 结构桶按需创建; collectFind 直接访问的 6 个非结构桶预建 (空房也安全)
 		this.__objects = [];
-		this.__byType = { creep: [], source: [], mineral: [], energy: [], constructionSite: [], tombstone: [], flag: [], powerCreep: [] };
-		for (const st of Object.keys(STRUCTURE_CLASSES)) this.__byType[st] = [];
-		this.__occupied = new Map(); // "x,y" → objects[]
+		this.__byType = { creep: [], source: [], energy: [], constructionSite: [], tombstone: [], spawn: [] };
+		this.__occupied = new Map();
 		for (const rawObj of raw.objects) {
 			const obj = wrapObject(this, rawObj);
 			if (!obj) continue;
 			this.__objects.push(obj);
-			const key = `${rawObj.x},${rawObj.y}`;
+			const key = rawObj.x * 50 + rawObj.y;
 			let cell = this.__occupied.get(key);
 			if (!cell) this.__occupied.set(key, (cell = []));
 			cell.push(obj);
-			if (obj instanceof Structure) this.__byType[obj.structureType].push(obj);
-			else if (this.__byType[rawObj.type]) this.__byType[rawObj.type].push(obj);
+			const t = obj instanceof Structure ? obj.structureType : rawObj.type;
+			let bucket = this.__byType[t];
+			if (!bucket) bucket = this.__byType[t] = [];
+			bucket.push(obj);
 			// 官方 E/game/structures.js:45-55: 任何控制器/storage/terminal 都挂到房间上 (不限归属)
 			if (obj instanceof StructureController) this.controller = obj;
 			if (obj instanceof StructureStorage) this.storage = obj;
@@ -1890,6 +1903,10 @@ class Room {
 		}
 		this.energyAvailable = raw.energyAvailable;
 		this.energyCapacityAvailable = raw.energyCapacityAvailable;
+	}
+	// visual 懒创建 (no-op 实现; 绘制型 bot 访问时才分配)
+	get visual() {
+		return this.__visual || (this.__visual = new RoomVisual(this.name));
 	}
 	get memory() {
 		if (!Memory.rooms) Memory.rooms = {};
@@ -1914,7 +1931,7 @@ class Room {
 	lookForAt(type, x, y) {
 		if (typeof x === "object") { y = x.y; x = x.x; }
 		if (x < 0 || x > 49 || y < 0 || y > 49) return [];
-		const cell = this.__occupied.get(`${x},${y}`) || [];
+		const cell = this.__occupied.get(x * 50 + y) || [];
 		switch (type) {
 			case C.LOOK_CREEPS: return cell.filter((o) => o instanceof Creep);
 			// 官方 LOOK_ENERGY 与 LOOK_RESOURCES 指向同一个掉落资源登记表 (任意 resourceType)
@@ -1991,7 +2008,7 @@ class Room {
 		}
 		if (Game.constructionSites && Object.keys(Game.constructionSites).length + __createdSiteCount >= C.MAX_CONSTRUCTION_SITES) return C.ERR_FULL;
 		// 占位检查
-		const cell = this.__occupied.get(`${x},${y}`) || [];
+		const cell = this.__occupied.get(x * 50 + y) || [];
 		const blocking = cell.some((o) => {
 			if (o instanceof Creep) return false;
 			if (o instanceof ConstructionSite) return true;
@@ -2620,9 +2637,37 @@ function __installLazyMemory() {
 	});
 }
 
+/** 静态共享对象: 每 tick Object.create 出新身份 (防 bot 缓存跨 tick 共享), 方法只挂在原型上 */
+const STATIC_SHARD = { name: "shard0", type: "world", ptr: false };
+const MARKET_PROTO = {
+	/** 官方 market.js:31-34 */
+	calcTransactionCost(amount, roomName1, roomName2) {
+		return calcTerminalEnergyCost(amount, calcRoomsDistance(roomName1, roomName2));
+	},
+	createOrder() { return C.ERR_INVALID_ARGS; },
+	deal() { return C.ERR_INVALID_ARGS; },
+	cancelOrder() { return C.OK; },
+	changeOrderPrice() { return C.OK; },
+	extendOrder() { return C.OK; },
+	getAllOrders() { return []; },
+	getHistory() { return []; },
+	getOrderById() { return null; },
+};
+function makeMarket() {
+	const m = Object.create(MARKET_PROTO);
+	m.credits = 0;
+	m.orders = {};
+	// 官方 market.js: 终端转账记录 (单玩家: 发往自己终端的转账同时出现在两侧)
+	m.incomingTransactions = (__W.transactions || []).filter((t) => t.recipient).map((t) => ({ ...t }));
+	m.outgoingTransactions = (__W.transactions || []).map((t) => ({ ...t }));
+	return m;
+}
+
 function buildGame() {
-	byId = new Map();
-	__createdCreepNames = new Set();
+	if (byId) byId.clear();
+	else byId = new Map();
+	if (__createdCreepNames) __createdCreepNames.clear();
+	else __createdCreepNames = new Set();
 	__createdSiteCount = 0;
 	Game = {
 		time: __W.time,
@@ -2638,21 +2683,9 @@ function buildGame() {
 		gcl: __W.gcl,
 		// 官方 game.js:133-167: GPL 由账户累计 processPower 推导 (引擎侧计算后经快照下发)
 		gpl: __W.gpl || { level: 0, progress: 0, progressTotal: 1000 },
-		shard: { name: "shard0", type: "world", ptr: false },
-		market: {
-			credits: 0, orders: {},
-			// 官方 market.js: 终端转账记录 (单玩家: 发往自己终端的转账同时出现在两侧)
-			incomingTransactions: (__W.transactions || []).filter((t) => t.recipient).map((t) => ({ ...t })),
-			outgoingTransactions: (__W.transactions || []).map((t) => ({ ...t })),
-			/** 官方 market.js:31-34 */
-			calcTransactionCost(amount, roomName1, roomName2) {
-				return calcTerminalEnergyCost(amount, calcRoomsDistance(roomName1, roomName2));
-			},
-			createOrder() { return C.ERR_INVALID_ARGS; },
-			deal() { return C.ERR_INVALID_ARGS; }, cancelOrder() { return C.OK; }, changeOrderPrice() { return C.OK; },
-			extendOrder() { return C.OK; }, getAllOrders() { return []; }, getHistory() { return []; }, getOrderById() { return null; },
-		},
-		map: makeMap(),
+		shard: Object.create(STATIC_SHARD),
+		market: makeMarket(),
+		map: Object.create(MAP_PROTO),
 		getObjectById(id) {
 			return byId.get(id) || null;
 		},
@@ -2671,7 +2704,7 @@ function buildGame() {
 			if (obj instanceof ConstructionSite && obj.my) Game.constructionSites[obj.id] = obj;
 		}
 	}
-	// RCL 结构上限表 (createConstructionSite 校验用)
+	// RCL 结构上限表 (createConstructionSite 校验用); 按 RCL 缓存 (不可变数据)
 	for (const room of Object.values(Game.rooms)) {
 		if (room.controller) {
 			room.__raw.structureLimits = structureLimitsFor(room.controller.level);
@@ -2679,37 +2712,45 @@ function buildGame() {
 	}
 }
 
-/** 由官方 CONTROLLER_STRUCTURES 派生 (不再手写一份易漂移的表) */
+/** 由官方 CONTROLLER_STRUCTURES 派生 (不再手写一份易漂移的表); 按 RCL 记忆化 */
+const __structureLimitsCache = [];
 function structureLimitsFor(rcl) {
-	const out = {};
 	const lv = Math.min(rcl, 8);
-	for (const [st, table] of Object.entries(C.CONTROLLER_STRUCTURES)) out[st] = table[lv];
+	let out = __structureLimitsCache[lv];
+	if (!out) {
+		out = {};
+		for (const [st, table] of Object.entries(C.CONTROLLER_STRUCTURES)) out[st] = table[lv];
+		__structureLimitsCache[lv] = out;
+	}
 	return out;
 }
 
+const CPU_PROTO = {
+	unlocked: false,
+	unlockedTime: undefined,
+	getUsed() { return nowMs() - this.__start + __intentCpu; },
+	getHeapStatistics() {
+		return { total_heap_size: 0, used_heap_size: 0, heap_size_limit: 0, externally_allocated_size: 0 };
+	},
+	halt() {},
+	setShardLimits() { return C.ERR_INVALID_ARGS; },
+	unlock() { return C.ERR_FULL; },
+	generatePixel() { return C.ERR_NOT_ENOUGH_RESOURCES; },
+};
+
 function makeCpu(raw) {
-	const start = nowMs();
-	return {
-		limit: raw.limit,
-		tickLimit: raw.tickLimit,
-		bucket: raw.bucket,
-		shardLimits: { shard0: raw.limit },
-		unlocked: false,
-		unlockedTime: undefined,
-		getUsed() { return nowMs() - start + __intentCpu; },
-		getHeapStatistics() {
-			return { total_heap_size: 0, used_heap_size: 0, heap_size_limit: 0, externally_allocated_size: 0 };
-		},
-		halt() {},
-		setShardLimits() { return C.ERR_INVALID_ARGS; },
-		unlock() { return C.ERR_FULL; },
-		generatePixel() { return C.ERR_NOT_ENOUGH_RESOURCES; },
-	};
+	const cpu = Object.create(CPU_PROTO);
+	cpu.limit = raw.limit;
+	cpu.tickLimit = raw.tickLimit;
+	cpu.bucket = raw.bucket;
+	cpu.shardLimits = { shard0: raw.limit };
+	cpu.__start = nowMs();
+	return cpu;
 }
 
-function makeMap() {
-	return {
-		getWorldSize() { return __W.roomNames.length > 1 ? 200 : 50; },
+/** Game.map 的共享方法原型 (读 __W 的动态数据, 每 tick Object.create 出新身份) */
+const MAP_PROTO = {
+	getWorldSize() { return __W.roomNames.length > 1 ? 200 : 50; },
 		describeExits(roomName) {
 			if (!__W.roomNames.includes(roomName)) return null;
 			const [rx, ry] = roomNameToXY(roomName);
@@ -2787,9 +2828,11 @@ function makeMap() {
 			if (typeof roomName !== "string" || !/^([WE])\d+([NS])\d+$/.test(roomName)) return null;
 			return { status: "normal", timestamp: null };
 		},
-		visual: new RoomVisual("map"),
+		get visual() {
+			// 懒创建: map.visual 很少被访问
+			return MAP_PROTO.__visual || (MAP_PROTO.__visual = new RoomVisual("map"));
+		},
 	};
-}
 
 // ═══════════════════════════ 计时 / 随机 / 控制台 ═══════════════════════════
 
@@ -3021,8 +3064,10 @@ function __bootstrapBundle(bundleCode) {
 function __runTick() {
 	const errors = [];
 	let cpuUsed = 0;
+	// shim 分相计时 (op 计时, 开销 ~µs 级; 供 Rust 端 profile 汇总)
+	let __tParse0 = 0, __tParse1 = 0, __tRebuild1 = 0, __tLoopEnd = 0;
 	__intents = [];
-	__intentKeys = new Set();
+	__intentKeys.clear();
 	__intentCpu = 0;
 	__controllersClaimedInTick = 0;
 	__consoleLines = [];
@@ -3040,8 +3085,10 @@ function __runTick() {
 		__virtualCpuStep = +rt.virtualCpuStep || 0;
 		// 确定性模式下 Date.now 跟 Game.time 走 (每 tick 3 秒), 不读真实时间
 		Date.now = __virtualCpuStep > 0 ? () => 1600000000000 + (__W ? __W.time : 0) * 3000 : __realDateNow;
+		__tParse0 = nowMs();
 		__W = JSON.parse(__ops.op_sim_get_snapshot());
 		cacheSnapshotTerrain();
+		__tParse1 = nowMs();
 		buildGame();
 		rawMemoryData = __ops.op_sim_get_memory();
 		__installLazyMemory();
@@ -3060,6 +3107,7 @@ function __runTick() {
 			__activeSegments = [];
 		}
 		globalThis.Game = Game;
+		__tRebuild1 = nowMs();
 
 		const loop = __botModule && __botModule.exports && __botModule.exports.loop;
 		if (typeof loop === "function") {
@@ -3074,6 +3122,7 @@ function __runTick() {
 		} else {
 			errors.push("bot bundle 未导出 loop 函数");
 		}
+		__tLoopEnd = nowMs();
 	} catch (e) {
 		errors.push(e && e.stack ? String(e.stack) : String(e));
 	}
@@ -3131,6 +3180,8 @@ function __runTick() {
 		publicSegments: __publicSegments,
 		defaultPublicSegment: __defaultPublicSegment,
 		activeForeignSegment: __activeForeignSegment,
+		// shim 内部分相计时 (ms): 快照 parse / Game 重建 / 结果序列化收尾
+		timing: { parse: __tParse1 - __tParse0, rebuild: __tRebuild1 - __tParse1, finish: nowMs() - __tLoopEnd },
 	});
 	__ops.op_sim_result(result);
 	return result;
