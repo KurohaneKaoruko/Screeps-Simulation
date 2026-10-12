@@ -58,6 +58,13 @@ pub fn build_snapshot(world: &World, opts: &SnapshotOptions) -> String {
     out.push_str(",\"progressTotal\":");
     let _ = write!(out, "{}", gcl_total);
     out.push('}');
+    let (gpl_level, gpl_progress, gpl_total) = world.gpl();
+    let _ = write!(
+        out,
+        ",\"gpl\":{{\"level\":{gpl_level},\"progress\":{gpl_progress},\"progressTotal\":{gpl_total}}}"
+    );
+    out.push_str(",\"transactions\":");
+    out.push_str(&transactions_json(world).to_string());
 
     // roomNames: 全部房间 (地图 API 的世界清单)
     out.push_str(",\"roomNames\":[");
@@ -89,8 +96,9 @@ pub fn build_snapshot(world: &World, opts: &SnapshotOptions) -> String {
     // rooms: 可见房间的对象与事件
     out.push_str(",\"rooms\":{");
     let mut first_room = true;
+    let observed = world.observed_rooms();
     for (name, room) in &world.rooms {
-        if !opts.always_visible && !room.visible() {
+        if !opts.always_visible && !room.visible() && !observed.contains(name) {
             continue;
         }
         if !first_room {
@@ -189,6 +197,10 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
                 put_str(out, &p.part_type);
                 out.push_str(",\"hits\":");
                 let _ = write!(out, "{}", p.hits);
+                if let Some(b) = &p.boost {
+                    out.push_str(",\"boost\":");
+                    put_str(out, b);
+                }
                 out.push('}');
             }
             out.push_str("],\"store\":");
@@ -236,8 +248,16 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             }
         }
         "extension" | "storage" | "container" | "tower" | "terminal" | "link" | "lab"
-        | "powerSpawn" | "factory" | "nuker" => {
+        | "powerSpawn" | "factory" | "nuker" | "extractor" | "observer" => {
             write_structure_common(out, obj);
+            if let Some(cd) = industry_cooldown(obj, world) {
+                out.push_str(",\"cooldown\":");
+                let _ = write!(out, "{}", cd);
+            }
+            if obj.obj_type == "factory" {
+                out.push_str(",\"level\":");
+                let _ = write!(out, "{}", obj.level);
+            }
             if obj.obj_type == "extension" || obj.obj_type == "tower" || obj.obj_type == "link" {
                 out.push_str(",\"energy\":");
                 let _ = write!(out, "{}", obj.store.get("energy").copied().unwrap_or(0));
@@ -288,6 +308,12 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             put_str(out, obj.mineral_type.as_deref().unwrap_or("H"));
             out.push_str(",\"mineralAmount\":");
             let _ = write!(out, "{}", obj.mineral_amount.unwrap_or(0));
+            out.push_str(",\"density\":");
+            let _ = write!(out, "{}", obj.density);
+            if let Some(t) = obj.next_regeneration_time {
+                out.push_str(",\"ticksToRegeneration\":");
+                let _ = write!(out, "{}", t.saturating_sub(world.tick));
+            }
         }
         "controller" => {
             out.push_str(",\"my\":");
@@ -315,7 +341,7 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             out.push_str(",\"reservation\":");
             match obj.reservation_end_time {
                 Some(end) => {
-                    out.push_str("{\"username\":\"Nexus\",\"ticksToEndTime\":");
+                    out.push_str("{\"username\":\"Nexus\",\"ticksToEnd\":");
                     let _ = write!(out, "{}", end.saturating_sub(world.tick));
                     out.push('}');
                 }
@@ -342,9 +368,16 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             let _ = write!(out, "{}", obj.mine);
         }
         "energy" => {
-            out.push_str(",\"energy\":");
-            let _ = write!(out, "{}", obj.store.get("energy").copied().unwrap_or(0));
-            out.push_str(",\"resourceType\":\"energy\"");
+            // 官方 Resource: resourceType + amount; `energy` 字段只在能量堆上存在
+            let rt = obj.resource_type();
+            if rt == "energy" {
+                out.push_str(",\"energy\":");
+                let _ = write!(out, "{}", obj.resource_amount());
+            }
+            out.push_str(",\"resourceType\":");
+            put_str(out, rt);
+            out.push_str(",\"amount\":");
+            let _ = write!(out, "{}", obj.resource_amount());
         }
         "tombstone" => {
             out.push_str(",\"store\":");
@@ -401,8 +434,9 @@ pub fn build_snapshot_value(world: &World, opts: &SnapshotOptions) -> Value {
     }
 
     let mut rooms = Map::new();
+    let observed = world.observed_rooms();
     for (name, room) in &world.rooms {
-        if !opts.always_visible && !room.visible() {
+        if !opts.always_visible && !room.visible() && !observed.contains(name) {
             continue;
         }
         let controller_id = room
@@ -442,6 +476,7 @@ pub fn build_snapshot_value(world: &World, opts: &SnapshotOptions) -> Value {
     }
 
     let (gcl_progress, gcl_total) = world.gcl_level_progress();
+    let (gpl_level, gpl_progress, gpl_total) = world.gpl();
     json!({
         "time": world.tick,
         "cpu": {
@@ -454,6 +489,12 @@ pub fn build_snapshot_value(world: &World, opts: &SnapshotOptions) -> Value {
             "progress": gcl_progress,
             "progressTotal": gcl_total,
         },
+        "gpl": {
+            "level": gpl_level,
+            "progress": gpl_progress,
+            "progressTotal": gpl_total,
+        },
+        "transactions": transactions_json(world),
         "terrain": Value::Object(terrain),
         "roomNames": room_names,
         "rooms": Value::Object(rooms),
@@ -484,7 +525,10 @@ fn object_json(obj: &Obj, world: &World) -> Value {
                 Value::Array(
                     obj.body
                         .iter()
-                        .map(|p| json!({"type": p.part_type, "hits": p.hits}))
+                        .map(|p| match &p.boost {
+                            Some(b) => json!({"type": p.part_type, "hits": p.hits, "boost": b}),
+                            None => json!({"type": p.part_type, "hits": p.hits}),
+                        })
                         .collect(),
                 ),
             );
@@ -529,8 +573,14 @@ fn object_json(obj: &Obj, world: &World) -> Value {
             base(extra)
         }
         "extension" | "storage" | "container" | "tower" | "terminal" | "link" | "lab"
-        | "powerSpawn" | "factory" | "nuker" => {
+        | "powerSpawn" | "factory" | "nuker" | "extractor" | "observer" => {
             let mut extra = structure_common(obj);
+            if let Some(cd) = industry_cooldown(obj, world) {
+                extra.insert("cooldown".into(), json!(cd));
+            }
+            if obj.obj_type == "factory" {
+                extra.insert("level".into(), json!(obj.level));
+            }
             if obj.obj_type == "extension" || obj.obj_type == "tower" || obj.obj_type == "link" {
                 let energy = obj.store.get("energy").copied().unwrap_or(0);
                 extra.insert("energy".into(), json!(energy));
@@ -577,6 +627,10 @@ fn object_json(obj: &Obj, world: &World) -> Value {
                 json!(obj.mineral_type.clone().unwrap_or_else(|| "H".into())),
             );
             extra.insert("mineralAmount".into(), json!(obj.mineral_amount.unwrap_or(0)));
+            extra.insert("density".into(), json!(obj.density));
+            if let Some(t) = obj.next_regeneration_time {
+                extra.insert("ticksToRegeneration".into(), json!(t.saturating_sub(world.tick)));
+            }
             base(extra)
         }
         "controller" => {
@@ -605,7 +659,7 @@ fn object_json(obj: &Obj, world: &World) -> Value {
                 match obj.reservation_end_time {
                     Some(end) => json!({
                         "username": "Nexus",
-                        "ticksToEndTime": end.saturating_sub(world.tick),
+                        "ticksToEnd": end.saturating_sub(world.tick),
                     }),
                     None => Value::Null,
                 },
@@ -632,11 +686,12 @@ fn object_json(obj: &Obj, world: &World) -> Value {
         }
         "energy" => {
             let mut extra = Map::new();
-            extra.insert(
-                "energy".into(),
-                json!(obj.store.get("energy").copied().unwrap_or(0)),
-            );
-            extra.insert("resourceType".into(), json!("energy"));
+            let rt = obj.resource_type();
+            if rt == "energy" {
+                extra.insert("energy".into(), json!(obj.resource_amount()));
+            }
+            extra.insert("resourceType".into(), json!(rt));
+            extra.insert("amount".into(), json!(obj.resource_amount()));
             base(extra)
         }
         "tombstone" => {
@@ -684,4 +739,40 @@ fn store_json(store: &Store) -> Value {
         }
     }
     Value::Object(map)
+}
+
+/// 工业结构的 API cooldown: extractor/link 用递减计数, lab/terminal/factory 用绝对到期 tick
+fn industry_cooldown(obj: &Obj, world: &World) -> Option<u64> {
+    match obj.obj_type.as_str() {
+        "extractor" => Some(obj.cooldown as u64),
+        "lab" | "terminal" | "factory" => Some(obj.cooldown_time.saturating_sub(world.tick)),
+        _ => None,
+    }
+}
+
+/// 最近的终端转账 (官方 Game.market.incoming/outgoingTransactions 的数据源)
+fn transactions_json(world: &World) -> Value {
+    Value::Array(
+        world
+            .transactions
+            .iter()
+            .map(|t| {
+                let mut m = Map::new();
+                m.insert("transactionId".into(), json!(World::id_string(t.id)));
+                m.insert("time".into(), json!(t.time));
+                m.insert("sender".into(), json!({ "username": "Nexus" }));
+                if t.recipient_mine {
+                    m.insert("recipient".into(), json!({ "username": "Nexus" }));
+                }
+                m.insert("resourceType".into(), json!(t.resource_type));
+                m.insert("amount".into(), json!(t.amount));
+                m.insert("from".into(), json!(t.from));
+                m.insert("to".into(), json!(t.to));
+                if let Some(d) = &t.description {
+                    m.insert("description".into(), json!(d));
+                }
+                Value::Object(m)
+            })
+            .collect(),
+    )
 }

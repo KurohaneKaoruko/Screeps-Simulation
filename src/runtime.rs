@@ -126,6 +126,8 @@ pub struct BotRuntime {
     seed: u64,
     /// isolate 新建/重置后需要携带 terrain (shim 的 terrainCache 常驻, 之后不再重发)
     terrain_pending: bool,
+    /// 确定性 CPU: >0 时 shim 不读墙钟, 每次取时间推进这么多毫秒 (Game.cpu.getUsed 可复现)
+    virtual_cpu_step: f64,
 }
 
 /// 看门狗: 到点抢占式终止 V8 执行。
@@ -213,6 +215,7 @@ impl BotRuntime {
             bundle_code: bundle_code.to_string(),
             seed,
             terrain_pending: true,
+            virtual_cpu_step: 0.0,
         })
     }
 
@@ -230,8 +233,14 @@ impl BotRuntime {
         fresh.segments = segments;
         fresh.active_segments = active_segments;
         fresh.terrain_pending = true;
+        fresh.virtual_cpu_step = self.virtual_cpu_step;
         *self = fresh;
         Ok(())
+    }
+
+    /// 打开确定性 CPU (step 毫秒/次取时间; 0 关闭)
+    pub fn set_virtual_cpu_step(&mut self, step: f64) {
+        self.virtual_cpu_step = step.max(0.0);
     }
 
     /// 本 tick 快照是否需要携带 terrain (isolate 新建/重置后的首个快照; 取后即清)
@@ -331,6 +340,7 @@ impl BotRuntime {
         serde_json::json!({
             "activeSegments": self.active_segments,
             "segments": segments,
+            "virtualCpuStep": self.virtual_cpu_step,
         })
         .to_string()
     }

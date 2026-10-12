@@ -132,11 +132,24 @@ console.log('bundle 静态检查 (bundle-check.mjs)')
 	r = checkBundle(`exports.loop = function () { Game.market.deal(id, 1); };`)
 	expect(r.warnings.some((w) => w.message.includes('市场')), '市场覆盖度警告')
 
-	r = checkBundle(`exports.loop = function () { lab.runReaction(a, b, c); };`)
-	expect(r.errors.some((e) => e.message.includes('lab') || e.message.includes('TypeError')), 'lab.runReaction → error')
+	// 工业 API 已实现: 不再报覆盖度错误/警告
+	r = checkBundle(`exports.loop = function () { lab.runReaction(a, b); lab.boostCreep(c); lab.unboostCreep(c); terminal.send(RESOURCE_ENERGY, 100, 'W1N1'); factory.produce(RESOURCE_UTRIUM_BAR); ps.processPower(); obs.observeRoom('W1N1'); Game.market.calcTransactionCost(100, 'W1N1', 'W2N2'); x = Game.gpl.level; };`)
+	expect(r.errors.length === 0 && r.warnings.length === 0, `工业 API 不再被标为未实现 (实际: ${[...r.errors, ...r.warnings].map((e) => e.message)})`)
+
+	r = checkBundle(`exports.loop = function () { nuker.launchNuke(pos); };`)
+	expect(r.errors.some((e) => e.message.includes('nuker')), 'nuker.launchNuke → error')
 
 	r = checkBundle(`exports.loop = function () { WebAssembly.instantiate(bytes); };`)
 	expect(r.warnings.some((w) => w.message.includes('异步')), 'WebAssembly.instantiate 异步警告')
+
+	// bot 自己声明的同前缀常量 / 属性访问 / 对象键 / 字符串 不是官方常量引用
+	r = checkBundle(`var CREEP_LIFE = 1500, POWER_BATCH = 2;
+const { TOWER_URGENT } = cfg;
+function LAB_HELPER() {}
+exports.loop = function () { x = CREEP_LIFE + POWER_BATCH + TOWER_URGENT + o.SPAWN_Q + LAB_HELPER(); y = { ENERGY_Z: 1 }; z = 'BOOST_Q'; };`)
+	expect(r.errors.length === 0, `bot 自定义常量不误报 (实际: ${r.errors.map((e) => e.message)})`)
+	r = checkBundle(`var CREEP_LIFE = 1500;\nexports.loop = function () { w = c ? FIND_SOURCEZ : 0; };`)
+	expect(r.errors.some((e) => e.message.includes('FIND_SOURCEZ')), '三元表达式里的拼写错误仍报')
 
 	// 注释里的命中不应报错
 	r = checkBundle('// TODO: process.env 优化\nexports.loop = function () {};')

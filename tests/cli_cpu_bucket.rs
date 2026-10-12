@@ -225,3 +225,46 @@ fn scenario_tick_limit_override_accepted() {
     .unwrap();
     assert_eq!(s2.cpu_tick_limit(), 150.0);
 }
+
+/// 确定性 CPU: bot 按 Game.cpu.getUsed() 做决策时, 两次运行的世界状态哈希逐位一致
+#[test]
+fn deterministic_cpu_runs_are_identical() {
+    let bin = env!("CARGO_BIN_EXE_screeps-sim");
+    let scenario_path = tmp_path("det-scenario.json");
+    let bundle_path = tmp_path("det-bundle.js");
+    write_file(
+        &scenario_path,
+        &scenario_json(r#"{"limit": 100, "bucket": 10000, "deterministic": true}"#, 40, r#""#),
+    );
+    // CPU 读数决定是否孵化 → 墙钟模式下结果随机器抖动, 确定性模式下必须一致
+    write_file(
+        &bundle_path,
+        r#"exports.loop = function() {
+            let x = 0; for (let i = 0; i < 1000; i++) x += Math.sqrt(i);
+            const used = Game.cpu.getUsed();
+            Memory.used = (Memory.used || []).concat([used]);
+            const s = Game.spawns[Object.keys(Game.spawns)[0]];
+            if (!s.spawning && (used * 1000) % 2 < 1) s.spawnCreep([MOVE], 'c' + Game.time);
+            console.log('used=' + used + ' now=' + Date.now());
+        };"#,
+    );
+    let run = || {
+        let out = Command::new(bin)
+            .arg("--scenario").arg(&scenario_path)
+            .arg("--bundle").arg(&bundle_path)
+            .arg("--json-report").arg("-")
+            .arg("-v")
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!("报告解析失败 {e}\nstdout: {}\nstderr: {}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+        });
+        (report["stateHash"].clone(), String::from_utf8_lossy(&out.stderr).to_string())
+    };
+    let (h1, log1) = run();
+    let (h2, log2) = run();
+    assert_eq!(h1, h2, "确定性 CPU 两次运行状态哈希应一致");
+    let used = |log: &str| log.lines().filter(|l| l.contains("used=")).map(|l| l.split("used=").nth(1).unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!(used(&log1), used(&log2), "getUsed / Date.now 读数应逐 tick 一致");
+    assert!(!used(&log1).is_empty(), "应有 bot 输出\n{log1}");
+}

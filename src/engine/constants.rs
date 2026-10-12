@@ -65,8 +65,8 @@ pub const RESOURCES_ALL: &[&str] = &[
     "H",
     "O",
     "U",
-    "L",
     "K",
+    "L",
     "Z",
     "X",
     "G",
@@ -113,31 +113,37 @@ pub const RESOURCES_ALL: &[&str] = &[
     "zynthium_bar",
     "keanium_bar",
     "ghodium_melt",
-    "utrium_oxide",
-    "lemergium_oxide",
-    "zynthium_oxide",
-    "keanium_oxide",
-    "ghodium_oxide",
-    "utrium_acid",
-    "lemergium_acid",
-    "zynthium_acid",
-    "keanium_acid",
-    "ghodium_acid",
-    "utrium_alkalide",
-    "lemergium_alkalide",
-    "zynthium_alkalide",
-    "keanium_alkalide",
-    "ghodium_alkalide",
-    "catalyzed_utrium_acid",
-    "catalyzed_lemergium_acid",
-    "catalyzed_zynthium_acid",
-    "catalyzed_keanium_acid",
-    "catalyzed_ghodium_acid",
-    "catalyzed_utrium_alkalide",
-    "catalyzed_lemergium_alkalide",
-    "catalyzed_zynthium_alkalide",
-    "catalyzed_keanium_alkalide",
-    "catalyzed_ghodium_alkalide",
+    "oxidant",
+    "reductant",
+    "purifier",
+    "battery",
+    "composite",
+    "crystal",
+    "liquid",
+    "wire",
+    "switch",
+    "transistor",
+    "microchip",
+    "circuit",
+    "device",
+    "cell",
+    "phlegm",
+    "tissue",
+    "muscle",
+    "organoid",
+    "organism",
+    "alloy",
+    "tube",
+    "fixtures",
+    "frame",
+    "hydraulics",
+    "machine",
+    "condensate",
+    "concentrate",
+    "extract",
+    "spirit",
+    "emanation",
+    "essence",
 ];
 
 /// 生命周期与功率
@@ -203,6 +209,7 @@ pub const EVENT_HEAL_TYPE_RANGED: u32 = 2;
 /// Source / 掉落能量
 pub const SOURCE_ENERGY_CAPACITY: u32 = 3000;
 pub const SOURCE_ENERGY_NEUTRAL_CAPACITY: u32 = 1500;
+pub const SOURCE_ENERGY_KEEPER_CAPACITY: u32 = 4000;
 pub const ENERGY_REGEN_TIME: u64 = 300;
 /// 掉落能量每 tick 衰减 ceil(amount / ENERGY_DECAY)
 pub const ENERGY_DECAY: u32 = 1000;
@@ -302,6 +309,11 @@ pub fn controller_structure_limit(structure_type: &str, rcl: u8) -> u32 {
 
 /// 结构对指定资源的容量 (官方 capacityForResource 的结构部分)。
 /// creep 见 `objects::Obj::capacity_for_resource`; 这里只覆盖非 creep 结构。
+/// 官方 storeCapacityResource 形态的专用仓 (按资源分格计容量); 其余 (creep/container/storage/terminal/factory) 是通用仓
+pub fn is_single_resource_store(obj_type: &str) -> bool {
+    matches!(obj_type, "spawn" | "extension" | "tower" | "link" | "lab" | "powerSpawn" | "nuker")
+}
+
 pub fn structure_capacity_for_resource(structure_type: &str, resource: &str, energy_capacity: u32) -> u32 {
     match structure_type {
         "link" => LINK_CAPACITY,
@@ -309,7 +321,8 @@ pub fn structure_capacity_for_resource(structure_type: &str, resource: &str, ene
         "storage" => STORAGE_CAPACITY,
         "terminal" => TERMINAL_CAPACITY,
         // 只存能量的结构: 非 energy 资源容量为 0
-        "spawn" | "extension" | "tower" | "powerSpawn" | "nuker" | "lab" | "factory" => {
+        // (lab / powerSpawn / nuker / terminal / factory 的多资源容量见 objects::Obj::capacity_for_resource)
+        "spawn" | "extension" | "tower" => {
             if resource == "energy" {
                 energy_capacity
             } else {
@@ -330,6 +343,10 @@ pub fn structure_energy_capacity(structure_type: &str, rcl: u8) -> u32 {
         "tower" => TOWER_CAPACITY,
         "terminal" => TERMINAL_CAPACITY,
         "link" => LINK_CAPACITY,
+        "lab" => LAB_ENERGY_CAPACITY,
+        "powerSpawn" => POWER_SPAWN_ENERGY_CAPACITY,
+        "nuker" => NUKER_ENERGY_CAPACITY,
+        "factory" => FACTORY_CAPACITY,
         _ => 0,
     }
 }
@@ -450,9 +467,335 @@ pub const TERRAIN_MASK_SWAMP: u8 = 2;
 /// 每个玩家的最大工地数
 pub const MAX_CONSTRUCTION_SITES: usize = 100;
 
-/// GCL: 从 `level` 升到 `level+1` 所需的累计分数增量。
-/// 官方 game.js:130-131 的 `progressTotal = level^GCL_POW × GCL_MULTIPLY`
-/// (即 GCL1→2 = 1e6, 2→3 = 2^2.4 × 1e6 ≈ 5.278e6)。
-pub fn gcl_progress_total(level: u32) -> u64 {
-    (GCL_MULTIPLY as f64 * (level as f64).powf(GCL_POW)) as u64
+/// GCL 到达 `level` 所需的累计分数: (level-1)^GCL_POW × GCL_MULTIPLY (官方 game.js:131 gclBaseProgress)。
+pub fn gcl_base_progress(level: u32) -> u64 {
+    (GCL_MULTIPLY as f64 * ((level.max(1) - 1) as f64).powf(GCL_POW)) as u64
 }
+
+/// GCL: 从 `level` 升到 `level+1` 所需的分数增量 (官方 game.js:162 progressTotal):
+/// level^POW × MULT − (level−1)^POW × MULT。GCL1→2 = 1e6, 2→3 ≈ 4.278e6。
+pub fn gcl_progress_total(level: u32) -> u64 {
+    gcl_base_progress(level + 1) - gcl_base_progress(level)
+}
+
+/// 官方 game.js:130: level = floor((gcl / MULT)^(1/POW)) + 1
+pub fn gcl_level_for(points: u64) -> u32 {
+    let mut level = ((points as f64 / GCL_MULTIPLY as f64).powf(1.0 / GCL_POW)).floor() as u32 + 1;
+    // 浮点边界修正: 保证 base(level) <= points < base(level+1)
+    while level > 1 && gcl_base_progress(level) > points {
+        level -= 1;
+    }
+    while gcl_base_progress(level + 1) <= points {
+        level += 1;
+    }
+    level
+}
+
+// ── 工业: 矿物 / 实验室 / 终端 / 观察者 / PowerSpawn / 工厂 (官方 constants.js) ──
+
+pub const HARVEST_MINERAL_POWER: u32 = 1;
+pub const EXTRACTOR_COOLDOWN: u32 = 5;
+pub const MINERAL_REGEN_TIME: u64 = 50_000;
+/// 官方 MINERAL_DENSITY: 密度等级 → 再生后的储量
+pub const MINERAL_DENSITY: &[(u8, u32)] = &[(1, 15_000), (2, 35_000), (3, 70_000), (4, 100_000)];
+/// 官方 MINERAL_DENSITY_PROBABILITY (累积概率, 按键升序判定)
+pub const MINERAL_DENSITY_PROBABILITY: &[(u8, f64)] = &[(1, 0.1), (2, 0.5), (3, 0.9), (4, 1.0)];
+pub const MINERAL_DENSITY_CHANGE: f64 = 0.05;
+pub const DENSITY_LOW: u8 = 1;
+pub const DENSITY_MODERATE: u8 = 2;
+pub const DENSITY_ULTRA: u8 = 4;
+
+pub fn mineral_density_amount(density: u8) -> u32 {
+    MINERAL_DENSITY
+        .iter()
+        .find(|(d, _)| *d == density)
+        .map(|(_, a)| *a)
+        .unwrap_or(0)
+}
+
+pub const LAB_MINERAL_CAPACITY: u32 = 3000;
+pub const LAB_ENERGY_CAPACITY: u32 = 2000;
+pub const LAB_BOOST_ENERGY: u32 = 20;
+pub const LAB_BOOST_MINERAL: u32 = 30;
+pub const LAB_REACTION_AMOUNT: u32 = 5;
+pub const LAB_UNBOOST_ENERGY: u32 = 0;
+pub const LAB_UNBOOST_MINERAL: u32 = 15;
+
+pub const TERMINAL_COOLDOWN: u64 = 10;
+pub const OBSERVER_RANGE: i64 = 10;
+
+pub const POWER_SPAWN_ENERGY_CAPACITY: u32 = 5000;
+pub const POWER_SPAWN_POWER_CAPACITY: u32 = 100;
+pub const POWER_SPAWN_ENERGY_RATIO: u32 = 50;
+/// GPL: level = floor((power / POWER_LEVEL_MULTIPLY)^(1/POWER_LEVEL_POW))
+pub const POWER_LEVEL_MULTIPLY: f64 = 1000.0;
+pub const POWER_LEVEL_POW: f64 = 2.0;
+
+pub const FACTORY_CAPACITY: u32 = 50_000;
+pub const NUKER_ENERGY_CAPACITY: u32 = 300_000;
+pub const NUKER_GHODIUM_CAPACITY: u32 = 5000;
+
+/// 官方 BOOSTS[part][boost][method] (无该加成返回 None)
+pub fn boost_effect(part: &str, boost: &str, method: &str) -> Option<f64> {
+    BOOSTS
+        .iter()
+        .find(|(p, b, m, _)| *p == part && *b == boost && *m == method)
+        .map(|(_, _, _, v)| *v)
+}
+
+/// 官方 `C.BOOSTS[part][boost]` 是否存在 (boostCreep 选部件用)
+pub fn boost_applies(part: &str, boost: &str) -> bool {
+    BOOSTS.iter().any(|(p, b, _, _)| *p == part && *b == boost)
+}
+
+/// 官方 REACTIONS[a][b]
+pub fn reaction_product(a: &str, b: &str) -> Option<&'static str> {
+    REACTIONS.iter().find(|(x, y, _)| *x == a && *y == b).map(|(_, _, p)| *p)
+}
+
+/// 官方 utils.getReactionVariants: 生成 `compound` 的全部 (试剂1, 试剂2), 按官方迭代序
+pub fn reaction_variants(compound: &str) -> Vec<(&'static str, &'static str)> {
+    REACTIONS
+        .iter()
+        .filter(|(_, _, p)| *p == compound)
+        .map(|(a, b, _)| (*a, *b))
+        .collect()
+}
+
+pub fn reaction_time(product: &str) -> Option<u64> {
+    REACTION_TIME.iter().find(|(p, _)| *p == product).map(|(_, t)| *t)
+}
+
+/// 官方 utils.calcTotalReactionsTime: 化合物整条反应链的总冷却
+pub fn total_reactions_time(mineral: &str) -> u64 {
+    let Some(t) = reaction_time(mineral) else { return 0 };
+    // 官方 reagents 表: 每个产物取 REACTIONS 迭代中最后一次出现的 (试剂, 键) 组合
+    let mut reagents: Option<(&str, &str)> = None;
+    for (a, b, p) in REACTIONS {
+        if *p == mineral {
+            reagents = Some((b, a));
+        }
+    }
+    match reagents {
+        Some((r1, r2)) => t + total_reactions_time(r1) + total_reactions_time(r2),
+        None => t,
+    }
+}
+
+pub fn commodity(product: &str) -> Option<&'static Commodity> {
+    COMMODITIES.iter().find(|c| c.product == product)
+}
+
+// ── 工业表 (由官方 common/lib/constants.js 逐字生成, 勿手改) ──
+
+/// 官方 REACTIONS: (试剂1, 试剂2, 产物), 保持官方对象键的迭代顺序 (getReactionVariants 依赖此序)
+pub const REACTIONS: &[(&str, &str, &str)] = &[
+    ("H", "O", "OH"),
+    ("H", "L", "LH"),
+    ("H", "K", "KH"),
+    ("H", "U", "UH"),
+    ("H", "Z", "ZH"),
+    ("H", "G", "GH"),
+    ("O", "H", "OH"),
+    ("O", "L", "LO"),
+    ("O", "K", "KO"),
+    ("O", "U", "UO"),
+    ("O", "Z", "ZO"),
+    ("O", "G", "GO"),
+    ("Z", "K", "ZK"),
+    ("Z", "H", "ZH"),
+    ("Z", "O", "ZO"),
+    ("L", "U", "UL"),
+    ("L", "H", "LH"),
+    ("L", "O", "LO"),
+    ("K", "Z", "ZK"),
+    ("K", "H", "KH"),
+    ("K", "O", "KO"),
+    ("G", "H", "GH"),
+    ("G", "O", "GO"),
+    ("U", "L", "UL"),
+    ("U", "H", "UH"),
+    ("U", "O", "UO"),
+    ("OH", "UH", "UH2O"),
+    ("OH", "UO", "UHO2"),
+    ("OH", "ZH", "ZH2O"),
+    ("OH", "ZO", "ZHO2"),
+    ("OH", "KH", "KH2O"),
+    ("OH", "KO", "KHO2"),
+    ("OH", "LH", "LH2O"),
+    ("OH", "LO", "LHO2"),
+    ("OH", "GH", "GH2O"),
+    ("OH", "GO", "GHO2"),
+    ("X", "UH2O", "XUH2O"),
+    ("X", "UHO2", "XUHO2"),
+    ("X", "LH2O", "XLH2O"),
+    ("X", "LHO2", "XLHO2"),
+    ("X", "KH2O", "XKH2O"),
+    ("X", "KHO2", "XKHO2"),
+    ("X", "ZH2O", "XZH2O"),
+    ("X", "ZHO2", "XZHO2"),
+    ("X", "GH2O", "XGH2O"),
+    ("X", "GHO2", "XGHO2"),
+    ("ZK", "UL", "G"),
+    ("UL", "ZK", "G"),
+    ("LH", "OH", "LH2O"),
+    ("ZH", "OH", "ZH2O"),
+    ("GH", "OH", "GH2O"),
+    ("KH", "OH", "KH2O"),
+    ("UH", "OH", "UH2O"),
+    ("LO", "OH", "LHO2"),
+    ("ZO", "OH", "ZHO2"),
+    ("KO", "OH", "KHO2"),
+    ("UO", "OH", "UHO2"),
+    ("GO", "OH", "GHO2"),
+    ("LH2O", "X", "XLH2O"),
+    ("KH2O", "X", "XKH2O"),
+    ("ZH2O", "X", "XZH2O"),
+    ("UH2O", "X", "XUH2O"),
+    ("GH2O", "X", "XGH2O"),
+    ("LHO2", "X", "XLHO2"),
+    ("UHO2", "X", "XUHO2"),
+    ("KHO2", "X", "XKHO2"),
+    ("ZHO2", "X", "XZHO2"),
+    ("GHO2", "X", "XGHO2"),
+];
+
+/// 官方 REACTION_TIME: 产物 → 反应冷却 tick
+pub const REACTION_TIME: &[(&str, u64)] = &[
+    ("OH", 20),
+    ("ZK", 5),
+    ("UL", 5),
+    ("G", 5),
+    ("UH", 10),
+    ("UH2O", 5),
+    ("XUH2O", 60),
+    ("UO", 10),
+    ("UHO2", 5),
+    ("XUHO2", 60),
+    ("KH", 10),
+    ("KH2O", 5),
+    ("XKH2O", 60),
+    ("KO", 10),
+    ("KHO2", 5),
+    ("XKHO2", 60),
+    ("LH", 15),
+    ("LH2O", 10),
+    ("XLH2O", 65),
+    ("LO", 10),
+    ("LHO2", 5),
+    ("XLHO2", 60),
+    ("ZH", 20),
+    ("ZH2O", 40),
+    ("XZH2O", 160),
+    ("ZO", 10),
+    ("ZHO2", 5),
+    ("XZHO2", 60),
+    ("GH", 10),
+    ("GH2O", 15),
+    ("XGH2O", 80),
+    ("GO", 10),
+    ("GHO2", 30),
+    ("XGHO2", 150),
+];
+
+/// 官方 BOOSTS: (部件, 化合物, 方法, 倍率)
+pub const BOOSTS: &[(&str, &str, &str, f64)] = &[
+    ("work", "UO", "harvest", 3.0),
+    ("work", "UHO2", "harvest", 5.0),
+    ("work", "XUHO2", "harvest", 7.0),
+    ("work", "LH", "build", 1.5),
+    ("work", "LH", "repair", 1.5),
+    ("work", "LH2O", "build", 1.8),
+    ("work", "LH2O", "repair", 1.8),
+    ("work", "XLH2O", "build", 2.0),
+    ("work", "XLH2O", "repair", 2.0),
+    ("work", "ZH", "dismantle", 2.0),
+    ("work", "ZH2O", "dismantle", 3.0),
+    ("work", "XZH2O", "dismantle", 4.0),
+    ("work", "GH", "upgradeController", 1.5),
+    ("work", "GH2O", "upgradeController", 1.8),
+    ("work", "XGH2O", "upgradeController", 2.0),
+    ("attack", "UH", "attack", 2.0),
+    ("attack", "UH2O", "attack", 3.0),
+    ("attack", "XUH2O", "attack", 4.0),
+    ("ranged_attack", "KO", "rangedAttack", 2.0),
+    ("ranged_attack", "KO", "rangedMassAttack", 2.0),
+    ("ranged_attack", "KHO2", "rangedAttack", 3.0),
+    ("ranged_attack", "KHO2", "rangedMassAttack", 3.0),
+    ("ranged_attack", "XKHO2", "rangedAttack", 4.0),
+    ("ranged_attack", "XKHO2", "rangedMassAttack", 4.0),
+    ("heal", "LO", "heal", 2.0),
+    ("heal", "LO", "rangedHeal", 2.0),
+    ("heal", "LHO2", "heal", 3.0),
+    ("heal", "LHO2", "rangedHeal", 3.0),
+    ("heal", "XLHO2", "heal", 4.0),
+    ("heal", "XLHO2", "rangedHeal", 4.0),
+    ("carry", "KH", "capacity", 2.0),
+    ("carry", "KH2O", "capacity", 3.0),
+    ("carry", "XKH2O", "capacity", 4.0),
+    ("move", "ZO", "fatigue", 2.0),
+    ("move", "ZHO2", "fatigue", 3.0),
+    ("move", "XZHO2", "fatigue", 4.0),
+    ("tough", "GO", "damage", 0.7),
+    ("tough", "GHO2", "damage", 0.5),
+    ("tough", "XGHO2", "damage", 0.3),
+];
+
+/// 官方 COMMODITIES 的一条配方
+pub struct Commodity {
+    pub product: &'static str,
+    /// 需要的工厂等级 (None = 无等级要求)
+    pub level: Option<u8>,
+    pub amount: u32,
+    pub cooldown: u64,
+    pub components: &'static [(&'static str, u32)],
+}
+
+/// 官方 COMMODITIES (工厂配方表)
+pub const COMMODITIES: &[Commodity] = &[
+    Commodity { product: "utrium_bar", level: None, amount: 100, cooldown: 20, components: &[("U", 500), ("energy", 200)] },
+    Commodity { product: "U", level: None, amount: 500, cooldown: 20, components: &[("utrium_bar", 100), ("energy", 200)] },
+    Commodity { product: "lemergium_bar", level: None, amount: 100, cooldown: 20, components: &[("L", 500), ("energy", 200)] },
+    Commodity { product: "L", level: None, amount: 500, cooldown: 20, components: &[("lemergium_bar", 100), ("energy", 200)] },
+    Commodity { product: "zynthium_bar", level: None, amount: 100, cooldown: 20, components: &[("Z", 500), ("energy", 200)] },
+    Commodity { product: "Z", level: None, amount: 500, cooldown: 20, components: &[("zynthium_bar", 100), ("energy", 200)] },
+    Commodity { product: "keanium_bar", level: None, amount: 100, cooldown: 20, components: &[("K", 500), ("energy", 200)] },
+    Commodity { product: "K", level: None, amount: 500, cooldown: 20, components: &[("keanium_bar", 100), ("energy", 200)] },
+    Commodity { product: "ghodium_melt", level: None, amount: 100, cooldown: 20, components: &[("G", 500), ("energy", 200)] },
+    Commodity { product: "G", level: None, amount: 500, cooldown: 20, components: &[("ghodium_melt", 100), ("energy", 200)] },
+    Commodity { product: "oxidant", level: None, amount: 100, cooldown: 20, components: &[("O", 500), ("energy", 200)] },
+    Commodity { product: "O", level: None, amount: 500, cooldown: 20, components: &[("oxidant", 100), ("energy", 200)] },
+    Commodity { product: "reductant", level: None, amount: 100, cooldown: 20, components: &[("H", 500), ("energy", 200)] },
+    Commodity { product: "H", level: None, amount: 500, cooldown: 20, components: &[("reductant", 100), ("energy", 200)] },
+    Commodity { product: "purifier", level: None, amount: 100, cooldown: 20, components: &[("X", 500), ("energy", 200)] },
+    Commodity { product: "X", level: None, amount: 500, cooldown: 20, components: &[("purifier", 100), ("energy", 200)] },
+    Commodity { product: "battery", level: None, amount: 50, cooldown: 10, components: &[("energy", 600)] },
+    Commodity { product: "energy", level: None, amount: 500, cooldown: 10, components: &[("battery", 50)] },
+    Commodity { product: "composite", level: Some(1), amount: 20, cooldown: 50, components: &[("utrium_bar", 20), ("zynthium_bar", 20), ("energy", 20)] },
+    Commodity { product: "crystal", level: Some(2), amount: 6, cooldown: 21, components: &[("lemergium_bar", 6), ("keanium_bar", 6), ("purifier", 6), ("energy", 45)] },
+    Commodity { product: "liquid", level: Some(3), amount: 12, cooldown: 60, components: &[("oxidant", 12), ("reductant", 12), ("ghodium_melt", 12), ("energy", 90)] },
+    Commodity { product: "wire", level: None, amount: 20, cooldown: 8, components: &[("utrium_bar", 20), ("silicon", 100), ("energy", 40)] },
+    Commodity { product: "switch", level: Some(1), amount: 5, cooldown: 70, components: &[("wire", 40), ("oxidant", 95), ("utrium_bar", 35), ("energy", 20)] },
+    Commodity { product: "transistor", level: Some(2), amount: 1, cooldown: 59, components: &[("switch", 4), ("wire", 15), ("reductant", 85), ("energy", 8)] },
+    Commodity { product: "microchip", level: Some(3), amount: 1, cooldown: 250, components: &[("transistor", 2), ("composite", 50), ("wire", 117), ("purifier", 25), ("energy", 16)] },
+    Commodity { product: "circuit", level: Some(4), amount: 1, cooldown: 800, components: &[("microchip", 1), ("transistor", 5), ("switch", 4), ("oxidant", 115), ("energy", 32)] },
+    Commodity { product: "device", level: Some(5), amount: 1, cooldown: 600, components: &[("circuit", 1), ("microchip", 3), ("crystal", 110), ("ghodium_melt", 150), ("energy", 64)] },
+    Commodity { product: "cell", level: None, amount: 20, cooldown: 8, components: &[("lemergium_bar", 20), ("biomass", 100), ("energy", 40)] },
+    Commodity { product: "phlegm", level: Some(1), amount: 2, cooldown: 35, components: &[("cell", 20), ("oxidant", 36), ("lemergium_bar", 16), ("energy", 8)] },
+    Commodity { product: "tissue", level: Some(2), amount: 2, cooldown: 164, components: &[("phlegm", 10), ("cell", 10), ("reductant", 110), ("energy", 16)] },
+    Commodity { product: "muscle", level: Some(3), amount: 1, cooldown: 250, components: &[("tissue", 3), ("phlegm", 3), ("zynthium_bar", 50), ("reductant", 50), ("energy", 16)] },
+    Commodity { product: "organoid", level: Some(4), amount: 1, cooldown: 800, components: &[("muscle", 1), ("tissue", 5), ("purifier", 208), ("oxidant", 256), ("energy", 32)] },
+    Commodity { product: "organism", level: Some(5), amount: 1, cooldown: 600, components: &[("organoid", 1), ("liquid", 150), ("tissue", 6), ("cell", 310), ("energy", 64)] },
+    Commodity { product: "alloy", level: None, amount: 20, cooldown: 8, components: &[("zynthium_bar", 20), ("metal", 100), ("energy", 40)] },
+    Commodity { product: "tube", level: Some(1), amount: 2, cooldown: 45, components: &[("alloy", 40), ("zynthium_bar", 16), ("energy", 8)] },
+    Commodity { product: "fixtures", level: Some(2), amount: 1, cooldown: 115, components: &[("composite", 20), ("alloy", 41), ("oxidant", 161), ("energy", 8)] },
+    Commodity { product: "frame", level: Some(3), amount: 1, cooldown: 125, components: &[("fixtures", 2), ("tube", 4), ("reductant", 330), ("zynthium_bar", 31), ("energy", 16)] },
+    Commodity { product: "hydraulics", level: Some(4), amount: 1, cooldown: 800, components: &[("liquid", 150), ("fixtures", 3), ("tube", 15), ("purifier", 208), ("energy", 32)] },
+    Commodity { product: "machine", level: Some(5), amount: 1, cooldown: 600, components: &[("hydraulics", 1), ("frame", 2), ("fixtures", 3), ("tube", 12), ("energy", 64)] },
+    Commodity { product: "condensate", level: None, amount: 20, cooldown: 8, components: &[("keanium_bar", 20), ("mist", 100), ("energy", 40)] },
+    Commodity { product: "concentrate", level: Some(1), amount: 3, cooldown: 41, components: &[("condensate", 30), ("keanium_bar", 15), ("reductant", 54), ("energy", 12)] },
+    Commodity { product: "extract", level: Some(2), amount: 2, cooldown: 128, components: &[("concentrate", 10), ("condensate", 30), ("oxidant", 60), ("energy", 16)] },
+    Commodity { product: "spirit", level: Some(3), amount: 1, cooldown: 200, components: &[("extract", 2), ("concentrate", 6), ("reductant", 90), ("purifier", 20), ("energy", 16)] },
+    Commodity { product: "emanation", level: Some(4), amount: 1, cooldown: 800, components: &[("spirit", 2), ("extract", 2), ("concentrate", 3), ("keanium_bar", 112), ("energy", 32)] },
+    Commodity { product: "essence", level: Some(5), amount: 1, cooldown: 600, components: &[("emanation", 1), ("spirit", 3), ("crystal", 110), ("ghodium_melt", 150), ("energy", 64)] },
+];

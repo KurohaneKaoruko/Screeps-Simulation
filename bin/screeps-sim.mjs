@@ -62,6 +62,7 @@ test 选项:
   --jobs, -j <n>    并行运行 n 个引擎进程 (含 cpu*Below 断言时建议 -j 1)
   --list, -l        只列出发现的用例, 不运行
   --verbose, -v     显示 bot console 输出与引擎 stderr
+  --no-bundle-check bundle 预检错误只提示, 不判失败 (也可在 package.json "screeps-sim".bundleCheck: false)
 
 环境变量:
   SCREEPS_SIM_BIN   显式指定 Rust 二进制路径 (跳过自动构建)`)

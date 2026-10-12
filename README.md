@@ -31,6 +31,17 @@
   `sign` / `attackController`（降级计时提前 300 + 升级封锁 1000t））；
   rampart 重定向、伤害累积至 tick 末统一应用、`_recalc-body` 从身体头部开始损坏（尾部先满血）、
   容量缩小自动掉落超容资源。
+  **工业链路**：采矿（`Creep.harvest(mineral)` 需同格自有且激活的 extractor，`HARVEST_MINERAL_POWER × WORK`，
+  extractor 冷却 5（官方 `_cooldown`，每 6 tick 一采）；矿物枯竭后 `MINERAL_REGEN_TIME` 按密度回满并按官方概率换密度）、
+  部件强化（`body[i].boost`：采集/拆除/攻击/远程/群攻/治疗/CARRY 容量/MOVE 疲劳按 `BOOSTS` 倍率，
+  build/repair/upgradeController 的强化额外量与官方 `boostedParts` 截断一致且能量按未强化量扣，TOUGH 减伤、
+  负重折算、死亡返还化合物、renew 清除强化）、实验室（`runReaction`/`reverseReaction`/`boostCreep`/`unboostCreep`，
+  `REACTION_TIME` 冷却、lab 只持有一种矿物、unboost 返还 15/件 + 反应链冷却）、终端（`send` 在 tick 末的全局阶段执行：
+  目标仓空间截断、能量费 `⌈amount × (1 − e^(−距离/30))⌉`、冷却 10；`Game.market.calcTransactionCost` 与
+  `incoming/outgoingTransactions`）、观察者（`observeRoom` 的房间下一 tick 可见）、`PowerSpawn.processPower`
+  （累计 power → `Game.gpl`）、`Factory.produce`（官方 `COMMODITIES` 配方）。所有自有结构按官方
+  `checkStructureAgainstController` 判定激活（离控制器近者优先占名额），terminal/factory 容量随 RCL；
+  掉落资源按 `resourceType` 分堆（`LOOK_RESOURCES` / `FIND_DROPPED_RESOURCES` 返回任意资源）。
   同 tick 的多个意图按官方 `creepActions` 顺序结算（drop → transfer → withdraw → pickup →
   heal → rangedHeal → dismantle → attack → harvest → move → repair → build → rangedMassAttack →
   rangedAttack → say → suicide → claimController → upgradeController → reserveController →
@@ -67,11 +78,15 @@
 |---|---|
 | PathFinder 跨房计价 | 出口格与对侧入口格按两步计价（官方为同节点），宏观行为一致 |
 | 有限世界 | 场景未定义相邻房间时，出口格上的 creep 停留原地（官方无限世界必穿越） |
-| 矿物/市场/Power/实验室 | 未实现（经济阶段不需要），相关 API 为安全桩：抛出明确的"未实现"错误，而不是静默失败或 `TypeError` |
+| 市场订单 / Power Creep / Nuker | 未实现：`Game.market` 的订单/`deal`/`credits` 为 no-op 桩（`terminal.send`、`calcTransactionCost`、转账记录已实现），`Game.powerCreeps` 恒空，`launchNuke` 缺失（bundle 预检会报错） |
+| 工业的 Power 效果 | 不模拟任何 `PWR_*` 效果（`PWR_OPERATE_LAB/TERMINAL/FACTORY/POWER`、`PWR_REGEN_MINERAL` 等）；因此**有等级的工厂商品**（`COMMODITIES[x].level > 0`）恒失败（API 返回 `ERR_BUSY`/`ERR_INVALID_TARGET`，与官方无效果时一致），只有 0 级商品可生产；工厂等级只能由场景 `structures[].level` 给定 |
+| 矿物换密度的随机数 | 官方处理器用 `Math.random`；这里用场景 `seed` 播种的引擎随机数（splitmix64），概率分布一致、序列不同，同 seed 可复现 |
+| 转账记录 | 单玩家：发往自己终端的转账同时出现在 `incomingTransactions` 与 `outgoingTransactions`；只保留最近 100 条，`sender/recipient` 的 username 固定为 `Nexus`（敌方终端无 recipient） |
+| 敌方结构的激活 | 结构 `isActive()`（RCL 名额）只对我方结构计算，场景放置的敌方结构恒为激活 |
 | 战斗（近似完成） | 近战/远程/群体攻击、治疗、拆除、claim/reserve/sign/attackController 已对齐官方语义（含 hit-back、rampart 重定向、部件从头损坏、伤害 tick 末统一应用、意图互斥表）；未覆盖：Power 效果（`PWR_FORTIFY` 等护盾）、safeMode 拦截、nuker |
 | 地形生成 | `generated` 为噪声近似，不复刻官方地形算法；可用 `rows`/`raw` 显式给定真实地形 |
-| 事件日志结构 | 已实现 `EVENT_HARVEST/BUILD/REPAIR/UPGRADE_CONTROLLER/TRANSFER/OBJECT_DESTROYED/EXIT/ATTACK/HEAL/ATTACK_CONTROLLER/RESERVE_CONTROLLER`；`objectId` 取发起动作的对象，目标 id 放在 `data.targetId`/`data.sourceId` |
-| CPU 墙钟耗时 | `usedTime` 只计 `loop()` 墙钟 + 意图计价，不含 Memory 解析/序列化；跨机器不可复现（P95 断言请留足余量） |
+| 事件日志结构 | 已实现 `EVENT_HARVEST/BUILD/REPAIR/UPGRADE_CONTROLLER/TRANSFER/OBJECT_DESTROYED/EXIT/ATTACK/HEAL/ATTACK_CONTROLLER/RESERVE_CONTROLLER`；`objectId` 取发起动作的对象，目标 id 放在 `data.targetId`/`data.sourceId`（采能量用 `sourceId`，采矿按官方用 `targetId`、`amount` 为未截断的采集功率）；lab/terminal/factory/observer/powerSpawn 不产生事件（官方只写 actionLog） |
+| CPU 墙钟耗时 | `usedTime` 只计 `loop()` 墙钟 + 意图计价，不含 Memory 解析/序列化；跨机器不可复现（P95 断言请留足余量）。bot 按 `getUsed()` 做决策时每次运行结果会不同，需要逐位复现（A/B 对比）时打开 `cpu.deterministic` |
 | CPU 中断的意图 | 看门狗中断后该 tick 的意图全部丢弃（官方 runtime 的 `intentsList` 只在 `game.run()` 正常返回后回传），仅保留中断前已刷出的 `console` 输出便于排查 |
 | 全局重置触发条件 | 官方按 isolate 堆占用触发；这里用场景的 `globalResetEvery` 固定周期模拟（语义一致：全局变量丢失、Memory 保留） |
 | 内存段校验失败的后果 | 官方在 tick 末尾 `throw` 使整个 tick 结果作废；这里改为记入 `errors` 并丢弃该次段写入，其余 tick 结果照常提交 |
@@ -172,14 +187,14 @@ screeps-sim check --strict             # 警告也计为失败 (CI 用)
 - 警告: RCL 超限结构 (引擎会标 off)、同格多结构、墙上对象、**房间不连通**(房名拼写错误的典型症状)、
   `seed=0` 不可复现、`alwaysVisible` 调试残留、无断言场景等
 
-**bot bundle 检查** (`bundle-check.mjs`, 基于 435 个官方常量 + 模拟器覆盖度表):
+**bot bundle 检查** (`bundle-check.mjs`, 基于 433 个官方常量 + 模拟器覆盖度表):
 
 - 错误: **常量拼写错误** (`ERR_NOT_IN_RANG` → 运行时 undefined, 比较永远失败)、
   **参数顺序颠倒** (`transfer(RESOURCE_ENERGY, target)` / `spawnCreep('name', body)`)、
   **node 泄漏** (`process.` / `require(` / `Buffer.` —— 官方同样会炸)、
-  调用模拟器未实现的方法 (`runReaction` / `boostCreep` / `launchNuke` / `terminal.send` → TypeError)
+  调用模拟器未实现的方法 (`launchNuke` → TypeError)
 - 警告: `setTimeout` 等运行时缺失的 API、`WebAssembly.instantiate` 跨 tick 异步必死、
-  **模拟覆盖度** (`Game.market` no-op、powerCreeps 恒空 —— 提示哪些行为不会被模拟)
+  **模拟覆盖度** (`Game.market` 订单/deal no-op、powerCreeps 恒空 —— 提示哪些行为不会被模拟)
 
 常量表从 `src/js/screeps.js` 自动提取 (`node runner/gen-constants.mjs`), `npm test` 校验同步。
 `test` 运行时自动做两层预检: 场景错误 → 用例秒失败; bundle 错误 → 使用该 bundle 的用例全部秒失败,
@@ -271,6 +286,7 @@ CLI 选项：
 | `-v, --verbose` | 打印全部 `console.log` |
 | `--dump-memory <path>` | 落盘最终 Memory |
 | `--render-terrain <room>` | 打印指定房间的 ASCII 地形与墙/沼泽占比 |
+| `--deterministic-cpu` | 确定性 CPU (等价场景 `cpu.deterministic: true`): bot 读到的 CPU 只由调用次数和意图数决定, 两次运行状态哈希一致 |
 | `--no-seed-random` | 关闭 `Math.random` 播种（默认播种，seed 取自场景 `seed`） |
 
 ### V8 预编译库下载失败时
@@ -308,7 +324,9 @@ cargo build --release
     "limit": 100,             // 每 tick CPU 上限 (ms)
     "bucket": 10000,          // 初始 bucket
     "tick_limit": 500,        // 覆盖 tickLimit; 默认按官方公式 min(500, max(0, bucket) + limit) 逐 tick 计算
-    "enforce": false          // true 时超 tickLimit 由看门狗强制中断当 tick (默认仅计量)
+    "enforce": false,         // true 时超 tickLimit 由看门狗强制中断当 tick (默认仅计量)
+    "deterministic": false,   // true: getUsed() 不读墙钟 (每次取时间 +0.01ms, 意图另计 0.2), 同场景每次运行逐位一致
+    "deterministicStep": 0.01 // 确定性模式的时间步长 (毫秒/次)
   },
   "globalResetEvery": 0,      // >0 时每 N tick 重建 isolate 做一次全局重置; 省略/0 表示不重置
   "always_visible": false,    // 调试: 全房间常可见
@@ -318,9 +336,14 @@ cargo build --release
     "terrain": { "kind": "flat" },            // flat | generated{seed} | rows | raw
     "sources": { "count": 2, "energy": 3000 },
     "controller": { "level": 1, "pos": [28, 27] },
-    "mineral": { "pos": [38, 38], "mineral_type": "H", "amount": 30000 },
-    "structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 }],
-    "creeps": [{ "name": "W1", "body": ["work","carry","move"], "pos": [26, 25] }]
+    "mineral": { "pos": [38, 38], "mineral_type": "H", "amount": 30000, "density": 2 },
+    "structures": [
+      { "type": "spawn", "pos": [25, 25], "energy": 300 },
+      // store: 预置仓储 (中后期场景直接起步); level: 工厂等级
+      { "type": "terminal", "pos": [20, 20], "store": { "energy": 50000, "H": 3000 } }
+    ],
+    // body: 字符串或带强化的 {"type": "work", "boost": "UO"} (boost 须与部件匹配, 见官方 BOOSTS)
+    "creeps": [{ "name": "W1", "body": ["work", {"type": "carry", "boost": "KH"}, "move"], "pos": [26, 25] }]
   }],
   "asserts": [
     { "kind": "rclAtLeast", "value": 3 },
@@ -333,7 +356,7 @@ cargo build --release
 
 场景在构建世界前会做一次校验（`Scenario::validate`），错误信息带房间与字段定位：
 房名格式（`W5N8`/`E12S3`）、房间重名、坐标 0..49、控制器等级 0..8、单位重名、
-部件名与部件数上限（50）、结构类型、`terrain.raw` 长度 2500、`ticks > 0`、
+部件名与部件数上限（50）、强化与部件匹配、`mineral.density` 1..4、结构类型、`terrain.raw` 长度 2500、`ticks > 0`、
 `cpu.limit > 0`、`globalResetEvery > 0`。
 
 断言类型：`rclAtLeast` / `rclReachedBy` / `creepCountAtLeast` / `cpuAvgBelow` /
@@ -350,8 +373,8 @@ cargo test --release   # 推荐: 同时覆盖 release 优化后的代码生成 (
 
 | 测试文件 | 覆盖 |
 |---|---|
-| `tests/engine_rules.rs` | 用受控意图直接驱动引擎（不经 V8）：掉落衰减、Source 再生时序、疲劳步频、出口格越房与弹回、RCL 升级/降级数值、能量转移容量、容器承接掉落、部分拾取、意图顺序与互斥、`off` 停用、GCL 公式、事件日志；以及多房间移动隔离、交换对象优先、可见性判定、墙上路造价 ×150、容器首次衰减 +100、rampart 衰减与 hitsMax、建造障碍、拆除工地掉落、`renewCreep`/`recycleCreep`、`tower.repair`、`link.transferEnergy` |
-| `tests/shim_apis.rs` | 微型 bundle 驱动 V8：PathFinder 跨房、地图 API、`moveTo` 端到端闭环（含 Memory 往返与 `_move` 缓存） |
+| `tests/engine_rules.rs` | 用受控意图直接驱动引擎（不经 V8）：掉落衰减、Source 再生时序、疲劳步频、出口格越房与弹回、RCL 升级/降级数值、能量转移容量、容器承接掉落、部分拾取、意图顺序与互斥、`off` 停用、GCL 公式、事件日志；以及多房间移动隔离、交换对象优先、可见性判定、墙上路造价 ×150、容器首次衰减 +100、rampart 衰减与 hitsMax、建造障碍、拆除工地掉落、`renewCreep`/`recycleCreep`、`tower.repair`、`link.transferEnergy`；工业：结构激活取近、掉落资源分堆、采矿与 extractor 冷却、矿物再生、各类强化数值与 TOUGH 减伤、lab 反应/逆反应/boost/unboost、终端费用/截断/冷却、observer 可见性、processPower 与 GPL、工厂配方、工业字段快照对拍 |
+| `tests/shim_apis.rs` | 微型 bundle 驱动 V8：PathFinder 跨房、地图 API、`moveTo` 端到端闭环（含 Memory 往返与 `_move` 缓存）；工业 API（`industry_apis_via_js`）的返回码与下一 tick 结果 |
 | `tests/cpu_watchdog.rs` | CPU 看门狗中断与 isolate 恢复、超时 tick 的丢弃语义、未超时不误报、意图计价 0.2 CPU/组合 |
 | `tests/memory_segments.rs` | `RawMemory` 段跨 tick 持久、需每 tick 重新激活、ID/数量/类型/长度校验、`RawMemory.set` 语义 |
 | `tests/framework.rs` | 全局重置（全局变量丢失、Memory 与段保留）、场景加载校验的正/反用例、同场景同 seed 重放一致性（确定性） |

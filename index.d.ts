@@ -15,6 +15,12 @@ export type BodyPart =
 	| 'claim'
 	| 'tough'
 
+/** 带实验室强化的部件 (boost 须与部件匹配, 见官方 BOOSTS, 如 work+UO / carry+KH / tough+XGHO2) */
+export interface BoostedBodyPart {
+	type: BodyPart
+	boost?: string
+}
+
 export type ResourceKey = string // 'energy' | 'K' | 'U' | 'L' | 'Z' | 'X' | 'G' | ...
 
 /** 地形: 全平原 / 种子生成 / 50 行字符 / 2500 字符原始数字串 */
@@ -48,6 +54,8 @@ export interface MineralSpec {
 	/** 矿物类型, 默认 'H' */
 	type?: string
 	amount?: number
+	/** 官方 density 1..4 (默认 2): 枯竭 50000t 后按 MINERAL_DENSITY[density] 再生 */
+	density?: number
 }
 
 export interface StructureSpec {
@@ -57,11 +65,16 @@ export interface StructureSpec {
 	hits?: number
 	/** 敌方结构 (FIND_HOSTILE_STRUCTURES 目标) */
 	enemy?: boolean
+	/** 预置仓储, 如 terminal { energy: 50000, H: 3000 } / lab { energy: 2000, UO: 3000 } (与 energy 同给时以此为准) */
+	store?: Partial<Record<ResourceKey, number>>
+	/** 工厂等级 (仅 factory) */
+	level?: number
 }
 
 export interface CreepSpec {
 	name: string
-	body: BodyPart[]
+	/** 部件: 'work' 或带强化的 { type: 'work', boost: 'UO' } */
+	body: (BodyPart | BoostedBodyPart)[]
 	pos: [number, number]
 	/** 剩余寿命 tick 数 (默认 1500 满寿命) */
 	ttl?: number
@@ -99,6 +112,11 @@ export interface CpuSpec {
 	tickLimit?: number
 	/** 超过 tickLimit 时强制中断当 tick (默认仅计量) */
 	enforce?: boolean
+	/** 确定性 CPU: Game.cpu.getUsed() 不读墙钟 (每次取时间推进 deterministicStep 毫秒 + 意图 0.2), Date.now 跟 Game.time 走;
+	 *  同一场景每次运行逐位一致, bot 按 CPU 做决策时也能做 A/B 对比。CLI 等价开关 --deterministic-cpu */
+	deterministic?: boolean
+	/** 确定性模式下每次取时间推进的毫秒数, 默认 0.01 */
+	deterministicStep?: number
 }
 
 export interface SimScenario {

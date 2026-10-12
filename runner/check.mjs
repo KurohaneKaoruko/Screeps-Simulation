@@ -20,6 +20,17 @@ const BODY_PARTS = new Set([
 	'tough',
 ])
 
+// 官方 BOOSTS 的 (部件 → 可用化合物) 键集合 (constants.rs BOOSTS)
+const BOOSTS_BY_PART = {
+	work: ['UO', 'UHO2', 'XUHO2', 'LH', 'LH2O', 'XLH2O', 'ZH', 'ZH2O', 'XZH2O', 'GH', 'GH2O', 'XGH2O'],
+	attack: ['UH', 'UH2O', 'XUH2O'],
+	ranged_attack: ['KO', 'KHO2', 'XKHO2'],
+	heal: ['LO', 'LHO2', 'XLHO2'],
+	carry: ['KH', 'KH2O', 'XKH2O'],
+	move: ['ZO', 'ZHO2', 'XZHO2'],
+	tough: ['GO', 'GHO2', 'XGHO2'],
+}
+
 // is_known_structure_type (constants.rs:31)
 const STRUCTURE_TYPES = new Set([
 	'spawn',
@@ -188,9 +199,8 @@ export function checkScenario(sim) {
 			if (Array.isArray(room.sources.positions)) {
 				if (room.sources.positions.length === 0) err(`${ctx}.sources.positions`, '不能为空')
 				room.sources.positions.forEach((p, i) => {
-					if (posCheck(`sources.positions[${i}]`, p) && grid && grid[p[1]]?.[p[0]] === 1) {
-						warn(`${ctx}.sources.positions[${i}]`, `(${p[0]},${p[1]}) 在墙上 (引擎会清出周围, 但地形与现实不符)`)
-					}
+					// 真实地图里 source 本来就在墙格上 (显式地形原样使用, 不开洞), 不再警告
+					posCheck(`sources.positions[${i}]`, p)
 				})
 			} else if (room.sources.count !== undefined) {
 				if (!Number.isInteger(room.sources.count) || room.sources.count < 1) {
@@ -204,6 +214,8 @@ export function checkScenario(sim) {
 		// mineral
 		if (room.mineral && typeof room.mineral === 'object') {
 			posCheck('mineral.pos', room.mineral.pos)
+			const d = room.mineral.density
+			if (d !== undefined && !(Number.isInteger(d) && d >= 1 && d <= 4)) err(`${ctx}.mineral.density`, `应为 1..4 (当前 ${d})`)
 		}
 
 		// structures
@@ -226,6 +238,11 @@ export function checkScenario(sim) {
 				byPos.set(key, [...(byPos.get(key) ?? []), st.type])
 				if (grid && grid[st.pos[1]]?.[st.pos[0]] === 1) {
 					warn(`${path}.pos`, `(${st.pos[0]},${st.pos[1]}) 在墙上 (引擎会把该格改为平原)`)
+				}
+			}
+			if (st.store && typeof st.store === 'object') {
+				for (const [k, v] of Object.entries(st.store)) {
+					if (!Number.isFinite(v) || v < 0) err(`${path}.store.${k}`, `应为非负数 (当前 ${v})`)
 				}
 			}
 			if (st.energy !== undefined && typeof st.type === 'string' && STRUCTURE_ENERGY_CAPACITY[st.type]) {
@@ -270,7 +287,13 @@ export function checkScenario(sim) {
 			} else {
 				if (cr.body.length > MAX_CREEP_SIZE) err(`${path}.body`, `部件数 ${cr.body.length} 超过 ${MAX_CREEP_SIZE}`)
 				for (const [j, part] of cr.body.entries()) {
-					if (!BODY_PARTS.has(part)) err(`${path}.body[${j}]`, `未知部件 ${JSON.stringify(part)}`)
+					// 部件可写成 "work" 或带强化的 {type: "work", boost: "UO"}
+					const type = part && typeof part === 'object' ? part.type : part
+					if (!BODY_PARTS.has(type)) {
+						err(`${path}.body[${j}]`, `未知部件 ${JSON.stringify(part)}`)
+					} else if (part && typeof part === 'object' && part.boost != null && !(BOOSTS_BY_PART[type] ?? []).includes(part.boost)) {
+						err(`${path}.body[${j}].boost`, `${type} 部件不能用 ${JSON.stringify(part.boost)} 强化 (见官方 BOOSTS)`)
+					}
 				}
 			}
 			if (posCheck(`creeps[${i}].pos`, cr.pos) && grid && grid[cr.pos[1]]?.[cr.pos[0]] === 1) {
