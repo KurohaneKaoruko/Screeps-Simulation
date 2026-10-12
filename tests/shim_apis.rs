@@ -691,6 +691,401 @@ fn industry_apis_via_js_inner() {
 	assert_eq!(t2["seeW5N9"], false, "观察只持续一 tick: {t2}");
 }
 
+// ═════════════════════════ isActive / ERR_RCL_NOT_ENOUGH (官方 checkStructureAgainstController) ═════════════════════════
+
+/// RCL3 塔上限 1: 离控制器近的塔 isActive()=true, 远的 false; 远塔 attack/heal/repair 在能量检查之后
+/// 返回 ERR_RCL_NOT_ENOUGH; 超限的 extension / 无主的路同样按官方规则判定
+#[test]
+fn is_active_follows_controller_structures() {
+	in_tokio(|| is_active_follows_controller_structures_inner());
+}
+
+fn is_active_follows_controller_structures_inner() {
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "active", "seed": 1,
+		"rooms": [{ "name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 3, "pos": [28, 27] },
+			"structures": [
+				{ "type": "spawn", "pos": [25, 25], "energy": 300 },
+				{ "type": "tower", "pos": [40, 40], "energy": 500 },
+				{ "type": "tower", "pos": [30, 27], "energy": 500 },
+				{ "type": "tower", "pos": [41, 41], "energy": 5 },
+				{ "type": "road", "pos": [10, 10] },
+				{ "type": "constructedWall", "pos": [11, 11] }
+			],
+			"creeps": [
+				{ "name": "Me", "body": ["move"], "pos": [26, 26] },
+				{ "name": "Foe", "body": ["move"], "pos": [35, 35], "enemy": true }
+			]
+		}]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let bundle = r#"
+		exports.loop = function() {
+			const room = Game.rooms.W5N8;
+			const towers = room.find(FIND_MY_STRUCTURES, { filter: { structureType: STRUCTURE_TOWER } });
+			const at = (x, y) => towers.find(t => t.pos.x === x && t.pos.y === y);
+			const near = at(30, 27), far = at(40, 40), poor = at(41, 41);
+			const foe = room.find(FIND_HOSTILE_CREEPS)[0];
+			const road = room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_ROAD } })[0];
+			const wall = room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_WALL } })[0];
+			console.log(JSON.stringify({
+				nearActive: near.isActive(), farActive: far.isActive(), poorActive: poor.isActive(),
+				roadActive: road.isActive(), spawnActive: Game.spawns[Object.keys(Game.spawns)[0]].isActive(),
+				ctrlActive: room.controller.isActive(),
+				nearAttack: near.attack(foe),
+				farAttack: far.attack(foe), farHeal: far.heal(Game.creeps.Me), farRepair: far.repair(wall),
+				poorAttack: poor.attack(foe),
+			}));
+		};
+	"#;
+	let (entries, console) = run_once(bundle, &mut world);
+	let info: serde_json::Value = serde_json::from_str(console.first().map(String::as_str).unwrap_or("{}")).unwrap();
+	assert_eq!(info["nearActive"], true, "{info}");
+	assert_eq!(info["farActive"], false, "{info}");
+	assert_eq!(info["poorActive"], false, "{info}");
+	assert_eq!(info["roadActive"], true, "无主结构恒 true: {info}");
+	assert_eq!(info["spawnActive"], true, "{info}");
+	assert_eq!(info["ctrlActive"], true, "controller 不在 CONTROLLER_STRUCTURES 表中: {info}");
+	assert_eq!(info["nearAttack"], 0, "{info}");
+	assert_eq!(info["farAttack"], -14, "远塔 ERR_RCL_NOT_ENOUGH: {info}");
+	assert_eq!(info["farHeal"], -14, "{info}");
+	assert_eq!(info["farRepair"], -14, "{info}");
+	assert_eq!(info["poorAttack"], -6, "能量检查先于 RCL 检查 → ERR_NOT_ENOUGH_ENERGY: {info}");
+	assert_eq!(entries.iter().filter(|(_, n, _)| n == "attack").count(), 1, "只有近塔提交 attack 意图");
+}
+
+// ═════════════════════════ StructureSpawn.Spawning / spawnCreep 官方语义 ═════════════════════════
+
+fn snapshot_of(world: &screeps_sim::engine::world::World) -> String {
+	build_snapshot(
+		world,
+		&SnapshotOptions {
+			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
+			always_visible: false,
+			include_terrain: true,
+		},
+	)
+}
+
+/// spawnCreep: 占位 creep 立即进 Game.creeps; Memory 合并规则; 校验顺序 (重名先于 busy、directions、dryRun);
+/// 下一 tick spawn.spawning 是 StructureSpawn.Spawning (spawn 不可枚举), setDirections / cancel 提交官方意图
+#[test]
+fn spawning_object_and_spawn_creep_semantics() {
+	in_tokio(|| spawning_object_and_spawn_creep_semantics_inner());
+}
+
+fn spawning_object_and_spawn_creep_semantics_inner() {
+	let scenario = Scenario::from_json(TWO_ROOMS).unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let mut movement = Movement::default();
+	let bundle = r#"
+		exports.loop = function() {
+			const spawn = Game.spawns[Object.keys(Game.spawns)[0]];
+			if (!spawn.spawning) {
+				Memory.creeps = { Old: { keep: 1 } };
+				const out = {};
+				out.badDirs = spawn.spawnCreep([MOVE], "A", { directions: [1, 9] });
+				out.emptyDirs = spawn.spawnCreep([MOVE], "A", { directions: [] });
+				out.notArray = spawn.spawnCreep([MOVE], "A", { directions: 3 });
+				out.noName = spawn.spawnCreep([MOVE]);
+				out.nullOpts = spawn.spawnCreep([MOVE], "A", null);
+				out.badPart = spawn.spawnCreep(["wing"], "A");
+				out.esDup = spawn.spawnCreep([WORK, WORK, MOVE, MOVE, MOVE], "A", { energyStructures: [spawn, spawn], dryRun: true });
+				out.esStrIds = spawn.spawnCreep([MOVE], "A", { energyStructures: [spawn.id], dryRun: true });
+				out.dry = spawn.spawnCreep([MOVE], "A", { dryRun: true });
+				out.dryMem = Memory.creeps.A === undefined && !Game.creeps.A;
+				out.ok = spawn.spawnCreep([CARRY, CARRY, MOVE], "Old", { directions: ["5", 5, 3] });
+				const c = Game.creeps.Old;
+				out.ph = c && { spawning: c.spawning, my: c.my, ttl: c.ticksToLive, hits: c.hits, hitsMax: c.hitsMax,
+					cap: c.carryCapacity, used: c.store.getUsedCapacity(), fatigue: c.fatigue, owner: c.owner.username,
+					x: c.pos.x, y: c.pos.y, body: c.body.map(p => p.type + p.hits).join(), isCreep: c instanceof Creep };
+				out.mem = Memory.creeps.Old;
+				out.nameExists = spawn.spawnCreep([MOVE], "Old");
+				out.nameFirst = spawn.spawnCreep([MOVE], "Old", { directions: [0] });
+				out.numName = spawn.spawnCreep([MOVE], 12345, { dryRun: true });
+				console.log(JSON.stringify(out));
+				return;
+			}
+			const sp = spawn.spawning;
+			console.log(JSON.stringify({
+				isSpawning: sp instanceof StructureSpawn.Spawning,
+				keys: Object.keys(sp).sort().join(),
+				spawnIsSelf: sp.spawn === spawn,
+				name: sp.name, needTime: sp.needTime, remainingTime: sp.remainingTime, directions: sp.directions,
+				badSet: sp.setDirections([0]), emptySet: sp.setDirections([]), notArraySet: sp.setDirections(5),
+				okSet: sp.setDirections([7, "7", 1]),
+				nameBeforeBusy: spawn.spawnCreep([MOVE], "Old"),
+				busy: spawn.spawnCreep([MOVE], "B"),
+				cancel: sp.cancel(),
+			}));
+		};
+	"#;
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let r1 = bot.run_tick(snapshot_of(&world), "{}".to_string()).unwrap();
+	let a: serde_json::Value = serde_json::from_str(&r1.console[0]).unwrap();
+	assert_eq!(a["badDirs"], -10, "{a}");
+	assert_eq!(a["emptyDirs"], -10, "{a}");
+	assert_eq!(a["notArray"], -10, "{a}");
+	assert_eq!(a["noName"], -10, "{a}");
+	assert_eq!(a["nullOpts"], -10, "{a}");
+	assert_eq!(a["badPart"], -10, "{a}");
+	assert_eq!(a["esDup"], -6, "两次列同一 spawn 只算一次 (300 < 350): {a}");
+	assert_eq!(a["esStrIds"], -6, "官方 _.map(es, 'id'): 传 id 字符串得不到能量: {a}");
+	assert_eq!(a["dry"], 0, "{a}");
+	assert_eq!(a["dryMem"], true, "dryRun 无副作用: {a}");
+	assert_eq!(a["ok"], 0, "{a}");
+	let ph = &a["ph"];
+	assert_eq!(ph["spawning"], true, "{a}");
+	assert_eq!(ph["my"], true);
+	assert_eq!(ph["ttl"], 1500);
+	assert_eq!(ph["hits"], 300);
+	assert_eq!(ph["hitsMax"], 300);
+	assert_eq!(ph["cap"], 100);
+	assert_eq!(ph["used"], 0);
+	assert_eq!(ph["fatigue"], 0);
+	assert_eq!(ph["owner"], "Nexus");
+	assert_eq!((ph["x"].as_u64(), ph["y"].as_u64()), (Some(25), Some(25)), "占位 creep 在 spawn 格");
+	assert_eq!(ph["body"], "carry100,carry100,move100");
+	assert_eq!(ph["isCreep"], true);
+	assert_eq!(a["mem"], serde_json::json!({ "keep": 1 }), "未给 opts.memory 时保留已有 Memory.creeps[name]: {a}");
+	assert_eq!(a["nameExists"], -3, "{a}");
+	assert_eq!(a["nameFirst"], -3, "重名检查先于 directions 校验: {a}");
+	assert_eq!(a["numName"], 0, "name.toString(): {a}");
+	let spawn_intents: Vec<_> = r1.intents.entries.iter().filter(|(_, n, _)| n == "spawnCreep").collect();
+	assert_eq!(spawn_intents.len(), 1, "只有一个 spawnCreep 意图");
+	assert_eq!(spawn_intents[0].2["directions"], serde_json::json!([5, 3]), "directions 转数字去重");
+	tick::run_tick(&mut world, &mut movement, &r1.intents);
+
+	let r2 = bot.run_tick(snapshot_of(&world), r1.memory.clone()).unwrap();
+	let b: serde_json::Value = serde_json::from_str(&r2.console[0]).unwrap();
+	assert_eq!(b["isSpawning"], true, "{b}");
+	assert_eq!(b["keys"], "directions,name,needTime,remainingTime", "spawn 不可枚举: {b}");
+	assert_eq!(b["spawnIsSelf"], true, "{b}");
+	assert_eq!(b["name"], "Old");
+	assert_eq!(b["needTime"], 9);
+	assert_eq!(b["remainingTime"], 8);
+	assert_eq!(b["directions"], serde_json::json!([5, 3]), "快照下发 directions: {b}");
+	assert_eq!(b["badSet"], -10);
+	assert_eq!(b["emptySet"], -10);
+	assert_eq!(b["notArraySet"], -10);
+	assert_eq!(b["okSet"], 0);
+	assert_eq!(b["nameBeforeBusy"], -3, "官方: 重名检查先于 ERR_BUSY: {b}");
+	assert_eq!(b["busy"], -4, "{b}");
+	assert_eq!(b["cancel"], 0);
+	let names: Vec<&str> = r2.intents.entries.iter().map(|(_, n, _)| n.as_str()).collect();
+	assert!(names.contains(&"setSpawnDirections") && names.contains(&"cancelSpawning"), "{names:?}");
+	let set = r2.intents.entries.iter().find(|(_, n, _)| n == "setSpawnDirections").unwrap();
+	assert_eq!(set.2["directions"], serde_json::json!([7, 1]));
+	tick::run_tick(&mut world, &mut movement, &r2.intents);
+	assert!(
+		!world.rooms["W5N8"].objects.values().any(|o| o.obj_type == "creep"),
+		"cancel 后孵化中的 creep 被移除"
+	);
+	assert!(world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "spawn").unwrap().spawn_job.is_none());
+}
+
+// ═════════════════════════ renewCreep / link.transferEnergy 返回码 ═════════════════════════
+
+/// renewCreep: CLAIM creep → ERR_INVALID_TARGET。link.transferEnergy: 显式 amount 超过目标剩余 → ERR_FULL;
+/// 跨房 → ERR_NOT_IN_RANGE; 超出 RCL 上限 → ERR_RCL_NOT_ENOUGH; 缺省 amount 自动取 min(自身, 目标剩余)
+#[test]
+fn renew_claim_and_link_transfer_codes() {
+	in_tokio(|| renew_claim_and_link_transfer_codes_inner());
+}
+
+fn renew_claim_and_link_transfer_codes_inner() {
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "links", "seed": 1,
+		"rooms": [
+			{ "name": "W5N8", "terrain": { "kind": "flat" },
+			  "controller": { "level": 5, "pos": [28, 27] },
+			  "structures": [
+				{ "type": "spawn", "pos": [25, 25], "energy": 300 },
+				{ "type": "link", "pos": [30, 30], "energy": 500 },
+				{ "type": "link", "pos": [32, 30], "energy": 700 },
+				{ "type": "link", "pos": [45, 45], "energy": 500 }
+			  ],
+			  "creeps": [{ "name": "Claimer", "body": ["claim", "move"], "pos": [26, 25] }] },
+			{ "name": "W5N7", "terrain": { "kind": "flat" },
+			  "structures": [{ "type": "link", "pos": [10, 10], "energy": 0 }] }
+		]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let bundle = r#"
+		exports.loop = function() {
+			const spawn = Game.spawns[Object.keys(Game.spawns)[0]];
+			const links = Game.rooms.W5N8.find(FIND_MY_STRUCTURES, { filter: { structureType: STRUCTURE_LINK } });
+			const at = (x) => links.find(l => l.pos.x === x);
+			const a = at(30), b = at(32), far = at(45);
+			const other = Game.rooms.W5N7.find(FIND_MY_STRUCTURES)[0];
+			console.log(JSON.stringify({
+				renewClaim: spawn.renewCreep(Game.creeps.Claimer),
+				full: a.transferEnergy(b, 200),
+				farActive: far.isActive(),
+				rcl: far.transferEnergy(b),
+				cross: a.transferEnergy(other, 100),
+				auto: a.transferEnergy(b),
+			}));
+		};
+	"#;
+	let (entries, console) = run_once(bundle, &mut world);
+	let info: serde_json::Value = serde_json::from_str(console.first().map(String::as_str).unwrap_or("{}")).unwrap();
+	assert_eq!(info["renewClaim"], -7, "{info}");
+	assert_eq!(info["full"], -8, "700 + 200 > 800 → ERR_FULL: {info}");
+	assert_eq!(info["farActive"], false, "RCL5 只有 2 个 link 名额, 最远的停用: {info}");
+	assert_eq!(info["rcl"], -14, "{info}");
+	assert_eq!(info["cross"], -9, "跨房 ERR_NOT_IN_RANGE: {info}");
+	assert_eq!(info["auto"], 0, "{info}");
+	let t = entries.iter().find(|(_, n, _)| n == "transferEnergy").expect("应提交 transferEnergy");
+	assert_eq!(t.2["amount"], 100, "缺省 amount = min(500, 800-700)");
+	assert_eq!(entries.iter().filter(|(_, n, _)| n == "transferEnergy" || n == "renewCreep").count(), 1);
+}
+
+// ═════════════════════════ Structure.destroy / Ruin ═════════════════════════
+
+/// destroy(): 看控制器归属 (不是结构归属), 房内有敌方 creep → ERR_BUSY; 摧毁后下一 tick 出现 Ruin
+#[test]
+fn destroy_and_ruin_object() {
+	in_tokio(|| destroy_and_ruin_object_inner());
+}
+
+fn destroy_and_ruin_object_inner() {
+	let scene = |enemy: bool| {
+		format!(
+			r#"{{
+		"name": "ruin", "seed": 1,
+		"rooms": [{{ "name": "W5N8", "terrain": {{ "kind": "flat" }},
+			"controller": {{ "level": 3, "pos": [28, 27] }},
+			"structures": [
+				{{ "type": "spawn", "pos": [25, 25], "energy": 300 }},
+				{{ "type": "tower", "pos": [30, 30], "energy": 250 }},
+				{{ "type": "road", "pos": [10, 10] }}
+			],
+			"creeps": [{{ "name": "Foe", "body": ["move"], "pos": [40, 40], "enemy": {enemy} }}]
+		}}]
+	}}"#
+		)
+	};
+	let bundle = r#"
+		exports.loop = function() {
+			const room = Game.rooms.W5N8;
+			// FIND_RUINS 尚未接入 (find/look 由另一分支改动), 这里直接扫房间对象
+			const ruins = room.__objects.filter(o => o instanceof Ruin);
+			if (ruins.length) {
+				const desc = (r) => ({
+					st: r.structureType, type: r.structure.structureType, sid: r.structure.id,
+					hits: r.structure.hits, hitsMax: r.structure.hitsMax, my: r.structure.my,
+					owned: r.structure instanceof OwnedStructure, isStructure: r.structure instanceof Structure,
+					energy: r.store[RESOURCE_ENERGY], cap: r.store.getCapacity(), ttd: r.ticksToDecay,
+					destroyTime: r.destroyTime, byId: Game.getObjectById(r.id) === r, str: String(r),
+				});
+				const t = ruins.find(r => r.structure.structureType === "tower");
+				const rd = ruins.find(r => r.structure.structureType === "road");
+				console.log(JSON.stringify({ phase: "ruin", tower: desc(t), road: desc(rd), towerId: Memory.towerId }));
+				return;
+			}
+			const tower = room.find(FIND_MY_STRUCTURES, { filter: { structureType: STRUCTURE_TOWER } })[0];
+			const road = room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_ROAD } })[0];
+			Memory.towerId = tower.id;
+			console.log(JSON.stringify({ phase: "destroy", road: road.destroy(), tower: tower.destroy() }));
+		};
+	"#;
+	// 有敌方 creep: ERR_BUSY
+	let mut world = build_world(&Scenario::from_json(&scene(true)).unwrap()).unwrap();
+	let (entries, console) = run_once(bundle, &mut world);
+	let info: serde_json::Value = serde_json::from_str(&console[0]).unwrap();
+	assert_eq!(info["tower"], -4, "{info}");
+	assert_eq!(info["road"], -4, "{info}");
+	assert!(entries.is_empty());
+	// 无敌方: 无主的路也能拆 (官方只看控制器归属)
+	let mut world = build_world(&Scenario::from_json(&scene(false)).unwrap()).unwrap();
+	let mut movement = Movement::default();
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let r1 = bot.run_tick(snapshot_of(&world), "{}".to_string()).unwrap();
+	let info: serde_json::Value = serde_json::from_str(&r1.console[0]).unwrap();
+	assert_eq!((info["road"].as_i64(), info["tower"].as_i64()), (Some(0), Some(0)), "{info}");
+	tick::run_tick(&mut world, &mut movement, &r1.intents);
+	let r2 = bot.run_tick(snapshot_of(&world), r1.memory.clone()).unwrap();
+	let all: serde_json::Value = serde_json::from_str(&r2.console[0]).unwrap();
+	assert_eq!(all["phase"], "ruin", "{all}");
+	let t = &all["tower"];
+	assert_eq!(t["st"], serde_json::Value::Null, "Ruin.structureType 为 undefined: {all}");
+	assert_eq!(t["type"], "tower");
+	assert_eq!(t["sid"], all["towerId"], "structure.id 是原结构 id: {all}");
+	assert_eq!(t["hits"], 0);
+	assert_eq!(t["hitsMax"], 3000);
+	assert_eq!(t["my"], true);
+	assert_eq!(t["owned"], true, "有主结构 → OwnedStructure: {all}");
+	assert_eq!(t["isStructure"], true);
+	assert_eq!(t["energy"], 250, "仓储留在 ruin: {all}");
+	assert_eq!(t["cap"], serde_json::Value::Null, "Ruin store 无容量: {all}");
+	assert_eq!(t["ttd"], 499, "decayTime(0+500) - time(1): {all}");
+	assert_eq!(t["destroyTime"], 0);
+	assert_eq!(t["byId"], true);
+	assert!(t["str"].as_str().unwrap().starts_with("[ruin (tower) #"), "{all}");
+	let r = &all["road"];
+	assert_eq!(r["my"], serde_json::Value::Null, "无主结构的 ruin.structure 无 my: {all}");
+	assert_eq!(r["owned"], false);
+	assert_eq!(r["isStructure"], true);
+}
+
+// ═════════════════════════ rampart / road 属性 ═════════════════════════
+
+/// rampart.isPublic 来自快照、setPublic 提交意图; road.ticksToDecay 不再被强制为 undefined
+#[test]
+fn rampart_public_and_road_decay_exposed() {
+	in_tokio(|| rampart_public_and_road_decay_exposed_inner());
+}
+
+fn rampart_public_and_road_decay_exposed_inner() {
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "rampart", "seed": 1,
+		"rooms": [{ "name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 3, "pos": [28, 27] },
+			"structures": [
+				{ "type": "spawn", "pos": [25, 25], "energy": 300 },
+				{ "type": "rampart", "pos": [20, 20], "hits": 5000 },
+				{ "type": "road", "pos": [10, 10] }
+			] }]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	for o in world.rooms.get_mut("W5N8").unwrap().objects.values_mut() {
+		if o.obj_type == "rampart" {
+			o.is_public = true;
+		}
+	}
+	let bundle = r#"
+		exports.loop = function() {
+			const room = Game.rooms.W5N8;
+			const rampart = room.find(FIND_MY_STRUCTURES, { filter: { structureType: STRUCTURE_RAMPART } })[0];
+			const road = room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_ROAD } })[0];
+			console.log(JSON.stringify({
+				isPublic: rampart.isPublic, my: rampart.my, roadTtd: road.ticksToDecay, rampartTtd: rampart.ticksToDecay,
+				set: rampart.setPublic(0),
+			}));
+		};
+	"#;
+	let (entries, console) = run_once(bundle, &mut world);
+	let info: serde_json::Value = serde_json::from_str(&console[0]).unwrap();
+	assert_eq!(info["isPublic"], true, "{info}");
+	assert_eq!(info["my"], true, "{info}");
+	assert_eq!(info["roadTtd"], 1000, "{info}");
+	assert_eq!(info["rampartTtd"], 100, "{info}");
+	assert_eq!(info["set"], 0, "{info}");
+	let e = entries.iter().find(|(_, n, _)| n == "setPublic").expect("setPublic 意图");
+	assert_eq!(e.2["isPublic"], false, "!!0 → false");
+}
+
 /// reserveController: 自己的保留可以续 (此前 shim 用 !target.my 判断, 第二次起恒返回 ERR_INVALID_TARGET);
 /// reservation 字段名是 ticksToEnd
 #[test]
@@ -851,17 +1246,6 @@ const FIDELITY_ROOMS: &str = r#"{
 
 fn fidelity_world() -> screeps_sim::engine::world::World {
 	build_world(&Scenario::from_json(FIDELITY_ROOMS).unwrap()).unwrap()
-}
-
-fn snapshot_of(world: &screeps_sim::engine::world::World) -> String {
-	build_snapshot(
-		world,
-		&SnapshotOptions {
-			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
-			always_visible: false,
-			include_terrain: true,
-		},
-	)
 }
 
 /// 跑一 tick bundle, 返回 (第一行 console 解析的 JSON, 意图, 全部 console, errors)
@@ -1565,5 +1949,208 @@ fn ownership_store_notify_console_match_official() {
 		assert_eq!(notify[20], -8, "第 21 条 ERR_FULL: {info}");
 		assert_eq!(info["dir0"], true, "{info}");
 		assert_eq!(console[1], "undefined null [object Object] 1,2 s 5 [room W5N8 pos 20,20]");
+	});
+}
+
+// ═════════════════════════ StructureController 属性 / activateSafeMode / unclaim ═════════════════════════
+
+/// progressTotal 在 0/8 级为 undefined; reservation 用官方 ticksToEnd; activateSafeMode 返回码与
+/// 同 tick 只保留最后一次; 另一控制器在安全模式 → ERR_BUSY; unclaim 提交意图
+#[test]
+fn controller_safe_mode_and_props() {
+	in_tokio(|| controller_safe_mode_and_props_inner());
+}
+
+fn controller_safe_mode_and_props_inner() {
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "safe", "seed": 1,
+		"rooms": [
+			{ "name": "W5N8", "terrain": { "kind": "flat" },
+			  "controller": { "level": 8, "pos": [28, 27], "safeModeAvailable": 2 },
+			  "structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 }] },
+			{ "name": "W5N7", "terrain": { "kind": "flat" },
+			  "controller": { "level": 3, "pos": [20, 20], "safeModeAvailable": 1 } },
+			{ "name": "W4N8", "terrain": { "kind": "flat" },
+			  "controller": { "level": 0, "pos": [20, 20], "mine": false },
+			  "creeps": [{ "name": "Scout", "body": ["move"], "pos": [10, 10] }] }
+		]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let mut movement = Movement::default();
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	let bundle = r#"
+		exports.loop = function() {
+			const a = Game.rooms.W5N8.controller, b = Game.rooms.W5N7.controller, n = Game.rooms.W4N8.controller;
+			if (Memory.phase === 2) {
+				console.log(JSON.stringify({ phase: 2, aSafe: a.safeMode, aCd: a.safeModeCooldown, aAvail: a.safeModeAvailable,
+					bBusy: b.activateSafeMode(), aTired: a.activateSafeMode(), unclaim: b.unclaim(), neutralUnclaim: n.unclaim() }));
+				return;
+			}
+			Memory.phase = 2;
+			console.log(JSON.stringify({
+				phase: 1,
+				pt8: a.progressTotal === undefined, p8: a.progress, pt3: b.progressTotal, pt0: n.progressTotal === undefined,
+				p0: n.progress === undefined, safe: a.safeMode === undefined, cd: a.safeModeCooldown === undefined,
+				avail: a.safeModeAvailable, nAvail: n.safeModeAvailable, notOwner: n.activateSafeMode(),
+				first: b.activateSafeMode(), second: a.activateSafeMode(),
+			}));
+		};
+	"#;
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let r1 = bot.run_tick(snapshot_of(&world), "{}".to_string()).unwrap();
+	let i: serde_json::Value = serde_json::from_str(&r1.console[0]).unwrap();
+	assert_eq!(i["pt8"], true, "{i}");
+	assert_eq!(i["p8"], 0, "{i}");
+	assert_eq!(i["pt3"], 135000, "{i}");
+	assert_eq!(i["pt0"], true, "{i}");
+	assert_eq!(i["p0"], true, "{i}");
+	assert_eq!(i["safe"], true, "{i}");
+	assert_eq!(i["cd"], true, "{i}");
+	assert_eq!(i["avail"], 2, "{i}");
+	assert_eq!(i["nAvail"], 0, "{i}");
+	assert_eq!(i["notOwner"], -1, "{i}");
+	assert_eq!(i["first"], 0, "{i}");
+	assert_eq!(i["second"], 0, "{i}");
+	let acts: Vec<&String> = r1.intents.entries.iter().filter(|(_, n, _)| n == "activateSafeMode").map(|(o, _, _)| o).collect();
+	assert_eq!(acts.len(), 1, "同 tick 只保留最后一次: {acts:?}");
+	let a_id = format!("{:024x}", world.rooms["W5N8"].controller().unwrap().id);
+	assert_eq!(acts[0], &a_id);
+	tick::run_tick(&mut world, &mut movement, &r1.intents);
+
+	let r2 = bot.run_tick(snapshot_of(&world), r1.memory.clone()).unwrap();
+	let j: serde_json::Value = serde_json::from_str(&r2.console[0]).unwrap();
+	assert_eq!(j["aSafe"], 19999, "{j}");
+	assert_eq!(j["aCd"], 49999, "{j}");
+	assert_eq!(j["aAvail"], 1, "{j}");
+	assert_eq!(j["bBusy"], -4, "另一个控制器已在安全模式 → ERR_BUSY: {j}");
+	assert_eq!(j["aTired"], -11, "冷却中 → ERR_TIRED: {j}");
+	assert_eq!(j["unclaim"], 0, "{j}");
+	assert_eq!(j["neutralUnclaim"], -1, "{j}");
+	tick::run_tick(&mut world, &mut movement, &r2.intents);
+	let b = world.rooms["W5N7"].controller().unwrap();
+	assert!(!b.mine && b.level == 0, "unclaim 生效");
+}
+
+// ═════════════════════════ 旧 API / 全局类 (官方 createCreep / canCreateCreep / notifyWhenAttacked) ═════════════════════════
+
+/// createCreep/canCreateCreep 的检查顺序 (能量先于 off、名字最后), 成功返回名字并写 Memory;
+/// Spawn 别名与 KeeperLair/Portal/PowerBank/InvaderCore 全局类; notifyWhenAttacked 非布尔 → ERR_INVALID_ARGS
+#[test]
+fn legacy_spawn_api_and_globals() {
+	in_tokio(|| legacy_spawn_api_and_globals_inner());
+}
+
+fn legacy_spawn_api_and_globals_inner() {
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "legacy", "seed": 1,
+		"rooms": [{ "name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 1, "pos": [28, 27] },
+			"structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 },
+			               { "type": "road", "pos": [10, 10] }],
+			"creeps": [{ "name": "Old", "body": ["move"], "pos": [5, 5] }] }]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let mut movement = Movement::default();
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	let bundle = r#"
+		exports.loop = function() {
+			const s = Game.spawns.Spawn1;
+			const road = s.room.find(FIND_STRUCTURES).find(x => x.structureType === STRUCTURE_ROAD);
+			console.log(JSON.stringify({
+				alias: Spawn === StructureSpawn && s instanceof Spawn,
+				classes: [typeof StructureKeeperLair, typeof StructurePortal, typeof StructurePowerBank, typeof StructureInvaderCore],
+				lairProto: Object.getPrototypeOf(StructureKeeperLair.prototype) === OwnedStructure.prototype,
+				portalProto: Object.getPrototypeOf(StructurePortal.prototype) === Structure.prototype,
+				canBad: s.canCreateCreep(["nope"]),
+				canPoor: s.canCreateCreep(["work", "work", "work", "work"]),
+				canDup: s.canCreateCreep(["move"], "Old"),
+				canLong: s.canCreateCreep(["move"], "x".repeat(101)),
+				canOk: s.canCreateCreep(["move"]),
+				created: s.createCreep(["move"], "Neo", { role: "a" }),
+				dupSameTick: s.createCreep(["move"], "Neo"),
+				hasNeo: !!Game.creeps.Neo && Game.creeps.Neo.spawning,
+				auto: typeof s.canCreateCreep(["move"]),
+				notifyBad: s.notifyWhenAttacked(1),
+				notifyOk: s.notifyWhenAttacked(false),
+				roadBad: road.notifyWhenAttacked("yes"),
+				roadOk: road.notifyWhenAttacked(true),
+				creepBad: Game.creeps.Old.notifyWhenAttacked(0),
+			}));
+		};
+	"#;
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let r = bot.run_tick(snapshot_of(&world), "{}".to_string()).unwrap();
+	let i: serde_json::Value = serde_json::from_str(&r.console[0]).unwrap();
+	assert_eq!(i["alias"], true, "{i}");
+	assert_eq!(i["classes"], serde_json::json!(["function", "function", "function", "function"]), "{i}");
+	assert_eq!(i["lairProto"], true, "{i}");
+	assert_eq!(i["portalProto"], true, "{i}");
+	assert_eq!(i["canBad"], -10, "{i}");
+	assert_eq!(i["canPoor"], -6, "{i}");
+	assert_eq!(i["canDup"], -3, "{i}");
+	assert_eq!(i["canLong"], -10, "{i}");
+	assert_eq!(i["canOk"], 0, "{i}");
+	assert_eq!(i["created"], "Neo", "成功返回名字: {i}");
+	assert_eq!(i["dupSameTick"], -3, "同 tick 重名: {i}");
+	assert_eq!(i["hasNeo"], true, "{i}");
+	assert_eq!(i["notifyBad"], -10, "{i}");
+	assert_eq!(i["notifyOk"], 0, "{i}");
+	assert_eq!(i["roadBad"], -10, "{i}");
+	assert_eq!(i["roadOk"], 0, "{i}");
+	assert_eq!(i["creepBad"], -10, "{i}");
+	let mem: serde_json::Value = serde_json::from_str(&r.memory).unwrap();
+	assert_eq!(mem["creeps"]["Neo"]["role"], "a", "{mem}");
+	let spawns: Vec<_> = r.intents.entries.iter().filter(|(_, n, _)| n == "spawnCreep").collect();
+	assert_eq!(spawns.len(), 1);
+	assert_eq!(spawns[0].2["name"], "Neo");
+	tick::run_tick(&mut world, &mut movement, &r.intents);
+	assert!(world.rooms["W5N8"].objects.values().any(|o| o.name.as_deref() == Some("Neo")), "createCreep 生效");
+}
+
+/// 停用的 spawn: spawnCreep 在能量检查之前、canCreateCreep 在能量检查之后返回 ERR_RCL_NOT_ENOUGH
+#[test]
+fn off_spawn_returns_rcl_not_enough() {
+	in_tokio(|| {
+		let scenario = Scenario::from_json(
+			r#"{
+			"name": "off", "seed": 1,
+			"rooms": [{ "name": "W5N8", "terrain": { "kind": "flat" },
+				"controller": { "level": 1, "pos": [10, 10] },
+				"structures": [{ "type": "spawn", "pos": [12, 12], "energy": 300, "name": "Near" },
+				               { "type": "spawn", "pos": [40, 40], "energy": 0, "name": "Far" }] }]
+		}"#,
+		)
+		.unwrap();
+		let mut world = build_world(&scenario).unwrap();
+		let mut movement = Movement::default();
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+		let bundle = r#"
+			exports.loop = function() {
+				const far = _.find(Game.spawns, s => s.pos.x === 40);
+				console.log(JSON.stringify({
+					active: far.isActive(),
+					spawn: far.spawnCreep(["move"], "X"),
+					spawnPoor: far.spawnCreep(Array(10).fill("work"), "Y"),
+					can: far.canCreateCreep(["move"]),
+					canPoor: far.canCreateCreep(Array(10).fill("work")),
+					create: far.createCreep(["move"]),
+				}));
+			};
+		"#;
+		let (entries, console) = run_once(bundle, &mut world);
+		let i: serde_json::Value = serde_json::from_str(&console[0]).unwrap();
+		assert_eq!(i["active"], false, "{i}");
+		assert_eq!(i["spawn"], -14, "{i}");
+		assert_eq!(i["spawnPoor"], -14, "spawnCreep 先查 off 再查能量: {i}");
+		assert_eq!(i["can"], -14, "{i}");
+		assert_eq!(i["canPoor"], -6, "canCreateCreep 先查能量再查 off: {i}");
+		assert_eq!(i["create"], -14, "{i}");
+		assert!(entries.iter().all(|(_, n, _)| n != "spawnCreep"), "{entries:?}");
 	});
 }

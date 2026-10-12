@@ -198,6 +198,7 @@ fn controller_level_and_downgrade() {
 	}
 	let level = world.rooms["W5N8"].objects[&ctrl_id].level;
 	assert_eq!(level, 2, "68 tick × 3 = 204 ≥ 200 应升 RCL2");
+	assert_eq!(world.rooms["W5N8"].objects[&ctrl_id].safe_mode_available, 1, "官方: 升级时 safeModeAvailable +1");
 
 	// 停止升级: RCL2 的降级计时 = DOWNGRADE[2]/2 = 5000 tick (升级时刷新, 上限 +10001)
 	let empty = IntentList { entries: vec![] };
@@ -215,6 +216,8 @@ fn controller_level_and_downgrade() {
 	let controller = &world.rooms["W5N8"].objects[&ctrl_id];
 	assert_eq!(controller.level, 1, "长时间不升级应降回 RCL1");
 	assert_eq!(controller.progress, 184, "降级后进度 += 90% × 200 = 180 (4+180)");
+	assert_eq!(controller.safe_mode_available, 0, "降级清空 safeModeAvailable");
+	assert!(controller.safe_mode_cooldown.map(|t| t > world.tick).unwrap_or(false), "降级进入安全模式冷却");
 }
 
 // ── 以下为 issue #1「经济主链路」回归用例 ──
@@ -702,6 +705,8 @@ fn tower_repair_spends_energy() {
 #[test]
 fn link_transfer_energy_with_loss_and_cooldown() {
 	let (mut world, mut movement) = setup(TWO_ROOMS);
+	// RCL5 才有 2 个 link 名额 (官方 links/transfer.js 检查 checkStructureAgainstController)
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 5;
 	let a = add_structure(&mut world, "W5N8", "link", 10, 10);
 	let b = add_structure(&mut world, "W5N8", "link", 12, 10);
 	set_store(&mut world, a, 500);
@@ -920,13 +925,13 @@ fn tower_attack_destroys_structure_and_drops_store() {
 	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
 	let room = &world.rooms["W5N8"];
 	assert!(!room.objects.contains_key(&ext), "600 > 500 应销毁");
-	let dropped: u32 = room
-		.objects
-		.values()
-		.filter(|o| o.obj_type == "energy")
-		.map(|o| o.store.get("energy").copied().unwrap_or(0))
-		.sum();
-	assert_eq!(dropped, 199, "掉落 200 后当 tick 衰减 1");
+	// 官方 _damage.js → structures/_destroy.js: 仓储留在 ruin 里 (不直接落地)
+	assert!(!room.objects.values().any(|o| o.obj_type == "energy"), "不再直接掉落");
+	let ruin = room.objects.values().find(|o| o.obj_type == "ruin").expect("应留下 ruin");
+	assert_eq!(ruin.store.get("energy").copied(), Some(200));
+	assert_eq!((ruin.x, ruin.y), (22, 20));
+	assert_eq!(ruin.next_decay_time, Some(constants::RUIN_DECAY), "decayTime = 摧毁 tick(0) + 500");
+	assert!(room.events.iter().any(|e| e.event == screeps_sim::engine::intents::EVENT_OBJECT_DESTROYED && e.object_id == ext));
 }
 
 /// claimController: 中立控制器 → 归属我方 level 1
@@ -1213,6 +1218,15 @@ fn snapshot_direct_serializer_matches_value_tree() {
 		room.objects.insert(id2, objects::tombstone(id2, 16, 16, "w\"q", world.tick + 300));
 		room.objects
 			.insert(id3, objects::construction_site(id3, "road", 20, 20, 300));
+		// 废墟: 有主 (tower) 与无主 (container) 两种 structure 形态
+		let mut next = world.next_id;
+		let (r1, r2) = (alloc_id(&mut next), alloc_id(&mut next));
+		world.next_id = next;
+		let mut tower = objects::structure(9001, "tower", 30, 30, true);
+		tower.store.insert("energy".into(), 70);
+		room.objects.insert(r1, objects::ruin(r1, &tower, 0));
+		let cont = objects::structure(9002, "container", 31, 31, false);
+		room.objects.insert(r2, objects::ruin(r2, &cont, 0));
 		if let Some(c) = room.controller_mut() {
 			c.sign = Some("签名 \"引号\" & <tag>".to_string());
 			c.reservation_end_time = Some(world.tick + 500);
@@ -1245,7 +1259,7 @@ fn snapshot_direct_serializer_matches_value_tree() {
 		.map(|o| format!("{:024x}", o.id))
 		.unwrap();
 	let intents = IntentList::parse(&format!(
-		r#"[{{"o":"{creep_id}","n":"harvest"}},{{"o":"{spawn_id}","n":"spawnCreep","d":{{"body":["work","move"],"name":"b1"}}}}]"#
+		r#"[{{"o":"{creep_id}","n":"harvest"}},{{"o":"{spawn_id}","n":"spawnCreep","d":{{"body":["work","move"],"name":"b1","directions":[3,5]}}}}]"#
 	));
 	let mut movement = Movement::default();
 	tick::run_tick(&mut world, &mut movement, &intents);
@@ -1411,8 +1425,13 @@ fn structure_activity_keeps_closest_to_controller() {
 	assert!(room.objects[&far].off, "RCL2 只有 5 个 extension 名额, 最远的那个被停用");
 	let near_off = room.objects.values().filter(|o| o.obj_type == "extension" && o.off).count();
 	assert_eq!(near_off, 1, "近处 5 个都激活");
-	assert!(room.objects[&obj_at(&world, "W5N8", 20, 20, "lab")].off, "RCL2 没有 lab 名额");
-	assert!(room.objects[&obj_at(&world, "W5N8", 21, 21, "terminal")].off, "RCL2 没有 terminal 名额");
+	// off 只是 _calc_spawns 对 spawn/extension 的标记; 其它结构的激活按 checkStructureAgainstController 现算
+	let lab = &room.objects[&obj_at(&world, "W5N8", 20, 20, "lab")];
+	let terminal = &room.objects[&obj_at(&world, "W5N8", 21, 21, "terminal")];
+	assert!(!room.structure_active(lab), "RCL2 没有 lab 名额");
+	assert!(!room.structure_active(terminal), "RCL2 没有 terminal 名额");
+	assert!(!lab.off && !terminal.off, "off 不用于 lab/terminal");
+	assert!(!room.structure_active(&room.objects[&far]), "structure_active 与 off 对 extension 一致");
 }
 
 /// 官方 _create-energy.js / pickup.js / energy/tick.js: 掉落资源每种一堆, 拾取按堆的 resourceType, 衰减对任意资源生效
@@ -1884,6 +1903,408 @@ fn snapshot_parity_with_industry_fields() {
 	}
 }
 
+// ═════════════════════════ RCL 停用 / spawn 回能 (官方 _calc_spawns / checkStructureAgainstController / spawns/tick) ═════════════════════════
+
+/// 官方 _calc_spawns: 超限时按到控制器距离**升序**保留最近的 limit 个, 停用最远的。
+/// RCL2 extension 上限 5, 放 6 个: 只有最远那个 off; RCL2 spawn 上限 1, 放 2 个: 远的那个 off。
+#[test]
+fn spawn_off_keeps_nearest_within_limit() {
+	let json = r#"{
+		"name": "t", "seed": 1,
+		"rooms": [{
+			"name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 2, "pos": [10, 10] },
+			"structures": [
+				{ "type": "spawn", "pos": [40, 40], "energy": 300 },
+				{ "type": "spawn", "pos": [12, 12], "energy": 300 },
+				{ "type": "extension", "pos": [45, 45], "energy": 50 },
+				{ "type": "extension", "pos": [11, 12], "energy": 50 },
+				{ "type": "extension", "pos": [12, 11], "energy": 50 },
+				{ "type": "extension", "pos": [13, 13], "energy": 50 },
+				{ "type": "extension", "pos": [14, 14], "energy": 50 },
+				{ "type": "extension", "pos": [15, 15], "energy": 50 }
+			]
+		}]
+	}"#;
+	let (world, _) = setup(json);
+	let room = &world.rooms["W5N8"];
+	let off_at = |x: u8, y: u8| room.objects.values().find(|o| o.x == x && o.y == y).unwrap().off;
+	assert!(!off_at(12, 12), "近的 spawn 保留");
+	assert!(off_at(40, 40), "远的 spawn 停用");
+	assert!(off_at(45, 45), "最远的 extension 停用");
+	for (x, y) in [(11, 12), (12, 11), (13, 13), (14, 14), (15, 15)] {
+		assert!(!off_at(x, y), "近的 5 个 extension 保留 ({x},{y})");
+	}
+	assert_eq!(room.energy_available(), 300 + 5 * 50, "停用结构不计入 energyAvailable");
+	// checkStructureAgainstController 与 off 结论一致
+	for o in room.objects.values().filter(|o| o.obj_type == "spawn" || o.obj_type == "extension") {
+		assert_eq!(room.structure_active(o), !o.off, "isActive 与 off 应一致: {:?}", (o.obj_type.as_str(), o.x, o.y));
+	}
+}
+
+/// 官方 checkStructureAgainstController 适用于所有受 CONTROLLER_STRUCTURES 约束的类型:
+/// RCL3 塔上限 1 → 两座塔只有离控制器近的可用; 同距离时迭代序 (id) 在前者优先; 路/容器无主恒可用
+#[test]
+fn structure_active_by_distance_for_towers() {
+	let (mut world, _) = setup(RCL3_ROOM);
+	let far = add_structure(&mut world, "W5N8", "tower", 40, 40);
+	let near = add_structure(&mut world, "W5N8", "tower", 30, 27);
+	let road = alloc_id(&mut world.next_id);
+	world.rooms.get_mut("W5N8").unwrap().objects.insert(road, objects::structure(road, "road", 5, 5, false));
+	let room = &world.rooms["W5N8"];
+	assert!(room.structure_active(&room.objects[&near]), "近塔可用");
+	assert!(!room.structure_active(&room.objects[&far]), "远塔超出 RCL3 上限");
+	assert!(room.structure_active(&room.objects[&road]), "无主结构恒可用");
+	// 同距离: id 小的优先
+	let (mut world, _) = setup(RCL3_ROOM);
+	let a = add_structure(&mut world, "W5N8", "tower", 30, 27);
+	let b = add_structure(&mut world, "W5N8", "tower", 26, 27);
+	let room = &world.rooms["W5N8"];
+	assert!(room.structure_active(&room.objects[&a]));
+	assert!(!room.structure_active(&room.objects[&b]));
+	// 控制器降到 0 级: 全部不可用
+	let (mut world, _) = setup(RCL3_ROOM);
+	let t = add_structure(&mut world, "W5N8", "tower", 30, 27);
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 0;
+	let room = &world.rooms["W5N8"];
+	assert!(!room.structure_active(&room.objects[&t]));
+}
+
+/// 官方 processor.js:326: energyAvailable 在逐对象 tick 前只算一次, 所有 spawn 共用。
+/// 两个 spawn 合计 299 → 两个都各回 1 (旧实现逐 spawn 重算, 第二个看到 300 就不回)
+#[test]
+fn spawn_regen_uses_room_energy_computed_once() {
+	let json = r#"{
+		"name": "t", "seed": 1,
+		"rooms": [{
+			"name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 7, "pos": [28, 27] },
+			"structures": [
+				{ "type": "spawn", "pos": [25, 25], "energy": 100 },
+				{ "type": "spawn", "pos": [20, 20], "energy": 199 }
+			]
+		}]
+	}"#;
+	let (mut world, mut movement) = setup(json);
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	let room = &world.rooms["W5N8"];
+	let e = |x: u8| room.objects.values().find(|o| o.obj_type == "spawn" && o.x == x).unwrap().store["energy"];
+	assert_eq!((e(25), e(20)), (101, 200), "两个 spawn 都应各回 1 能量");
+	assert_eq!(room.energy_available(), 301);
+}
+
+/// 官方 spawns/tick.js: 控制器未归属 (level 0) 时 spawn 不回能
+#[test]
+fn spawn_regen_requires_owned_controller() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	set_store(&mut world, spawn, 100);
+	{
+		let c = world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap();
+		c.level = 0;
+		c.mine = false;
+	}
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(store_of(&world, spawn), 100, "控制器无主 → 不回能");
+}
+
+// ═════════════════════════ 孵化: Spawning 意图 / spawnCreep 校验 / 出生落位 ═════════════════════════
+
+fn spawn_intent(spawn: u64, name: &str, data: &str) -> IntentList {
+	IntentList::parse(&format!(r#"[{{"o":"{spawn:024x}","n":"{name}","d":{data}}}]"#))
+}
+
+fn creep_named<'a>(world: &'a World, name: &str) -> Option<&'a objects::Obj> {
+	world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "creep" && o.name.as_deref() == Some(name))
+}
+
+/// 官方 cancelSpawning: 移除孵化中的 creep 并清空 spawning (能量不退)
+#[test]
+fn cancel_spawning_removes_creep() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["work","carry","move"],"name":"K"}"#));
+	assert!(creep_named(&world, "K").map(|c| c.spawning).unwrap_or(false));
+	let energy_after_spawn = store_of(&world, spawn);
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "cancelSpawning", "{}"));
+	assert!(creep_named(&world, "K").is_none(), "取消后孵化中的 creep 消失");
+	assert!(world.rooms["W5N8"].objects[&spawn].spawn_job.is_none(), "spawning 清空");
+	assert_eq!(store_of(&world, spawn), energy_after_spawn + 1, "不退能量 (只有自然回能 +1)");
+}
+
+/// 官方 setSpawnDirections: 合法方向覆盖出生方向序; 非法 (越界/非整数/空) 整体忽略
+#[test]
+fn set_spawn_directions_validates_and_applies() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move","move","move"],"name":"D"}"#));
+	let dirs = |w: &World| w.rooms["W5N8"].objects[&spawn].spawn_job.as_ref().unwrap().directions.clone();
+	assert_eq!(dirs(&world), None);
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "setSpawnDirections", r#"{"directions":[9,1]}"#));
+	assert_eq!(dirs(&world), None, "含越界方向 → 忽略");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "setSpawnDirections", r#"{"directions":[1.5]}"#));
+	assert_eq!(dirs(&world), None, "非整数 → 忽略");
+	// 1 部件孵化 3 tick: 第 2/3 tick 之间设好方向 5,5,"3" → 去重为 [5,3]
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move","move"],"name":"D"}"#));
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "setSpawnDirections", r#"{"directions":[5,5,"3"]}"#));
+	assert_eq!(dirs(&world), Some(vec![5, 3]));
+	for _ in 0..6 {
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	}
+	let c = creep_named(&world, "D").unwrap();
+	assert!(!c.spawning);
+	assert_eq!((c.x, c.y), (25, 26), "按方向 5 (BOTTOM) 出生");
+}
+
+/// 官方 create-creep.js: directions 非法 / spawn 停用 / 非我方 → 不孵化
+#[test]
+fn spawn_creep_rejects_invalid_directions_and_inactive_spawn() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"X","directions":[0]}"#));
+	assert!(creep_named(&world, "X").is_none(), "方向 0 非法 → 意图作废");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"X","directions":"5"}"#));
+	assert!(creep_named(&world, "X").is_none(), "directions 不是数组 → 意图作废");
+	// 控制器降为 0 级: spawn 不可用 (checkStructureAgainstController)
+	{
+		let c = world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap();
+		c.level = 0;
+	}
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"Y"}"#));
+	assert!(creep_named(&world, "Y").is_none(), "RCL0 spawn 停用 → 不孵化");
+	// 非我方 spawn
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&spawn).unwrap().mine = false;
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"Z"}"#));
+	assert!(creep_named(&world, "Z").is_none(), "非我方 spawn 不孵化");
+}
+
+/// energyStructures 重复 id 只算一次 (官方 _.uniq): 200 能量的 spawn 列两次不能付 300 的身体;
+/// 旧实现会按 400 判定够用, 扣费时 u32 下溢
+#[test]
+fn spawn_energy_structures_dedup() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	set_store(&mut world, spawn, 200);
+	let ids = format!(r#"["{spawn:024x}","{spawn:024x}"]"#);
+	let data = format!(r#"{{"body":["work","work","move","move"],"name":"E","energyStructures":{ids}}}"#);
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", &data));
+	assert!(creep_named(&world, "E").is_none(), "去重后只有 200 能量, 不够 300");
+	assert_eq!(store_of(&world, spawn), 201, "未扣费, 仅自然回能");
+	let data = format!(r#"{{"body":["work","move"],"name":"F","energyStructures":{ids}}}"#);
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", &data));
+	assert!(creep_named(&world, "F").is_some(), "150 够用");
+	assert_eq!(store_of(&world, spawn), 201 - 150 + 1);
+	// 显式空列表 → 只用列出的结构 (没有) → 失败
+	let data = r#"{"body":["move"],"name":"G","energyStructures":[]}"#;
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", data));
+	assert!(creep_named(&world, "G").is_none(), "energyStructures=[] 无可用能量");
+}
+
+/// 出生落位: 越界方向不再被夹成 TOP; 墙格上有路时可出生 (官方 _born-creep.js)
+#[test]
+fn birth_tile_directions_and_road_on_wall() {
+	use screeps_sim::engine::movement::find_birth_tile;
+	let (mut world, _) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	let movement = Movement::default();
+	{
+		let room = &world.rooms["W5N8"];
+		let s = &room.objects[&spawn];
+		assert_eq!(find_birth_tile(room, s, &movement, Some(&[0, 9])), None, "越界方向不映射到 TOP");
+		assert_eq!(find_birth_tile(room, s, &movement, Some(&[0, 3])), Some((26, 25)), "跳过非法值, 用方向 3");
+	}
+	// spawn (25,25) 周围全是墙, 只有 (26,26) 的墙上有路
+	{
+		let room = world.rooms.get_mut("W5N8").unwrap();
+		for dx in -1i32..=1 {
+			for dy in -1i32..=1 {
+				if dx != 0 || dy != 0 {
+					room.terrain.set((25 + dx) as usize, (25 + dy) as usize, 1);
+				}
+			}
+		}
+	}
+	{
+		let room = &world.rooms["W5N8"];
+		assert_eq!(find_birth_tile(room, &room.objects[&spawn], &movement, None), None, "四面是墙无处出生");
+	}
+	let road = alloc_id(&mut world.next_id);
+	world.rooms.get_mut("W5N8").unwrap().objects.insert(road, objects::structure(road, "road", 26, 26, false));
+	let room = &world.rooms["W5N8"];
+	assert_eq!(find_birth_tile(room, &room.objects[&spawn], &movement, None), Some((26, 26)), "墙上路可出生");
+}
+
+// ═════════════════════════ tower / link 结算细节 ═════════════════════════
+
+/// 官方 links/transfer.js: 超出 RCL 上限的源 link 不能发送 (RCL1 无 link 名额)
+#[test]
+fn link_transfer_requires_rcl() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let a = add_structure(&mut world, "W5N8", "link", 10, 10);
+	let b = add_structure(&mut world, "W5N8", "link", 12, 10);
+	set_store(&mut world, a, 500);
+	let json = format!(r#"[{{"o":"{a:024x}","n":"transferEnergy","d":{{"id":"{b:024x}","amount":200}}}}]"#);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(store_of(&world, a), 500, "RCL1 link 不可用, 不转移");
+	assert_eq!(store_of(&world, b), 0);
+	// RCL5: 目标剩 100 空间时, 处理器把 200 截到 100 (官方行为)
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 5;
+	set_store(&mut world, b, 700);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(store_of(&world, a), 400, "截到目标剩余容量 100");
+	assert_eq!(store_of(&world, b), 797, "700 + 100 - ceil(3)");
+}
+
+/// 官方 towers/attack.js: 不攻击孵化中的 creep
+#[test]
+fn tower_does_not_attack_spawning_creep() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let tower = add_structure(&mut world, "W5N8", "tower", 20, 20);
+	set_store(&mut world, tower, 100);
+	let target = add_creep(&mut world, "Baby", 22, 20, &["move", "move", "move", "move", "move", "move", "move"]);
+	mark_enemy(&mut world, target);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&target).unwrap().spawning = true;
+	let spawn = spawn_of(&world, "W5N8");
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&spawn).unwrap().spawn_job =
+		Some(objects::SpawnJob { name: "Baby".into(), need_time: 21, spawn_time: 100, directions: None });
+	let json = format!(r#"[{{"o":"{tower:024x}","n":"attack","d":{{"id":"{target:024x}"}}}}]"#);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(hits_of(&world, target), 700, "孵化中不受伤");
+	assert_eq!(store_of(&world, tower), 100, "攻击未执行不扣能");
+}
+
+// ═════════════════════════ destroyStructure / ruin (官方 room/destroy-structure.js, structures/_destroy.js, ruins/tick.js) ═════════════════════════
+
+fn destroy_intent(id: u64) -> IntentList {
+	IntentList::parse(&format!(r#"[{{"o":"room","n":"destroyStructure","d":{{"room":"W5N8","id":"{id:024x}"}}}}]"#))
+}
+
+/// destroyStructure: 留下继承仓储的 ruin, 500t 后消散并把资源散落原地; 不记 EVENT_OBJECT_DESTROYED
+#[test]
+fn destroy_structure_leaves_ruin_that_decays() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let tower = add_structure(&mut world, "W5N8", "tower", 20, 20);
+	set_store(&mut world, tower, 400);
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(tower));
+	let room = &world.rooms["W5N8"];
+	assert!(!room.objects.contains_key(&tower));
+	assert!(room.events.iter().all(|e| e.event != screeps_sim::engine::intents::EVENT_OBJECT_DESTROYED));
+	let ruin = room.objects.values().find(|o| o.obj_type == "ruin").expect("应留下 ruin");
+	let ruin_id = ruin.id;
+	let info = ruin.ruin.as_ref().unwrap();
+	assert_eq!((info.structure_id, info.structure_type.as_str(), info.destroy_time), (tower, "tower", 0));
+	assert_eq!(info.hits_max, 3000);
+	assert_eq!(ruin.store.get("energy").copied(), Some(400));
+	// decayTime = 0 + 500 → 第 499 tick 消散
+	for _ in 1..499 {
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	}
+	assert!(world.rooms["W5N8"].objects.contains_key(&ruin_id), "tick 498 仍在");
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	let room = &world.rooms["W5N8"];
+	assert!(!room.objects.contains_key(&ruin_id), "tick 499 消散");
+	let pile = room.objects.values().find(|o| o.obj_type == "energy" && o.x == 20 && o.y == 20).expect("资源落地");
+	assert_eq!(pile.store.get("energy").copied(), Some(400), "ruin tick 中新落地的资源本 tick 不再衰减");
+}
+
+/// destroyStructure 的官方前置: 控制器非我方 / 房内有敌方 creep / 目标无建造成本 → 不执行
+#[test]
+fn destroy_structure_preconditions() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let ext = add_structure(&mut world, "W5N8", "extension", 20, 20);
+	let foe = add_creep(&mut world, "Foe", 40, 40, &["move"]);
+	mark_enemy(&mut world, foe);
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(ext));
+	assert!(world.rooms["W5N8"].objects.contains_key(&ext), "有敌方 creep → 不摧毁");
+	world.rooms.get_mut("W5N8").unwrap().objects.remove(&foe);
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().mine = false;
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(ext));
+	assert!(world.rooms["W5N8"].objects.contains_key(&ext), "控制器非我方 → 不摧毁");
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().mine = true;
+	let ctrl = world.rooms["W5N8"].controller().unwrap().id;
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(ctrl));
+	assert!(world.rooms["W5N8"].objects.contains_key(&ctrl), "controller 无建造成本 → 不摧毁");
+	let site = alloc_id(&mut world.next_id);
+	world.rooms.get_mut("W5N8").unwrap().objects.insert(site, objects::construction_site(site, "road", 5, 5, 300));
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(site));
+	assert!(world.rooms["W5N8"].objects.contains_key(&site), "工地走 removeConstructionSite, destroyStructure 无效");
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(ext));
+	assert!(!world.rooms["W5N8"].objects.contains_key(&ext), "条件满足 → 摧毁");
+}
+
+/// 摧毁正在孵化的 spawn: 孵化中的 creep 一并移除 (官方 _destroy.js)
+#[test]
+fn destroy_spawning_spawn_removes_creep() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let spawn = spawn_of(&world, "W5N8");
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move","move"],"name":"Kid"}"#));
+	assert!(creep_named(&world, "Kid").is_some());
+	tick::run_tick(&mut world, &mut movement, &destroy_intent(spawn));
+	assert!(creep_named(&world, "Kid").is_none(), "孵化中的 creep 随 spawn 一起消失");
+	assert!(world.rooms["W5N8"].objects.values().any(|o| o.obj_type == "ruin"));
+}
+
+// ═════════════════════════ rampart / container / road 细节 (官方 ramparts/tick.js, containers/tick.js) ═════════════════════════
+
+/// rampart hitsMax 每 tick 刷新 (不等衰减到期); 与控制器不同归属 → 0
+#[test]
+fn rampart_hits_max_refreshes_every_tick() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let id = add_structure(&mut world, "W5N8", "rampart", 10, 10);
+	{
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&id).unwrap();
+		o.hits = 5000;
+		o.hits_max = 0;
+		o.next_decay_time = Some(50);
+	}
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(world.rooms["W5N8"].objects[&id].hits_max, constants::rampart_hits_max(3), "未到衰减点也刷新");
+	assert_eq!(world.rooms["W5N8"].objects[&id].hits, 5000, "未到衰减点不掉血");
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 5;
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(world.rooms["W5N8"].objects[&id].hits_max, constants::rampart_hits_max(5));
+	mark_enemy(&mut world, id);
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(world.rooms["W5N8"].objects[&id].hits_max, 0, "敌方 rampart 在我方控制器房间 hitsMax=0");
+}
+
+/// rampart.setPublic 意图写入 isPublic 并持久
+#[test]
+fn rampart_set_public_persists() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let id = add_structure(&mut world, "W5N8", "rampart", 10, 10);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&id).unwrap().hits = 5000;
+	let set = |v: &str| IntentList::parse(&format!(r#"[{{"o":"{id:024x}","n":"setPublic","d":{{"isPublic":{v}}}}}]"#));
+	tick::run_tick(&mut world, &mut movement, &set("true"));
+	assert!(world.rooms["W5N8"].objects[&id].is_public);
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert!(world.rooms["W5N8"].objects[&id].is_public, "跨 tick 保留");
+	tick::run_tick(&mut world, &mut movement, &set("false"));
+	assert!(!world.rooms["W5N8"].objects[&id].is_public);
+}
+
+/// 官方 containers/tick.js: 控制器 level > 0 (不论归属) → 衰减周期 500
+#[test]
+fn container_decay_interval_uses_controller_level_only() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let id = add_structure(&mut world, "W5N8", "container", 10, 10);
+	{
+		let room = world.rooms.get_mut("W5N8").unwrap();
+		let o = room.objects.get_mut(&id).unwrap();
+		o.mine = false;
+		o.next_decay_time = Some(0);
+		room.controller_mut().unwrap().mine = false; // 别人的 3 级控制器
+	}
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(world.rooms["W5N8"].objects[&id].next_decay_time, Some(500));
+}
+
 /// 保留: 可以连续续保留; 不再续则到期清除 (官方 controllers/tick.js:10);
 /// 被保留期间 source 容量 3000, 到期回中立 1500 (官方 sources/tick.js); 无控制器的房间 4000 (SK 房)
 #[test]
@@ -2087,4 +2508,130 @@ fn flag_intents_persist_in_world() {
 	let json = r#"[{"o":"room","n":"removeFlag","d":{"room":"W4N8","name":"F1"}}]"#;
 	tick::run_tick(&mut world, &mut movement, &IntentList::parse(json));
 	assert!(world.flags.is_empty());
+}
+
+// ═════════════════════════ 控制器: activateSafeMode / unclaim (官方 controllers/*.js) ═════════════════════════
+
+fn ctrl_intent(world: &World, name: &str) -> IntentList {
+	let id = world.rooms["W5N8"].controller().unwrap().id;
+	IntentList::parse(&format!(r#"[{{"o":"{id:024x}","n":"{name}","d":{{}}}}]"#))
+}
+
+/// activateSafeMode: 消耗 1 次, safeMode = tick + 20000, 冷却 50000; 次数为 0 / 冷却中 / 升级封锁 → 无效
+#[test]
+fn activate_safe_mode_and_cooldown() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	let it = ctrl_intent(&world, "activateSafeMode");
+	tick::run_tick(&mut world, &mut movement, &it);
+	assert_eq!(world.rooms["W5N8"].controller().unwrap().safe_mode, None, "safeModeAvailable=0 → 无效");
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().safe_mode_available = 2;
+	let t = world.tick;
+	let it = ctrl_intent(&world, "activateSafeMode");
+	tick::run_tick(&mut world, &mut movement, &it);
+	let c = world.rooms["W5N8"].controller().unwrap();
+	assert_eq!(c.safe_mode, Some(t + constants::SAFE_MODE_DURATION));
+	assert_eq!(c.safe_mode_cooldown, Some(t + constants::SAFE_MODE_COOLDOWN));
+	assert_eq!(c.safe_mode_available, 1);
+	assert!(!c.safe_mode_activated, "标记只在本 tick 有效");
+	let it = ctrl_intent(&world, "activateSafeMode");
+	tick::run_tick(&mut world, &mut movement, &it);
+	assert_eq!(world.rooms["W5N8"].controller().unwrap().safe_mode_available, 1, "冷却中 → 无效");
+	// 升级封锁中 → 无效
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	{
+		let c = world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap();
+		c.safe_mode_available = 1;
+		c.upgrade_blocked = 500;
+	}
+	let it = ctrl_intent(&world, "activateSafeMode");
+	tick::run_tick(&mut world, &mut movement, &it);
+	assert_eq!(world.rooms["W5N8"].controller().unwrap().safe_mode_available, 1);
+}
+
+/// unclaim: 控制器归零并进入安全模式冷却
+#[test]
+fn unclaim_resets_controller() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	{
+		let c = world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap();
+		c.progress = 777;
+		c.safe_mode_available = 3;
+		c.safe_mode = Some(9999);
+	}
+	let t = world.tick;
+	let it = ctrl_intent(&world, "unclaim");
+	tick::run_tick(&mut world, &mut movement, &it);
+	let c = world.rooms["W5N8"].controller().unwrap();
+	assert!(!c.mine);
+	assert_eq!((c.level, c.progress, c.downgrade_time, c.safe_mode, c.safe_mode_available), (0, 0, None, None, 0));
+	assert_eq!(c.safe_mode_cooldown, Some(t + constants::SAFE_MODE_COOLDOWN));
+}
+
+/// 官方 spawns/create-creep.js: 停用 (超 RCL 上限) 或非我方的 spawn 不处理 spawnCreep 意图
+#[test]
+fn spawn_creep_intent_ignored_on_off_or_foreign_spawn() {
+	let json = r#"{
+		"name": "t", "seed": 1,
+		"rooms": [{
+			"name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 1, "pos": [10, 10] },
+			"structures": [
+				{ "type": "spawn", "pos": [40, 40], "energy": 300 },
+				{ "type": "spawn", "pos": [12, 12], "energy": 300 }
+			]
+		}]
+	}"#;
+	let (mut world, mut movement) = setup(json);
+	let spawn_at = |w: &World, x: u8| w.rooms["W5N8"].objects.values().find(|o| o.obj_type == "spawn" && o.x == x).unwrap().id;
+	let far = spawn_at(&world, 40);
+	let near = spawn_at(&world, 12);
+	assert!(world.rooms["W5N8"].objects[&far].off);
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(far, "spawnCreep", r#"{"name":"A","body":["move"]}"#));
+	assert!(creep_named(&world, "A").is_none(), "停用 spawn 不孵化");
+	assert!(world.rooms["W5N8"].objects[&far].spawn_job.is_none());
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&near).unwrap().mine = false;
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(near, "spawnCreep", r#"{"name":"B","body":["move"]}"#));
+	assert!(creep_named(&world, "B").is_none(), "非我方 spawn 不孵化");
+}
+
+/// 官方 _born-creep.js spawnstomp: 周围全被占且有敌方 creep → 踩死方向序中第一个敌人 (留墓碑) 并在其格出生;
+/// 方向序之外还有空位时不踩, 继续等待
+#[test]
+fn spawn_stomps_hostile_when_surrounded() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	// spawn (25,25): 7 个己方 creep 围住, 方向 3 (26,25) 站敌方
+	let mut hostile = 0;
+	for (i, d) in [(0i32, -1i32), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)].iter().enumerate() {
+		let (x, y) = ((25 + d.0) as u8, (25 + d.1) as u8);
+		let id = add_creep(&mut world, &format!("C{i}"), x, y, &["move"]);
+		if (x, y) == (26, 25) {
+			world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&id).unwrap().mine = false;
+			hostile = id;
+		}
+	}
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"S"}"#));
+	for _ in 0..3 {
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	}
+	let c = creep_named(&world, "S").expect("孵化出的 creep");
+	assert!(!c.spawning, "被围时踩死敌人出生");
+	assert_eq!((c.x, c.y), (26, 25));
+	let room = &world.rooms["W5N8"];
+	assert!(!room.objects.contains_key(&hostile), "敌方被踩死");
+	assert!(room.objects.values().any(|o| o.obj_type == "tombstone" && o.x == 26 && o.y == 25), "留墓碑");
+
+	// 方向序只给 [3] (敌人所在), 但方向 1 有空位 → 不踩, 继续等待
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	let h = add_creep(&mut world, "H", 26, 25, &["move"]);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&h).unwrap().mine = false;
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(spawn, "spawnCreep", r#"{"body":["move"],"name":"T","directions":[3]}"#));
+	for _ in 0..4 {
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	}
+	assert!(creep_named(&world, "T").unwrap().spawning, "有其它空位时不踩, 顺延");
+	assert!(world.rooms["W5N8"].objects.contains_key(&h));
 }

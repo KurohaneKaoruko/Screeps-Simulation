@@ -286,6 +286,17 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
                     let _ = write!(out, "{}", job.need_time);
                     out.push_str(",\"remainingTime\":");
                     let _ = write!(out, "{}", job.spawn_time.saturating_sub(world.tick));
+                    // 官方 Spawning.directions: 未设置时为 undefined (键缺省)
+                    if let Some(dirs) = &job.directions {
+                        out.push_str(",\"directions\":[");
+                        for (i, d) in dirs.iter().enumerate() {
+                            if i > 0 {
+                                out.push(',');
+                            }
+                            let _ = write!(out, "{}", d);
+                        }
+                        out.push(']');
+                    }
                     out.push('}');
                 }
                 None => out.push_str("null"),
@@ -327,10 +338,13 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             out.push_str(",\"hitsMax\":");
             let _ = write!(out, "{}", obj.hits_max);
             if obj.obj_type == "rampart" {
-                // rampart 是 OwnedStructure: 归属来自引擎 (此前 shim 一律当作自己的)
                 out.push_str(",\"my\":");
                 let _ = write!(out, "{}", obj.mine);
-                out.push_str(",\"isPublic\":false");
+                out.push_str(",\"isPublic\":");
+                let _ = write!(out, "{}", obj.is_public);
+            }
+            // 官方 StructureRoad / StructureRampart.ticksToDecay
+            if obj.obj_type == "rampart" || obj.obj_type == "road" {
                 if let Some(t) = obj.next_decay_time {
                     out.push_str(",\"ticksToDecay\":");
                     let _ = write!(out, "{}", t.saturating_sub(world.tick));
@@ -383,7 +397,23 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
                 }
                 None => out.push_str("null"),
             }
-            out.push_str(",\"safeModeAvailable\":0,\"safeMode\":null,\"upgradeBlocked\":");
+            out.push_str(",\"safeModeAvailable\":");
+            let _ = write!(out, "{}", obj.safe_mode_available);
+            out.push_str(",\"safeMode\":");
+            match obj.safe_mode.filter(|t| *t > world.tick) {
+                Some(t) => {
+                    let _ = write!(out, "{}", t - world.tick);
+                }
+                None => out.push_str("null"),
+            }
+            out.push_str(",\"safeModeCooldown\":");
+            match obj.safe_mode_cooldown.filter(|t| *t > world.tick) {
+                Some(t) => {
+                    let _ = write!(out, "{}", t - world.tick);
+                }
+                None => out.push_str("null"),
+            }
+            out.push_str(",\"upgradeBlocked\":");
             let _ = write!(out, "{}", obj.upgrade_blocked.saturating_sub(world.tick));
             out.push_str(",\"reservation\":");
             match obj.reservation_end_time {
@@ -441,6 +471,30 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             match &obj.creep_name {
                 Some(n) => put_str(out, n),
                 None => out.push_str("null"),
+            }
+        }
+        "ruin" => {
+            out.push_str(",\"store\":");
+            write_store(out, &obj.store);
+            if let Some(t) = obj.next_decay_time {
+                out.push_str(",\"ticksToDecay\":");
+                let _ = write!(out, "{}", t.saturating_sub(world.tick));
+            }
+            if let Some(info) = &obj.ruin {
+                out.push_str(",\"destroyTime\":");
+                let _ = write!(out, "{}", info.destroy_time);
+                out.push_str(",\"structure\":{\"id\":\"");
+                let _ = write!(out, "{:024x}", info.structure_id);
+                out.push_str("\",\"type\":");
+                put_str(out, &info.structure_type);
+                out.push_str(",\"hits\":0,\"hitsMax\":");
+                let _ = write!(out, "{}", info.hits_max);
+                // 原结构有主时才带 my (官方 ruin.structure.user)
+                if info.mine || info.enemy {
+                    out.push_str(",\"my\":");
+                    let _ = write!(out, "{}", info.mine);
+                }
+                out.push('}');
             }
         }
         _ => {}
@@ -638,14 +692,15 @@ fn object_json(obj: &Obj, world: &World) -> Value {
             extra.insert("energyCapacity".into(), json!(obj.energy_capacity));
             match &obj.spawn_job {
                 Some(job) => {
-                    extra.insert(
-                        "spawning".into(),
-                        json!({
-                            "name": job.name,
-                            "needTime": job.need_time,
-                            "remainingTime": job.spawn_time.saturating_sub(world.tick),
-                        }),
-                    );
+                    let mut spawning = json!({
+                        "name": job.name,
+                        "needTime": job.need_time,
+                        "remainingTime": job.spawn_time.saturating_sub(world.tick),
+                    });
+                    if let Some(dirs) = &job.directions {
+                        spawning["directions"] = json!(dirs);
+                    }
+                    extra.insert("spawning".into(), spawning);
                 }
                 None => {
                     extra.insert("spawning".into(), Value::Null);
@@ -684,7 +739,9 @@ fn object_json(obj: &Obj, world: &World) -> Value {
             extra.insert("hitsMax".into(), json!(obj.hits_max));
             if obj.obj_type == "rampart" {
                 extra.insert("my".into(), json!(obj.mine));
-                extra.insert("isPublic".into(), json!(false));
+                extra.insert("isPublic".into(), json!(obj.is_public));
+            }
+            if obj.obj_type == "rampart" || obj.obj_type == "road" {
                 if let Some(t) = obj.next_decay_time {
                     extra.insert("ticksToDecay".into(), json!(t.saturating_sub(world.tick)));
                 }
@@ -730,8 +787,15 @@ fn object_json(obj: &Obj, world: &World) -> Value {
                 "ticksToDowngrade".into(),
                 json!(obj.downgrade_time.map(|t| t.saturating_sub(world.tick))),
             );
-            extra.insert("safeModeAvailable".into(), json!(0));
-            extra.insert("safeMode".into(), Value::Null);
+            extra.insert("safeModeAvailable".into(), json!(obj.safe_mode_available));
+            extra.insert(
+                "safeMode".into(),
+                json!(obj.safe_mode.filter(|t| *t > world.tick).map(|t| t - world.tick)),
+            );
+            extra.insert(
+                "safeModeCooldown".into(),
+                json!(obj.safe_mode_cooldown.filter(|t| *t > world.tick).map(|t| t - world.tick)),
+            );
             extra.insert(
                 "upgradeBlocked".into(),
                 json!(obj.upgrade_blocked.saturating_sub(world.tick)),
@@ -786,6 +850,27 @@ fn object_json(obj: &Obj, world: &World) -> Value {
                 extra.insert("ticksToDecay".into(), json!(t.saturating_sub(world.tick)));
             }
             extra.insert("creepName".into(), json!(obj.creep_name.clone()));
+            base(extra)
+        }
+        "ruin" => {
+            let mut extra = Map::new();
+            extra.insert("store".into(), store_json(&obj.store));
+            if let Some(t) = obj.next_decay_time {
+                extra.insert("ticksToDecay".into(), json!(t.saturating_sub(world.tick)));
+            }
+            if let Some(info) = &obj.ruin {
+                extra.insert("destroyTime".into(), json!(info.destroy_time));
+                let mut st = json!({
+                    "id": World::id_string(info.structure_id),
+                    "type": info.structure_type,
+                    "hits": 0,
+                    "hitsMax": info.hits_max,
+                });
+                if info.mine || info.enemy {
+                    st["my"] = json!(info.mine);
+                }
+                extra.insert("structure".into(), st);
+            }
             base(extra)
         }
         other => {
