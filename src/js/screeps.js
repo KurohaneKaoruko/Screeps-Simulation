@@ -534,13 +534,27 @@ globalThis.global = globalThis;
 /** 地形缓存: roomName → Uint8Array(2500), 整个进程只解析一次 */
 const terrainCache = new Map();
 
+/**
+ * 快照携带地形的那一 tick (isolate 新建/重置后的首个快照) 立即解析全部房间。
+ * 此前是第一次被访问时才解析: bot 在之后的 tick 才首次读某房地形时快照里已经没有 terrain,
+ * 缓存成全平地且永不更新 —— 寻路穿墙、移动大面积失败 (平地场景测不出来)。
+ */
+function cacheSnapshotTerrain() {
+	const all = __W && __W.terrain;
+	if (!all) return;
+	for (const roomName in all) {
+		const raw = all[roomName];
+		const t = new Uint8Array(2500);
+		for (let i = 0; i < 2500 && i < raw.length; i++) t[i] = +raw[i];
+		terrainCache.set(roomName, t);
+	}
+}
+
 function terrainOf(roomName) {
 	let t = terrainCache.get(roomName);
 	if (!t) {
-		const raw = (__W.terrain || {})[roomName];
-		t = new Uint8Array(2500);
-		if (raw) for (let i = 0; i < 2500 && i < raw.length; i++) t[i] = +raw[i];
-		terrainCache.set(roomName, t);
+		// 不在世界里的房间: 全平地 (不缓存, 以免将来该房地形送达时被挡住)
+		return new Uint8Array(2500);
 	}
 	return t;
 }
@@ -2803,6 +2817,7 @@ function __runTick() {
 		// 确定性模式下 Date.now 跟 Game.time 走 (每 tick 3 秒), 不读真实时间
 		Date.now = __virtualCpuStep > 0 ? () => 1600000000000 + (__W ? __W.time : 0) * 3000 : __realDateNow;
 		__W = JSON.parse(__ops.op_sim_get_snapshot());
+		cacheSnapshotTerrain();
 		buildGame();
 		rawMemoryData = __ops.op_sim_get_memory();
 		__installLazyMemory();

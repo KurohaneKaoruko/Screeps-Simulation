@@ -601,3 +601,42 @@ fn creep_api_return_codes_match_official() {
 		assert!(res.intents.entries.iter().all(|(_, n, _)| n != "move"), "cancelOrder 应撤掉 move 意图");
 	});
 }
+
+/// 回归: 地形只在首个快照携带, shim 曾在「第一次被访问时」才解析 —— bot 第 2 tick 起才读某房地形时
+/// 缓存成全平地且永不更新 (寻路穿墙)。现在收到地形的那一 tick 立即解析全部房间。
+#[test]
+fn terrain_read_after_first_tick_is_correct() {
+	in_tokio(|| {
+		let mut rows = vec!["0".repeat(50); 50];
+		rows[10] = format!("{}1{}", "0".repeat(10), "0".repeat(39));
+		let json = format!(
+			r#"{{ "name": "t", "seed": 1, "rooms": [{{ "name": "W5N8", "terrain": {{ "kind": "rows", "rows": {} }},
+				"controller": {{ "level": 1, "pos": [40, 40] }}, "structures": [{{ "type": "spawn", "pos": [25, 25], "energy": 300 }}] }}] }}"#,
+			serde_json::to_string(&rows).unwrap()
+		);
+		let world = build_world(&Scenario::from_json(&json).unwrap()).unwrap();
+		let bundle = r#"exports.loop = function() {
+			if (Game.time < 1) return;
+			console.log(JSON.stringify({ wall: Game.map.getRoomTerrain("W5N8").get(10, 10), plain: Game.map.getRoomTerrain("W5N8").get(11, 10) }));
+		};"#;
+		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut world = world;
+		let mut memory = String::from("{}");
+		let mut last = String::new();
+		for tick_i in 0..3 {
+			let include = bot.take_terrain_pending();
+			let snapshot = build_snapshot(&world, &SnapshotOptions { cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 }, always_visible: false, include_terrain: include });
+			let r = bot.run_tick(snapshot, memory.clone()).unwrap();
+			memory = r.memory.clone();
+			if let Some(l) = r.console.first() {
+				last = l.clone();
+			}
+			let mut movement = Movement::default();
+			tick::run_tick(&mut world, &mut movement, &r.intents);
+			let _ = tick_i;
+		}
+		let v: serde_json::Value = serde_json::from_str(&last).unwrap_or_else(|_| panic!("无输出: {last}"));
+		assert_eq!(v["wall"], 1, "第 2 tick 起才读的地形也要正确: {v}");
+		assert_eq!(v["plain"], 0, "{v}");
+	});
+}
