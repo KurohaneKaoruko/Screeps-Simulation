@@ -23,6 +23,19 @@
 真实规模下 JS 侧 JSON.parse(大快照) 是第一瓶颈 (0.59ms/tick) → 指向 P1 增量快照
 (只重序列化脏对象) 是下一个大头; 引擎 (Rust) 在 192 对象+全量移动仲裁下仅 0.15ms/tick。
 
+### 压力测试 (stress-bot: 烧满 CPU 预算的真实负载混合, examples/fixtures/)
+
+```bash
+screeps-sim --scenario scenarios/bench-midgame.json --bundle examples/fixtures/stress-bot.js --ticks 120
+```
+
+- **满 100 CPU 吞吐**: 9.96 t/s (理论上限 10), CPU avg/p95/p99 全部 99.0、零超限 ——
+  计量与校准闭环 (bot 用 `Game.cpu.getUsed()` 自校准), 模拟器自身开销仅 ~0.4ms/tick;
+- **看门狗** (limit=50 + tick_limit=120 + enforce + `Memory.__stress.mul=3`):
+  每 tick 精准在 120.000ms 中断、意图与 Memory 丢弃 (官方 "timed out ungracefully");
+- **bucket 耗尽震荡**: 结算 −70/tick 打穿 1000 → run/skip 交替, 下限 −2×limit=−100 锯齿,
+  与官方 make.js 语义一致。
+
 ## ✅ P1 批次已交付 (2026-10-12, 接 P0)
 
 - **直接序列化器**: `build_snapshot` 直写 String, 不建 `serde_json::Value` 树;
