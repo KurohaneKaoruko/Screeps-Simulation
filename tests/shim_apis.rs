@@ -511,3 +511,70 @@ fn transfer_into_busy_spawn_inner() {
 		.unwrap_or(0);
 	assert_eq!(spawn_energy, 101 + 1, "能量应进 spawn (1 + 100, 本 tick 房间能量仍 < 300 再回 1)");
 }
+
+// ═════════════════════════ isActive / ERR_RCL_NOT_ENOUGH (官方 checkStructureAgainstController) ═════════════════════════
+
+/// RCL3 塔上限 1: 离控制器近的塔 isActive()=true, 远的 false; 远塔 attack/heal/repair 在能量检查之后
+/// 返回 ERR_RCL_NOT_ENOUGH; 超限的 extension / 无主的路同样按官方规则判定
+#[test]
+fn is_active_follows_controller_structures() {
+	in_tokio(|| is_active_follows_controller_structures_inner());
+}
+
+fn is_active_follows_controller_structures_inner() {
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "active", "seed": 1,
+		"rooms": [{ "name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 3, "pos": [28, 27] },
+			"structures": [
+				{ "type": "spawn", "pos": [25, 25], "energy": 300 },
+				{ "type": "tower", "pos": [40, 40], "energy": 500 },
+				{ "type": "tower", "pos": [30, 27], "energy": 500 },
+				{ "type": "tower", "pos": [41, 41], "energy": 5 },
+				{ "type": "road", "pos": [10, 10] },
+				{ "type": "constructedWall", "pos": [11, 11] }
+			],
+			"creeps": [
+				{ "name": "Me", "body": ["move"], "pos": [26, 26] },
+				{ "name": "Foe", "body": ["move"], "pos": [35, 35], "enemy": true }
+			]
+		}]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let bundle = r#"
+		exports.loop = function() {
+			const room = Game.rooms.W5N8;
+			const towers = room.find(FIND_MY_STRUCTURES, { filter: { structureType: STRUCTURE_TOWER } });
+			const at = (x, y) => towers.find(t => t.pos.x === x && t.pos.y === y);
+			const near = at(30, 27), far = at(40, 40), poor = at(41, 41);
+			const foe = room.find(FIND_HOSTILE_CREEPS)[0];
+			const road = room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_ROAD } })[0];
+			const wall = room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_WALL } })[0];
+			console.log(JSON.stringify({
+				nearActive: near.isActive(), farActive: far.isActive(), poorActive: poor.isActive(),
+				roadActive: road.isActive(), spawnActive: Game.spawns[Object.keys(Game.spawns)[0]].isActive(),
+				ctrlActive: room.controller.isActive(),
+				nearAttack: near.attack(foe),
+				farAttack: far.attack(foe), farHeal: far.heal(Game.creeps.Me), farRepair: far.repair(wall),
+				poorAttack: poor.attack(foe),
+			}));
+		};
+	"#;
+	let (entries, console) = run_once(bundle, &mut world);
+	let info: serde_json::Value = serde_json::from_str(console.first().map(String::as_str).unwrap_or("{}")).unwrap();
+	assert_eq!(info["nearActive"], true, "{info}");
+	assert_eq!(info["farActive"], false, "{info}");
+	assert_eq!(info["poorActive"], false, "{info}");
+	assert_eq!(info["roadActive"], true, "无主结构恒 true: {info}");
+	assert_eq!(info["spawnActive"], true, "{info}");
+	assert_eq!(info["ctrlActive"], true, "controller 不在 CONTROLLER_STRUCTURES 表中: {info}");
+	assert_eq!(info["nearAttack"], 0, "{info}");
+	assert_eq!(info["farAttack"], -14, "远塔 ERR_RCL_NOT_ENOUGH: {info}");
+	assert_eq!(info["farHeal"], -14, "{info}");
+	assert_eq!(info["farRepair"], -14, "{info}");
+	assert_eq!(info["poorAttack"], -6, "能量检查先于 RCL 检查 → ERR_NOT_ENOUGH_ENERGY: {info}");
+	assert_eq!(entries.iter().filter(|(_, n, _)| n == "attack").count(), 1, "只有近塔提交 attack 意图");
+}

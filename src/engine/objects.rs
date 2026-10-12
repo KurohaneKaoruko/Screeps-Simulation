@@ -75,6 +75,31 @@ pub struct Obj {
     // ── mineral ──
     pub mineral_type: Option<String>,
     pub mineral_amount: Option<u32>,
+    // ── rampart ──
+    /// 官方 `isPublic` (setPublic 意图写入)
+    pub is_public: bool,
+    // ── 控制器安全模式 (官方 safeMode / safeModeAvailable / safeModeCooldown) ──
+    /// 安全模式到期 tick (None = 未开启)
+    pub safe_mode: Option<u64>,
+    pub safe_mode_available: u32,
+    /// 安全模式冷却到期 tick
+    pub safe_mode_cooldown: Option<u64>,
+    /// 本 tick 收到合法 activateSafeMode 意图 (官方 `_safeModeActivated`, 控制器 tick 时生效)
+    pub safe_mode_activated: bool,
+    // ── ruin ──
+    pub ruin: Option<RuinInfo>,
+}
+
+/// 废墟记录的原结构信息 (官方 structures/_destroy.js 的 `ruin.structure` + `destroyTime`)
+#[derive(Clone, Debug)]
+pub struct RuinInfo {
+    pub structure_id: u64,
+    pub structure_type: String,
+    pub hits_max: u32,
+    /// 原结构是否归属我方 (官方 ruin.structure.user)
+    pub mine: bool,
+    pub enemy: bool,
+    pub destroy_time: u64,
 }
 
 /// 孵化任务: name=目标单位名, need_time=总时长, spawn_time=完成 tick
@@ -204,6 +229,12 @@ pub fn structure(id: u64, structure_type: &str, x: u8, y: u8, mine: bool) -> Obj
         upgrade_blocked: 0,
         mineral_type: None,
         mineral_amount: None,
+        is_public: false,
+        safe_mode: None,
+        safe_mode_available: 0,
+        safe_mode_cooldown: None,
+        safe_mode_activated: false,
+        ruin: None,
     }
 }
 
@@ -268,6 +299,12 @@ pub fn creep_obj(id: u64, name: &str, x: u8, y: u8, body: Vec<BodyPart>) -> Obj 
         upgrade_blocked: 0,
         mineral_type: None,
         mineral_amount: None,
+        is_public: false,
+        safe_mode: None,
+        safe_mode_available: 0,
+        safe_mode_cooldown: None,
+        safe_mode_activated: false,
+        ruin: None,
     }
 }
 
@@ -288,5 +325,26 @@ pub fn tombstone(id: u64, x: u8, y: u8, creep_name: &str, decay_time: u64) -> Ob
     let mut o = structure(id, "tombstone", x, y, true);
     o.creep_name = Some(creep_name.to_string());
     o.next_decay_time = Some(decay_time);
+    o
+}
+
+/// 官方 structures/_destroy.js: 结构被摧毁后原地留下的废墟, 继承原结构的 store
+pub fn ruin(id: u64, destroyed: &Obj, destroy_time: u64) -> Obj {
+    let mut o = structure(id, "ruin", destroyed.x, destroyed.y, false);
+    o.hits = 0;
+    o.hits_max = 0;
+    o.structure_type = None;
+    o.store = destroyed.store.clone();
+    o.store.retain(|_, v| *v > 0);
+    let decay = constants::ruin_decay(&destroyed.obj_type);
+    o.next_decay_time = Some(destroy_time + decay);
+    o.ruin = Some(RuinInfo {
+        structure_id: destroyed.id,
+        structure_type: destroyed.obj_type.clone(),
+        hits_max: destroyed.hits_max,
+        mine: destroyed.mine,
+        enemy: destroyed.enemy,
+        destroy_time,
+    });
     o
 }

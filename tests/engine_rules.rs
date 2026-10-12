@@ -1305,3 +1305,108 @@ fn move_toward_creep_without_pull_needs_move_parts() {
 	assert_eq!(find_creep(&world, "Tug").1, 26);
 	assert_eq!(find_creep(&world, "Miner").1, 24, "没人拉、没 MOVE → 原地");
 }
+
+// ═════════════════════════ RCL 停用 / spawn 回能 (官方 _calc_spawns / checkStructureAgainstController / spawns/tick) ═════════════════════════
+
+/// 官方 _calc_spawns: 超限时按到控制器距离**升序**保留最近的 limit 个, 停用最远的。
+/// RCL2 extension 上限 5, 放 6 个: 只有最远那个 off; RCL2 spawn 上限 1, 放 2 个: 远的那个 off。
+#[test]
+fn spawn_off_keeps_nearest_within_limit() {
+	let json = r#"{
+		"name": "t", "seed": 1,
+		"rooms": [{
+			"name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 2, "pos": [10, 10] },
+			"structures": [
+				{ "type": "spawn", "pos": [40, 40], "energy": 300 },
+				{ "type": "spawn", "pos": [12, 12], "energy": 300 },
+				{ "type": "extension", "pos": [45, 45], "energy": 50 },
+				{ "type": "extension", "pos": [11, 12], "energy": 50 },
+				{ "type": "extension", "pos": [12, 11], "energy": 50 },
+				{ "type": "extension", "pos": [13, 13], "energy": 50 },
+				{ "type": "extension", "pos": [14, 14], "energy": 50 },
+				{ "type": "extension", "pos": [15, 15], "energy": 50 }
+			]
+		}]
+	}"#;
+	let (world, _) = setup(json);
+	let room = &world.rooms["W5N8"];
+	let off_at = |x: u8, y: u8| room.objects.values().find(|o| o.x == x && o.y == y).unwrap().off;
+	assert!(!off_at(12, 12), "近的 spawn 保留");
+	assert!(off_at(40, 40), "远的 spawn 停用");
+	assert!(off_at(45, 45), "最远的 extension 停用");
+	for (x, y) in [(11, 12), (12, 11), (13, 13), (14, 14), (15, 15)] {
+		assert!(!off_at(x, y), "近的 5 个 extension 保留 ({x},{y})");
+	}
+	assert_eq!(room.energy_available(), 300 + 5 * 50, "停用结构不计入 energyAvailable");
+	// checkStructureAgainstController 与 off 结论一致
+	for o in room.objects.values().filter(|o| o.obj_type == "spawn" || o.obj_type == "extension") {
+		assert_eq!(room.structure_active(o), !o.off, "isActive 与 off 应一致: {:?}", (o.obj_type.as_str(), o.x, o.y));
+	}
+}
+
+/// 官方 checkStructureAgainstController 适用于所有受 CONTROLLER_STRUCTURES 约束的类型:
+/// RCL3 塔上限 1 → 两座塔只有离控制器近的可用; 同距离时迭代序 (id) 在前者优先; 路/容器无主恒可用
+#[test]
+fn structure_active_by_distance_for_towers() {
+	let (mut world, _) = setup(RCL3_ROOM);
+	let far = add_structure(&mut world, "W5N8", "tower", 40, 40);
+	let near = add_structure(&mut world, "W5N8", "tower", 30, 27);
+	let road = alloc_id(&mut world.next_id);
+	world.rooms.get_mut("W5N8").unwrap().objects.insert(road, objects::structure(road, "road", 5, 5, false));
+	let room = &world.rooms["W5N8"];
+	assert!(room.structure_active(&room.objects[&near]), "近塔可用");
+	assert!(!room.structure_active(&room.objects[&far]), "远塔超出 RCL3 上限");
+	assert!(room.structure_active(&room.objects[&road]), "无主结构恒可用");
+	// 同距离: id 小的优先
+	let (mut world, _) = setup(RCL3_ROOM);
+	let a = add_structure(&mut world, "W5N8", "tower", 30, 27);
+	let b = add_structure(&mut world, "W5N8", "tower", 26, 27);
+	let room = &world.rooms["W5N8"];
+	assert!(room.structure_active(&room.objects[&a]));
+	assert!(!room.structure_active(&room.objects[&b]));
+	// 控制器降到 0 级: 全部不可用
+	let (mut world, _) = setup(RCL3_ROOM);
+	let t = add_structure(&mut world, "W5N8", "tower", 30, 27);
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 0;
+	let room = &world.rooms["W5N8"];
+	assert!(!room.structure_active(&room.objects[&t]));
+}
+
+/// 官方 processor.js:326: energyAvailable 在逐对象 tick 前只算一次, 所有 spawn 共用。
+/// 两个 spawn 合计 299 → 两个都各回 1 (旧实现逐 spawn 重算, 第二个看到 300 就不回)
+#[test]
+fn spawn_regen_uses_room_energy_computed_once() {
+	let json = r#"{
+		"name": "t", "seed": 1,
+		"rooms": [{
+			"name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 7, "pos": [28, 27] },
+			"structures": [
+				{ "type": "spawn", "pos": [25, 25], "energy": 100 },
+				{ "type": "spawn", "pos": [20, 20], "energy": 199 }
+			]
+		}]
+	}"#;
+	let (mut world, mut movement) = setup(json);
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	let room = &world.rooms["W5N8"];
+	let e = |x: u8| room.objects.values().find(|o| o.obj_type == "spawn" && o.x == x).unwrap().store["energy"];
+	assert_eq!((e(25), e(20)), (101, 200), "两个 spawn 都应各回 1 能量");
+	assert_eq!(room.energy_available(), 301);
+}
+
+/// 官方 spawns/tick.js: 控制器未归属 (level 0) 时 spawn 不回能
+#[test]
+fn spawn_regen_requires_owned_controller() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let spawn = spawn_of(&world, "W5N8");
+	set_store(&mut world, spawn, 100);
+	{
+		let c = world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap();
+		c.level = 0;
+		c.mine = false;
+	}
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(store_of(&world, spawn), 100, "控制器无主 → 不回能");
+}

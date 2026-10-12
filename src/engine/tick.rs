@@ -67,8 +67,11 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
         // 先按类型分层处理 (engine 逐对象 tick, 对象类型互不交叠, 分层等价且借用友好)
         tick_dropped_energy(world, room_name);
         tick_sources(world, room_name);
+        // 官方 processor.js:326: 房间 energyAvailable 在移动仲裁之后、逐对象 tick 之前算一次,
+        // 所有 spawn 的自动回能共用这一个值 (不随前一个 spawn 回能而变)
+        let energy_available = world.rooms[room_name].energy_available();
         moved_count += tick_creeps(world, room_name, &mut movement, &mut deaths, &mut pending_crossings);
-        tick_spawns(world, room_name, &mut movement);
+        tick_spawns(world, room_name, &mut movement, energy_available);
         tick_controllers(world, room_name);
         tick_decay_structures(world, room_name);
         tick_cooldowns(world, room_name);
@@ -263,8 +266,9 @@ fn tick_creeps(
     moved_count
 }
 
-/// spawn: 出生结算 + 能量自动回复 (energyAvailable<300 时每 tick +1)
-fn tick_spawns(world: &mut World, room_name: &str, movement: &mut Movement) {
+/// spawn: 出生结算 + 能量自动回复 (energyAvailable<300 时每 tick +1)。
+/// `energy_available` 为本 tick 逐对象阶段开始前算好的房间能量 (官方 scope.energyAvailable)。
+fn tick_spawns(world: &mut World, room_name: &str, movement: &mut Movement, energy_available: u32) {
     let spawn_ids: Vec<u64> = world.rooms[room_name]
         .objects
         .values()
@@ -312,11 +316,13 @@ fn tick_spawns(world: &mut World, room_name: &str, movement: &mut Movement) {
                 }
             }
         }
-        // 自动能量回复 (被停用的 spawn 不回能, 官方 spawns/tick.js:35-42)
+        // 自动能量回复 (官方 spawns/tick.js:30-48): 控制器须 level ≥ 1 且与 spawn 同归属;
+        // 超出 RCL 上限 (按距控制器远近被裁掉) 的 spawn 不回能
         let room = world.rooms.get_mut(room_name).unwrap();
-        let energy_available = room.energy_available();
-        let spawn = room.objects.get_mut(&spawn_id).unwrap();
-        if spawn.mine
+        let ctrl_owned = room.controller().map(|c| c.level >= 1 && c.mine).unwrap_or(false);
+        let Some(spawn) = room.objects.get_mut(&spawn_id) else { continue };
+        if ctrl_owned
+            && spawn.mine
             && !spawn.off
             && energy_available < constants::SPAWN_ENERGY_CAPACITY
             && spawn.store.get("energy").copied().unwrap_or(0) < constants::SPAWN_ENERGY_CAPACITY

@@ -437,6 +437,43 @@ pub fn rampart_hits_max(rcl: u8) -> u32 {
     }
 }
 
+/// 废墟存续时间 (官方 RUIN_DECAY / RUIN_DECAY_STRUCTURES)
+pub const RUIN_DECAY: u64 = 500;
+pub fn ruin_decay(structure_type: &str) -> u64 {
+    match structure_type {
+        "powerBank" => 10,
+        _ => RUIN_DECAY,
+    }
+}
+
+/// 安全模式 (官方 SAFE_MODE_DURATION / SAFE_MODE_COOLDOWN / CONTROLLER_DOWNGRADE_SAFEMODE_THRESHOLD)
+pub const SAFE_MODE_DURATION: u64 = 20_000;
+pub const SAFE_MODE_COOLDOWN: u64 = 50_000;
+pub const CONTROLLER_DOWNGRADE_SAFEMODE_THRESHOLD: u64 = 5_000;
+
+/// 该结构类型是否受 CONTROLLER_STRUCTURES 数量上限约束 (官方表中有此键)
+pub fn has_controller_structure_limit(structure_type: &str) -> bool {
+    matches!(
+        structure_type,
+        "spawn"
+            | "extension"
+            | "road"
+            | "constructedWall"
+            | "rampart"
+            | "link"
+            | "storage"
+            | "tower"
+            | "observer"
+            | "powerSpawn"
+            | "extractor"
+            | "lab"
+            | "terminal"
+            | "container"
+            | "nuker"
+            | "factory"
+    )
+}
+
 /// 道路衰减: 每 1000t 掉 100 血 (沼泽路 ×5)
 pub const ROAD_DECAY_AMOUNT: u32 = 100;
 pub const ROAD_DECAY_TIME: u64 = 1000;

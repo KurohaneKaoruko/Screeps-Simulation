@@ -1266,6 +1266,37 @@ function structureStoreShape(type, cap) {
 	}
 }
 
+/**
+ * 官方 utils.checkStructureAgainstController: 结构在当前 RCL 下是否可用。
+ * 无主对象恒为 true; 控制器缺失 / 等级 < 1 / 与结构归属不同 → false;
+ * 否则数同类型、同归属且距控制器更近的结构 (同距离时迭代序在前者算更近), 超过 CONTROLLER_STRUCTURES 上限即不可用。
+ */
+function checkStructureAgainstController(obj) {
+	if (obj.my === undefined) return true;
+	const room = Game.rooms[obj.pos.roomName];
+	const ctrl = room && room.controller;
+	if (!ctrl || !(ctrl.level >= 1) || ctrl.my !== obj.my) return false;
+	const table = C.CONTROLLER_STRUCTURES[obj.structureType];
+	if (!table) return true;
+	let allowed = table[ctrl.level];
+	if (!allowed) return false;
+	if (table[8] === 1) return true;
+	const dist = (o) => Math.max(Math.abs(o.pos.x - ctrl.pos.x), Math.abs(o.pos.y - ctrl.pos.y));
+	const own = dist(obj);
+	let foundSelf = false;
+	for (const o of room.__byType[obj.structureType] || []) {
+		if (o.my !== obj.my) continue;
+		const d = dist(o);
+		if (d < own) {
+			if (--allowed === 0) return false;
+		} else if (!foundSelf && d === own) {
+			if (o === obj || o.id === obj.id) foundSelf = true;
+			else if (--allowed === 0) return false;
+		}
+	}
+	return true;
+}
+
 class Structure extends RoomObject {
 	constructor(raw) {
 		super(raw);
@@ -1285,9 +1316,12 @@ class Structure extends RoomObject {
 		}
 		return this.__storeObj;
 	}
-	/** 官方 isActive(): 超出 RCL 上限被停用的 spawn/extension 返回 false */
+	/** 官方 E/game/structures.js:108-119: 无主或不受 CONTROLLER_STRUCTURES 约束 → true, 否则按 checkStructureAgainstController */
 	isActive() {
-		return !this.__off;
+		if (!this.owner) return true;
+		if (!C.CONTROLLER_STRUCTURES[this.structureType]) return true;
+		if (!this.room || !this.room.controller) return false;
+		return checkStructureAgainstController(this);
 	}
 	destroy() {
 		if (!this.my) return C.ERR_NOT_OWNER;
@@ -1448,6 +1482,7 @@ class StructureTower extends OwnedStructure {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (!target || !target.id || !(target instanceof Creep) && !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
 		if (!this.store || this.store.energy < C.TOWER_ENERGY_COST) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		intent(this.id, "attack", { id: target.id });
 		return C.OK;
 	}
@@ -1456,6 +1491,7 @@ class StructureTower extends OwnedStructure {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (!target || !target.id || !(target instanceof Creep)) return C.ERR_INVALID_TARGET;
 		if (!this.store || this.store.energy < C.TOWER_ENERGY_COST) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		intent(this.id, "heal", { id: target.id });
 		return C.OK;
 	}
@@ -1464,6 +1500,7 @@ class StructureTower extends OwnedStructure {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (!target || !target.id || !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
 		if (!this.store || this.store.energy < C.TOWER_ENERGY_COST) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		intent(this.id, "repair", { id: target.id });
 		return C.OK;
 	}

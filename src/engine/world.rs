@@ -76,44 +76,81 @@ impl Room {
             .sum()
     }
 
-    /// 官方 _calc_spawns: 按到控制器的距离, 把超出 RCL 上限的 spawn/extension 标记为 off。
-    /// 距离越远越先停用; 距离相同时按 id 序稳定。
+    /// 官方 _calc_spawns: spawn / extension 数量超过 RCL 上限时, 按到控制器的切比雪夫距离
+    /// **升序**稳定排序, 保留最近的 `limit` 个, 其余标记 off (距离相同按 id 序)。
+    /// 官方 roomSpawns/roomExtensions 不区分归属, 这里同样按类型统计。
     pub fn refresh_spawn_off(&mut self) {
         let rcl = self.rcl();
-        let spawn_limit = constants::controller_structure_limit("spawn", rcl) as usize;
-        let ext_limit = constants::controller_structure_limit("extension", rcl) as usize;
         let ctrl = self.controller().map(|c| (c.x as i32, c.y as i32));
-        // (id, 是 spawn, 到控制器距离)
-        let mut items: Vec<(u64, bool, i32)> = self
-            .objects
-            .values()
-            .filter(|o| o.mine && (o.obj_type == "spawn" || o.obj_type == "extension"))
-            .map(|o| {
-                let dist = ctrl
-                    .map(|(cx, cy)| {
-                        (o.x as i32 - cx).abs().max((o.y as i32 - cy).abs())
-                    })
-                    .unwrap_or(0);
-                (o.id, o.obj_type == "spawn", dist)
-            })
-            .collect();
-        items.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
-        let mut spawn_left = spawn_limit;
-        let mut ext_left = ext_limit;
         let mut off_ids: Vec<u64> = Vec::new();
-        for (id, is_spawn, _) in items {
-            let slot = if is_spawn { &mut spawn_left } else { &mut ext_left };
-            if *slot > 0 {
-                *slot -= 1;
-            } else {
-                off_ids.push(id);
+        for st in ["spawn", "extension"] {
+            let limit = constants::controller_structure_limit(st, rcl) as usize;
+            // (id, 到控制器距离); BTreeMap 迭代即 id 序
+            let mut items: Vec<(u64, i32)> = self
+                .objects
+                .values()
+                .filter(|o| o.obj_type == st)
+                .map(|o| {
+                    let dist = ctrl
+                        .map(|(cx, cy)| (o.x as i32 - cx).abs().max((o.y as i32 - cy).abs()))
+                        .unwrap_or(0);
+                    (o.id, dist)
+                })
+                .collect();
+            if items.len() <= limit {
+                continue;
             }
+            // sort_by_key 是稳定排序: 同距离保持 id 序 (官方 Array.sort 在 roomObjects 序上稳定)
+            items.sort_by_key(|&(_, dist)| dist);
+            off_ids.extend(items.into_iter().skip(limit).map(|(id, _)| id));
         }
         for o in self.objects.values_mut() {
             if o.obj_type == "spawn" || o.obj_type == "extension" {
                 o.off = off_ids.contains(&o.id);
             }
         }
+    }
+
+    /// 官方 `utils.checkStructureAgainstController`: 结构在当前 RCL 下是否可用。
+    /// 无主对象恒为 true; 控制器缺失 / 等级 < 1 / 归属不同 → false; 否则统计同类型、同归属且
+    /// 距控制器更近的结构数 (同距离时迭代序在前者算更近), 不超过 `CONTROLLER_STRUCTURES` 才可用。
+    /// 不受该表约束的类型 (controller 等) 恒为 true (对应官方 `isActive()` 的前置判断)。
+    pub fn structure_active(&self, obj: &Obj) -> bool {
+        if !obj.mine && !obj.enemy {
+            return true;
+        }
+        if !constants::has_controller_structure_limit(&obj.obj_type) {
+            return true;
+        }
+        let Some(ctrl) = self.controller() else { return false };
+        if ctrl.level < 1 || ctrl.mine != obj.mine {
+            return false;
+        }
+        let mut allowed = constants::controller_structure_limit(&obj.obj_type, ctrl.level);
+        if allowed == 0 {
+            return false;
+        }
+        if constants::controller_structure_limit(&obj.obj_type, 8) == 1 {
+            return true;
+        }
+        let dist_of = |o: &Obj| (o.x as i32 - ctrl.x as i32).abs().max((o.y as i32 - ctrl.y as i32).abs());
+        let dist = dist_of(obj);
+        let mut found_self = false;
+        for o in self.objects.values() {
+            if o.obj_type != obj.obj_type || o.mine != obj.mine || o.enemy != obj.enemy {
+                continue;
+            }
+            let d = dist_of(o);
+            if d < dist || (!found_self && d == dist && o.id != obj.id) {
+                allowed -= 1;
+                if allowed == 0 {
+                    return false;
+                }
+            } else if d == dist && o.id == obj.id {
+                found_self = true;
+            }
+        }
+        true
     }
 
     /// 我方单位/自有结构/工地在场 → 可见。
