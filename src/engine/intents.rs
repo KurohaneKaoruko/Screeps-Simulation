@@ -303,7 +303,7 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
             ("creep", "transfer") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
                 let resource = data.get("resourceType").and_then(Value::as_str).unwrap_or("energy").to_string();
-                let amount = data.get("amount").and_then(Value::as_u64).unwrap_or(0) as u32;
+                let amount = data.get("amount").and_then(Value::as_u64).map(|a| a as u32);
                 let (ox, oy) = match room.objects.get(&id) {
                     Some(o) if !o.spawning => (o.x, o.y),
                     _ => continue,
@@ -321,16 +321,29 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 if (target_pos.0 as i32 - ox as i32).abs() > 1 || (target_pos.1 as i32 - oy as i32).abs() > 1 {
                     continue;
                 }
-                let stored = room.objects.get(&target_id).unwrap().store.get(&resource).copied().unwrap_or(0);
+                // 官方 transfer.js: 专用仓 (spawn/extension/tower/link/lab…) 按该资源计, 通用仓按总量计;
+                // 持有量不足 intent.amount 时整条意图作废 (不截断)
+                let target = room.objects.get(&target_id).unwrap();
+                let stored = if constants::is_single_resource_store(&target.obj_type) {
+                    target.store.get(&resource).copied().unwrap_or(0)
+                } else {
+                    objects::store_sum(&target.store)
+                };
                 if stored >= cap {
                     continue;
                 }
                 let have = room.objects.get(&id).unwrap().store.get(&resource).copied().unwrap_or(0);
-                let amount = amount.min(have).min(cap - stored);
+                let amount = amount.unwrap_or(have);
+                if have < amount {
+                    continue;
+                }
+                let amount = amount.min(cap - stored);
                 if amount == 0 {
                     continue;
                 }
-                room.objects.get_mut(&target_id).unwrap().store.insert(resource.clone(), stored + amount);
+                let t = room.objects.get_mut(&target_id).unwrap();
+                let cur = t.store.get(&resource).copied().unwrap_or(0);
+                t.store.insert(resource.clone(), cur + amount);
                 let obj = room.objects.get_mut(&id).unwrap();
                 let left = obj.store.get(&resource).copied().unwrap_or(0) - amount;
                 if left > 0 {
@@ -404,9 +417,10 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     Some(o) if !o.spawning => o.store.get(&resource).copied().unwrap_or(0),
                     _ => continue,
                 };
-                let amount = data.get("amount").and_then(Value::as_u64).unwrap_or(0) as u32;
-                let amount = if amount == 0 { have } else { amount.min(have) };
-                if amount == 0 {
+                // shim 总会带 amount; 直接驱动引擎的原始意图缺省时视为全部
+                let amount = data.get("amount").and_then(Value::as_u64).map(|a| a as u32).unwrap_or(have);
+                // 官方 drop.js:13: 持有量不足时整条意图作废, 不截断
+                if amount == 0 || have < amount {
                     continue;
                 }
                 let (x, y) = {
@@ -518,8 +532,11 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     _ => continue,
                 };
                 let controller_id = target_id;
+                let now = world.tick;
+                let room = world.rooms.get_mut(&room_name).unwrap();
                 let (level, ctrl_pos) = match room.objects.get(&controller_id) {
-                    Some(c) if c.obj_type == "controller" && c.mine && c.level > 0 => (c.level, (c.x, c.y)),
+                    // 官方 upgradeController.js:23: 被 attackController 封锁期间不能升级
+                    Some(c) if c.obj_type == "controller" && c.mine && c.level > 0 && c.upgrade_blocked <= now => (c.level, (c.x, c.y)),
                     _ => continue,
                 };
                 if (ctrl_pos.0 as i32 - ox as i32).abs() > 3 || (ctrl_pos.1 as i32 - oy as i32).abs() > 3 {
@@ -1435,11 +1452,13 @@ pub fn fill_container(room: &mut Room, x: u8, y: u8, resource: &str, amount: u32
         return amount;
     };
     let obj = room.objects.get_mut(&cid).unwrap();
+    // 官方 _create-energy.js:24: 容器是通用仓, 剩余空间按总量算
     let cap = obj.capacity_for_resource(resource);
-    let stored = obj.store.get(resource).copied().unwrap_or(0);
-    let put = amount.min(cap.saturating_sub(stored));
+    let used = objects::store_sum(&obj.store);
+    let put = amount.min(cap.saturating_sub(used));
     if put > 0 {
-        obj.store.insert(resource.to_string(), stored + put);
+        let cur = obj.store.get(resource).copied().unwrap_or(0);
+        obj.store.insert(resource.to_string(), cur + put);
     }
     amount - put
 }

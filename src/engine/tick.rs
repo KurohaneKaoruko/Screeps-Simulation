@@ -217,12 +217,12 @@ fn tick_creeps(
 
         // 伤害/治疗统一应用 (官方 processor/intents/creeps/tick.js: 在 creep tick 末尾)
         let old_hits = obj.hits;
-        if obj.damage_to_apply > 0 {
-            obj.hits = obj.hits.saturating_sub(obj.damage_to_apply);
+        // 官方: hits -= damage; hits += heal; 截到 hitsMax; <= 0 才死 —— 先扣后加用有符号数,
+        // 同 tick 的治疗救不回已打穿的 (例: 100 血吃 300 伤害 + 150 治疗 → 死)
+        if obj.damage_to_apply > 0 || obj.heal_to_apply > 0 {
+            let h = obj.hits as i64 - obj.damage_to_apply as i64 + obj.heal_to_apply as i64;
+            obj.hits = h.clamp(0, obj.hits_max as i64) as u32;
             obj.damage_to_apply = 0;
-        }
-        if obj.heal_to_apply > 0 {
-            obj.hits = (obj.hits + obj.heal_to_apply).min(obj.hits_max);
             obj.heal_to_apply = 0;
         }
         if obj.hits == 0 {

@@ -563,6 +563,8 @@ const FREE_INTENT_METHODS = { say: true, pull: true };
 /** 本 tick 已计入 CPU 的 (对象, 意图) 组合 —— 官方 intents.set 只对首次出现计价 */
 let __intentKeys = new Set();
 let __intentCpu = 0;
+/** 本 tick 已提交的 claimController 数 (官方 controllersClaimedInTick) */
+let __controllersClaimedInTick = 0;
 
 function intent(objId, name, data) {
 	const o = typeof objId === "string" ? objId : String(objId);
@@ -824,11 +826,13 @@ class Creep extends RoomObject {
 		super(raw);
 		this.name = raw.name;
 		this.my = raw.my !== false;
-		this.owner = { username: "Nexus" };
+		// 敌方 creep 的 owner 来自场景 (默认 Invader); 此前恒为 Nexus, 按 owner 过滤敌人的 bot 会把敌人当自己
+		this.owner = { username: this.my ? "Nexus" : raw.owner || "Invader" };
 		this.body = raw.body;
 		this.fatigue = raw.fatigue;
 		this.spawning = !!raw.spawning;
-		this.ticksToLive = raw.ticksToLive;
+		// 官方: 没有 ageTime (孵化中/场景首 tick) 时为 undefined, 不是 null
+		this.ticksToLive = raw.ticksToLive == null ? undefined : raw.ticksToLive;
 		this.hits = raw.hits;
 		this.hitsMax = raw.hitsMax;
 		this.__storeRaw = raw.store;
@@ -845,12 +849,15 @@ class Creep extends RoomObject {
 	get carryCapacity() {
 		return this.__storeCap;
 	}
+	/** 官方 creeps.js:95: 别人的 creep 没有 memory (undefined, 也不在 Memory.creeps 里建条目) */
 	get memory() {
+		if (!this.my) return undefined;
 		if (!Memory.creeps) Memory.creeps = {};
 		if (!Memory.creeps[this.name]) Memory.creeps[this.name] = {};
 		return Memory.creeps[this.name];
 	}
 	set memory(v) {
+		if (!this.my) throw new Error("Could not set other player's creep memory");
 		if (!Memory.creeps) Memory.creeps = {};
 		Memory.creeps[this.name] = v;
 	}
@@ -864,7 +871,17 @@ class Creep extends RoomObject {
 	}
 	notifyWhenAttacked(enabled) {
 		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
 		if (typeof enabled !== "boolean") return C.ERR_INVALID_ARGS;
+		return C.OK;
+	}
+	/** 官方 creeps.js:1008: 撤销本 tick 已提交的同名意图 */
+	cancelOrder(name) {
+		const id = String(this.id);
+		const before = __intents.length;
+		__intents = __intents.filter((it) => !(it.o === id && it.n === name));
+		if (__intents.length === before) return C.ERR_NOT_FOUND;
+		__intentKeys.delete(id + "|" + name);
 		return C.OK;
 	}
 	/** 官方 E/game/creeps.js:126-156: move(creep) 跟着相邻 creep 走 (配合 pull), 不查疲劳/MOVE 部件 */
@@ -992,26 +1009,34 @@ class Creep extends RoomObject {
 		intent(this.id, "transfer", { id: target.id, resourceType, amount });
 		return C.OK;
 	}
+	/** 官方 E/game/creeps.js:493-560 的返回码顺序 */
 	withdraw(target, resourceType, amount) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
+		if (amount < 0) return C.ERR_INVALID_ARGS;
 		if (!C.RESOURCES_ALL.includes(resourceType)) return C.ERR_INVALID_ARGS;
-		if (amount !== undefined && amount < 0) return C.ERR_INVALID_ARGS;
-		if (!target || !target.id || !target.store) return C.ERR_INVALID_TARGET;
-		const available = target.store.getUsedCapacity(resourceType);
-		if (amount === undefined) amount = available;
-		if (!available) return C.ERR_NOT_ENOUGH_RESOURCES;
+		// 只能从建筑 / 墓碑 / 废墟取 (不能从别的 creep 身上 withdraw)
+		if (!target || !target.id || !target.store || !(target instanceof Structure || target instanceof Tombstone || target instanceof Ruin)) return C.ERR_INVALID_TARGET;
+		if (target.my === false && target.pos.lookFor("structure").some((i) => i.structureType === "rampart" && !i.my && !i.isPublic)) return C.ERR_NOT_OWNER;
+		if (target.structureType === "nuker" || target.structureType === "powerBank") return C.ERR_INVALID_TARGET;
+		if (!target.store.getCapacity(resourceType) && !target.store[resourceType] && !(target instanceof Tombstone)) return C.ERR_INVALID_TARGET;
 		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
-		if (this.store.getFreeCapacity() <= 0) return C.ERR_FULL;
+		const emptySpace = (this.__storeCap || 0) - this.store.getUsedCapacity();
+		if (emptySpace <= 0) return C.ERR_FULL;
+		const stored = target.store[resourceType] || 0;
+		if (!amount) amount = Math.min(emptySpace, stored);
+		if (amount > emptySpace) return C.ERR_FULL;
+		if (!amount || stored < amount) return C.ERR_NOT_ENOUGH_RESOURCES;
 		intent(this.id, "withdraw", { id: target.id, resourceType, amount });
 		return C.OK;
 	}
+	/** 官方 creeps.js:563-585: 满载判断在距离之前 */
 	pickup(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
 		if (!target || !(target instanceof Resource)) return C.ERR_INVALID_TARGET;
+		if (this.store.getUsedCapacity() >= (this.__storeCap || 0)) return C.ERR_FULL;
 		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
-		if (this.store.getFreeCapacity() <= 0) return C.ERR_FULL;
 		intent(this.id, "pickup", { id: target.id });
 		return C.OK;
 	}
@@ -1057,20 +1082,25 @@ class Creep extends RoomObject {
 		intent(this.id, "repair", { id: target.id });
 		return C.OK;
 	}
+	/** 官方 creeps.js:921-952 */
 	upgradeController(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
 		if (!this.getActiveBodyparts("work")) return C.ERR_NO_BODYPART;
-		if (!this.store.energy) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (!this.store.energy) return C.ERR_NOT_ENOUGH_RESOURCES;
 		if (!target || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
+		if (target.upgradeBlocked && target.upgradeBlocked > 0) return C.ERR_INVALID_TARGET;
 		if (!this.pos.inRangeTo(target.pos, 3)) return C.ERR_NOT_IN_RANGE;
+		if (!target.my) return C.ERR_NOT_OWNER;
+		if (!target.level || !target.owner) return C.ERR_INVALID_TARGET;
 		intent(this.id, "upgradeController", { id: target.id });
 		return C.OK;
 	}
 	say(message, toPublic) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
-		if (typeof message !== "string") return C.ERR_INVALID_ARGS;
+		// 官方把参数转成字符串 (say(creep.ticksToLive) 照样 OK)
+		message = "" + message;
 		intent(this.id, "say", { message: message.substr(0, 10), isPublic: !!toPublic });
 		return C.OK;
 	}
@@ -1134,24 +1164,37 @@ class Creep extends RoomObject {
 		return C.OK;
 	}
 	/** 官方 attackController: CLAIM 部件, 目标须有 owner 或 reservation */
+	/** 官方 creeps.js:879-917 */
 	attackController(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
 		if (!target || !target.id || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
 		if (!this.getActiveBodyparts("claim")) return C.ERR_NO_BODYPART;
 		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
-		if (!target.my && !target.reservation) return C.ERR_INVALID_TARGET;
+		if (!target.owner && !target.reservation) return C.ERR_INVALID_TARGET;
 		if (target.upgradeBlocked > 0) return C.ERR_TIRED;
 		intent(this.id, "attackController", { id: target.id });
 		return C.OK;
 	}
-	/** 官方 claimController: CLAIM 部件, GCL 检查 (官方按已占领房间数) */
+	/** 官方 creeps.js:839-876: GCL 按已占领房间数 + 本 tick 已提交的 claim 计 */
 	claimController(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
-		if (!target || !target.id || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
+		let owned = 0;
+		for (const name in Game.rooms) {
+			const c = Game.rooms[name].controller;
+			if (c && c.my) owned++;
+		}
+		const claimed = owned + __controllersClaimedInTick;
+		// 官方 gcl < calcNeededGcl(claimed + 1) 等价于 GCL 等级 < claimed + 1
+		if (claimed && (!Game.gcl || Game.gcl.level < claimed + 1)) return C.ERR_GCL_NOT_ENOUGH;
+		if (!target || !target.id || !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
 		if (!this.getActiveBodyparts("claim")) return C.ERR_NO_BODYPART;
 		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		if (target.structureType !== "controller") return C.ERR_INVALID_TARGET;
+		if (target.level > 0) return C.ERR_INVALID_TARGET;
+		if (target.reservation && target.reservation.username !== this.owner.username) return C.ERR_INVALID_TARGET;
+		__controllersClaimedInTick++;
 		intent(this.id, "claimController", { id: target.id });
 		return C.OK;
 	}
@@ -2726,6 +2769,7 @@ function __runTick() {
 	__intents = [];
 	__intentKeys = new Set();
 	__intentCpu = 0;
+	__controllersClaimedInTick = 0;
 	__consoleLines = [];
 	try {
 		// bot 上一 tick 可能 delete global.Memory: 每 tick 确保访问器存在 (官方由 runtime 重建)

@@ -303,6 +303,11 @@ pub fn controller_structure_limit(structure_type: &str, rcl: u8) -> u32 {
 
 /// 结构对指定资源的容量 (官方 capacityForResource 的结构部分)。
 /// creep 见 `objects::Obj::capacity_for_resource`; 这里只覆盖非 creep 结构。
+/// 官方 storeCapacityResource 形态的专用仓 (按资源分格计容量); 其余 (creep/container/storage/terminal/factory) 是通用仓
+pub fn is_single_resource_store(obj_type: &str) -> bool {
+    matches!(obj_type, "spawn" | "extension" | "tower" | "link" | "lab" | "powerSpawn" | "nuker")
+}
+
 pub fn structure_capacity_for_resource(structure_type: &str, resource: &str, energy_capacity: u32) -> u32 {
     match structure_type {
         "link" => LINK_CAPACITY,
@@ -451,9 +456,26 @@ pub const TERRAIN_MASK_SWAMP: u8 = 2;
 /// 每个玩家的最大工地数
 pub const MAX_CONSTRUCTION_SITES: usize = 100;
 
-/// GCL: 从 `level` 升到 `level+1` 所需的累计分数增量。
-/// 官方 game.js:130-131 的 `progressTotal = level^GCL_POW × GCL_MULTIPLY`
-/// (即 GCL1→2 = 1e6, 2→3 = 2^2.4 × 1e6 ≈ 5.278e6)。
+/// GCL 到达 `level` 所需的累计分数: (level-1)^GCL_POW × GCL_MULTIPLY (官方 game.js:131 gclBaseProgress)。
+pub fn gcl_base_progress(level: u32) -> u64 {
+    (GCL_MULTIPLY as f64 * ((level.max(1) - 1) as f64).powf(GCL_POW)) as u64
+}
+
+/// GCL: 从 `level` 升到 `level+1` 所需的分数增量 (官方 game.js:162 progressTotal):
+/// level^POW × MULT − (level−1)^POW × MULT。GCL1→2 = 1e6, 2→3 ≈ 4.278e6。
 pub fn gcl_progress_total(level: u32) -> u64 {
-    (GCL_MULTIPLY as f64 * (level as f64).powf(GCL_POW)) as u64
+    gcl_base_progress(level + 1) - gcl_base_progress(level)
+}
+
+/// 官方 game.js:130: level = floor((gcl / MULT)^(1/POW)) + 1
+pub fn gcl_level_for(points: u64) -> u32 {
+    let mut level = ((points as f64 / GCL_MULTIPLY as f64).powf(1.0 / GCL_POW)).floor() as u32 + 1;
+    // 浮点边界修正: 保证 base(level) <= points < base(level+1)
+    while level > 1 && gcl_base_progress(level) > points {
+        level -= 1;
+    }
+    while gcl_base_progress(level + 1) <= points {
+        level += 1;
+    }
+    level
 }

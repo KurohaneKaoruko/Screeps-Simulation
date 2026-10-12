@@ -416,11 +416,17 @@ fn spawn_extension_off_beyond_rcl_limit() {
 	assert_eq!(off, 2, "RCL1 extension 上限 0, 两个都应为 off");
 }
 
-/// issue#1 §4: GCL 需求公式为累计 (L)^2.4 × 1e6
+/// GCL: 累计分数 gcl, 等级 floor((gcl/1e6)^(1/2.4))+1, 本级总量 L^2.4·1e6 − (L−1)^2.4·1e6 (官方 game.js:130-162)
 #[test]
 fn gcl_progress_total_matches_official() {
 	assert_eq!(constants::gcl_progress_total(1), 1_000_000, "GCL1→2 = 1e6");
-	assert_eq!(constants::gcl_progress_total(2), 5_278_031, "GCL2→3 = 2^2.4 × 1e6");
+	assert_eq!(constants::gcl_progress_total(2), 4_278_031, "GCL2→3 = 2^2.4·1e6 − 1e6");
+	assert_eq!(constants::gcl_level_for(0), 1);
+	assert_eq!(constants::gcl_level_for(999_999), 1);
+	assert_eq!(constants::gcl_level_for(1_000_000), 2);
+	assert_eq!(constants::gcl_level_for(5_278_030), 2);
+	assert_eq!(constants::gcl_level_for(5_278_031), 3, "到 GCL3 累计 2^2.4·1e6");
+	assert_eq!(constants::gcl_level_for(14_000_000), 4, "3^2.4·1e6 ≈ 13.97e6");
 }
 
 /// issue#1 §1.14: 引擎记录官方结构的事件日志, 且每 tick 清空

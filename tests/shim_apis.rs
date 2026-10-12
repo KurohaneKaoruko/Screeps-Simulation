@@ -545,3 +545,59 @@ fn reserve_controller_renews_own_reservation() {
 		assert!(out[2]["res"]["ticksToEnd"].as_u64().unwrap() >= 1, "ticksToEnd 字段: {out:?}");
 	});
 }
+
+/// Creep API 返回码顺序对齐官方 creeps.js: withdraw / pickup / upgradeController / claimController / cancelOrder / say
+#[test]
+fn creep_api_return_codes_match_official() {
+	in_tokio(|| {
+		let scenario = Scenario::from_json(
+			r#"{ "name": "codes", "seed": 1, "rooms": [
+				{ "name": "W5N8", "terrain": { "kind": "flat" },
+				  "controller": { "level": 2, "pos": [40, 40] },
+				  "structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 }, { "type": "container", "pos": [10, 10] }],
+				  "creeps": [
+					{ "name": "Full", "body": ["carry", "move"], "pos": [30, 30], "store": { "energy": 50 } },
+					{ "name": "Empty", "body": ["carry", "work", "claim", "move"], "pos": [20, 20] },
+					{ "name": "Other", "body": ["carry", "move"], "pos": [21, 20], "store": { "energy": 50 } }
+				  ] },
+				{ "name": "W5N9", "terrain": { "kind": "flat" }, "controller": { "level": 0, "pos": [20, 20], "mine": false } }
+			] }"#,
+		)
+		.unwrap();
+		let world = build_world(&scenario).unwrap();
+		let bundle = r#"exports.loop = function() {
+			const full = Game.creeps.Full, empty = Game.creeps.Empty, other = Game.creeps.Other;
+			const container = empty.room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_CONTAINER } })[0];
+			const spawn = Game.spawns[Object.keys(Game.spawns)[0]];
+			const r = {
+				// 空容器在远处: 官方先查距离 → ERR_NOT_IN_RANGE (此前 shim 先报 ERR_NOT_ENOUGH_RESOURCES)
+				withdrawFarEmpty: empty.withdraw(container, RESOURCE_ENERGY),
+				// 不能从别的 creep 身上 withdraw
+				withdrawCreep: empty.withdraw(other, RESOURCE_ENERGY),
+				// 显式数量超过目标存量
+				withdrawTooMuch: full.withdraw(spawn, RESOURCE_ENERGY, 10),
+				// 满载 creep 远处 pickup: 官方先判满 → ERR_FULL
+				pickupFull: full.pickup(new Resource({ id: "ffff", x: 1, y: 1, roomName: "W5N8", energy: 10, resourceType: "energy" })),
+				say: full.say(123),
+				// 已占 1 房、GCL 1: 官方第一步就是 GCL 检查 → ERR_GCL_NOT_ENOUGH
+				claimGcl: empty.claimController(empty.room.controller),
+				cancelMissing: full.cancelOrder("move"),
+				moveThenCancel: (full.move(TOP), full.cancelOrder("move")),
+			};
+			console.log(JSON.stringify(r));
+		};"#;
+		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let snapshot = build_snapshot(&world, &SnapshotOptions { cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 }, always_visible: false, include_terrain: true });
+		let res = bot.run_tick(snapshot, "{}".to_string()).unwrap();
+		let r: serde_json::Value = serde_json::from_str(res.console.first().map(String::as_str).unwrap_or("{}")).unwrap_or_else(|_| panic!("{:?} {:?}", res.console, res.errors));
+		assert_eq!(r["withdrawFarEmpty"], -9, "{r}");
+		assert_eq!(r["withdrawCreep"], -7, "{r}");
+		assert_eq!(r["withdrawTooMuch"], -9, "距离先于数量: {r}");
+		assert_eq!(r["pickupFull"], -8, "{r}");
+		assert_eq!(r["say"], 0, "{r}");
+		assert_eq!(r["claimGcl"], -15, "{r}");
+		assert_eq!(r["cancelMissing"], -5, "{r}");
+		assert_eq!(r["moveThenCancel"], 0, "{r}");
+		assert!(res.intents.entries.iter().all(|(_, n, _)| n != "move"), "cancelOrder 应撤掉 move 意图");
+	});
+}
