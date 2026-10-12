@@ -1894,18 +1894,25 @@ fn apply_damage(
             return;
         }
         let is_creep = target.obj_type == "creep";
-        let mut attack_back = 0u32;
-        if is_creep && attack_type == constants::EVENT_ATTACK_TYPE_MELEE {
-            let shielded = room
-                .objects
-                .get(&attacker_id)
-                .map(|a| rampart_at(room, a.x, a.y).is_some())
-                .unwrap_or(false);
-            if !shielded {
-                attack_back = target.calc_body_effectiveness("attack", "attack", constants::ATTACK_POWER);
+        // Power Bank: 对它的伤害按 POWER_BANK_HIT_BACK 比例反弹给攻击者
+        // (docs.screeps.com/power.html: 50% of damage applied to them bounce back)
+        if target.obj_type == "powerBank" {
+            let hit_back = (amount as f64 * constants::POWER_BANK_HIT_BACK) as u32;
+            (is_creep, hit_back)
+        } else {
+            let mut attack_back = 0u32;
+            if is_creep && attack_type == constants::EVENT_ATTACK_TYPE_MELEE {
+                let shielded = room
+                    .objects
+                    .get(&attacker_id)
+                    .map(|a| rampart_at(room, a.x, a.y).is_some())
+                    .unwrap_or(false);
+                if !shielded {
+                    attack_back = target.calc_body_effectiveness("attack", "attack", constants::ATTACK_POWER);
+                }
             }
+            (is_creep, attack_back)
         }
-        (is_creep, attack_back)
     };
 
     if target_is_creep {
@@ -1918,6 +1925,11 @@ fn apply_damage(
             let room = world.rooms.get_mut(room_name).unwrap();
             let Some(t) = room.objects.get_mut(&target_id) else { return };
             t.hits = t.hits.saturating_sub(amount);
+            // keeper lair 受扰: 生成倒计时重新开始 (wiki: Once an SK is damaged,
+            // the 300 tick countdown to a new spawn starts)
+            if t.obj_type == "keeperLair" {
+                t.next_spawn_time = Some(world.tick + constants::KEEPER_RESPAWN_AFTER_DAMAGE);
+            }
             t.hits == 0
         };
         if destroyed {

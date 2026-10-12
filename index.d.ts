@@ -59,13 +59,13 @@ export interface MineralSpec {
 }
 
 export interface StructureSpec {
-	type: string // spawn | extension | road | wall | rampart | link | storage | tower | observer | powerSpawn | extractor | lab | terminal | container | nuker | factory
+	type: string // spawn | extension | road | wall | rampart | link | storage | tower | observer | powerSpawn | extractor | lab | terminal | container | nuker | factory | keeperLair | powerBank | portal | controller | invaderCore
 	pos: [number, number]
 	energy?: number
 	hits?: number
 	/** 敌方结构 (FIND_HOSTILE_STRUCTURES 目标) */
 	enemy?: boolean
-	/** 预置仓储, 如 terminal { energy: 50000, H: 3000 } / lab { energy: 2000, UO: 3000 } (与 energy 同给时以此为准) */
+	/** 预置仓储, 如 terminal { energy: 50000, H: 3000 } / lab { energy: 2000, UO: 3000 } / powerBank { power: 3000 } (与 energy 同给时以此为准) */
 	store?: Partial<Record<ResourceKey, number>>
 	/** 工厂等级 (仅 factory) */
 	level?: number
@@ -93,6 +93,23 @@ export interface RoomSpec {
 	controller?: ControllerSpec
 	structures?: StructureSpec[]
 	creeps?: CreepSpec[]
+}
+
+/** invader 侵袭波次配置 (缺省 = 无侵袭; 引擎常量 INVADER_DEFAULT_*) */
+export interface InvaderSpec {
+	/** 侵袭周期 tick (默认 12000) */
+	every?: number
+	/** 首次侵袭 tick (默认 6000) */
+	first?: number
+	/** invader 存活 tick 数, 到期撤离消失 (默认 15000) */
+	lifetime?: number
+	/** 每波数量 (默认 3) */
+	squad?: number
+}
+
+/** NPC 配置: invader 侵袭; keeper / powerBank 由房间结构 keeperLair / powerBank 直接驱动 */
+export interface NpcSpec {
+	invaders?: InvaderSpec
 }
 
 export type AssertSpec =
@@ -135,6 +152,8 @@ export interface SimScenario {
 	deterministicRandom?: boolean
 	/** >0 时每 N tick 重建 isolate 模拟全局重置 (全局变量丢失, Memory 保留) */
 	globalResetEvery?: number
+	/** NPC: invader 侵袭波次 (keeper/powerBank 由房间结构驱动) */
+	npcs?: NpcSpec
 	rooms: RoomSpec[]
 	asserts?: AssertSpec[]
 	/** 本用例专用 bundle 路径 (相对 .sim.ts 文件); 缺省: --bundle → ./dist/main.js */

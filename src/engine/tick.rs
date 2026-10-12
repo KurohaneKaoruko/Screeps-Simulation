@@ -5,6 +5,7 @@
 use crate::engine::constants;
 use crate::engine::intents::{self, IntentList, TickEffects};
 use crate::engine::movement::{self, Movement};
+use crate::engine::npc;
 use crate::engine::objects;
 use crate::engine::terrain::ROOM_SIZE;
 use crate::engine::world::World;
@@ -35,8 +36,21 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
         }
     }
 
-    // 1) 意图结算 (含 move 登记)
-    let effects = intents::apply_intents(world, intents);
+    // 1) 意图结算 (含 move 登记)。NPC (keeper/invader) 的意图合并进同一次结算,
+    //    走官方意图管线 (疲劳/碰撞仲裁/伤害累积), 保证与玩家意图同一套互斥规则。
+    let npc_merged = if world.npc_enabled {
+        let npc = npc::npc_intents(world);
+        if npc.entries.is_empty() {
+            None
+        } else {
+            let mut entries = intents.entries.clone();
+            entries.extend(npc.entries);
+            Some(IntentList { entries })
+        }
+    } else {
+        None
+    };
+    let effects = intents::apply_intents(world, npc_merged.as_ref().unwrap_or(intents));
     let mut movement = std::mem::take(movement);
     movement.init();
     for (room_name, id, dx, dy, old_fatigue) in &effects.moves {
@@ -83,6 +97,11 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
     apply_crossings(world, &mut pending_crossings);
     // 全局阶段 (官方 global-intents/market.js): 房间结算全部完成后执行终端转账
     intents::execute_terminal_sends(world, &effects.sends);
+
+    // NPC tick 相位: invader 撤离 / powerBank 衰减 / keeper 与 invader 生成
+    if world.npc_enabled {
+        npc::run_npc_tick(world);
+    }
 
     let _ = tick;
     world.tick += 1;
@@ -239,28 +258,31 @@ fn tick_creeps(
             crossings.push((room_name.to_string(), id));
         }
 
-        // 寿命
-        if obj.age_time.is_none() {
-            let life = if obj.body.iter().any(|p| p.part_type == "claim") {
-                constants::CREEP_CLAIM_LIFE_TIME
-            } else {
-                constants::CREEP_LIFE_TIME
-            };
-            obj.age_time = Some(tick + life);
-        }
-        if tick >= obj.age_time.unwrap_or(u64::MAX).saturating_sub(1) {
-            let name = obj.name.clone().unwrap_or_default();
-            let dead = world
-                .rooms
-                .get_mut(room_name)
-                .unwrap()
-                .objects
-                .remove(&id)
-                .unwrap();
-            world.creeps_lost += 1;
-            deaths.push(name);
-            intents::bury_creep(world, room_name, dead, constants::CREEP_CORPSE_RATE);
-            continue;
+        // 寿命 (NPC creep 不走自然寿命: invader 到期撤离/keeper 随 lair 更替自杀,
+        // 存亡由 npc 模块管理, 也不留墓碑/不计 creeps_lost)
+        if obj.npc_type.is_none() {
+            if obj.age_time.is_none() {
+                let life = if obj.body.iter().any(|p| p.part_type == "claim") {
+                    constants::CREEP_CLAIM_LIFE_TIME
+                } else {
+                    constants::CREEP_LIFE_TIME
+                };
+                obj.age_time = Some(tick + life);
+            }
+            if tick >= obj.age_time.unwrap_or(u64::MAX).saturating_sub(1) {
+                let name = obj.name.clone().unwrap_or_default();
+                let dead = world
+                    .rooms
+                    .get_mut(room_name)
+                    .unwrap()
+                    .objects
+                    .remove(&id)
+                    .unwrap();
+                world.creeps_lost += 1;
+                deaths.push(name);
+                intents::bury_creep(world, room_name, dead, constants::CREEP_CORPSE_RATE);
+                continue;
+            }
         }
 
         // 疲劳恢复 (官方 creeps/tick.js: -2 × MOVE, 经 _add-fatigue 先抵自己、剩余交给拉人者)

@@ -93,6 +93,17 @@ pub struct Obj {
     pub pending_cooldown: u32,
     /// 官方 observer.observeRoom: 本 tick 观察的房间 (下一 tick 对 bot 可见, 再下一 tick 清空)
     pub observe_room: Option<String>,
+    // ── NPC (官方服务端管理的对象: invader / source keeper / keeper lair / powerBank) ──
+    /// NPC 种类: "invader" / "keeper" (creep, enemy=true); lair/powerBank 由 obj_type 区分
+    pub npc_type: Option<String>,
+    /// invader 撤离 tick (官方约 1.5 万 tick 后离开消失; None = 不撤离)
+    pub npc_despawn_time: Option<u64>,
+    /// lair 下次生成 keeper 的 tick (官方 ticksToSpawn 语义; 受伤即重置为 now+300)
+    pub next_spawn_time: Option<u64>,
+    /// lair 守卫的 source 对象 id (NPC 生成 keeper 时绑定最近 source)
+    pub guard_source: Option<u64>,
+    /// keeper 归属的 lair 对象 id (lair 更替时只换自己的 keeper, 不动别的 lair 的)
+    pub guard_lair: Option<u64>,
 }
 
 /// 孵化任务: name=目标单位名, need_time=总时长, spawn_time=完成 tick
@@ -356,6 +367,11 @@ pub fn structure(id: u64, structure_type: &str, x: u8, y: u8, mine: bool) -> Obj
         cooldown_time: 0,
         pending_cooldown: 0,
         observe_room: None,
+        npc_type: None,
+        npc_despawn_time: None,
+        next_spawn_time: None,
+        guard_source: None,
+        guard_lair: None,
     }
 }
 
@@ -425,6 +441,11 @@ pub fn creep_obj(id: u64, name: &str, x: u8, y: u8, body: Vec<BodyPart>) -> Obj 
         cooldown_time: 0,
         pending_cooldown: 0,
         observe_room: None,
+        npc_type: None,
+        npc_despawn_time: None,
+        next_spawn_time: None,
+        guard_source: None,
+        guard_lair: None,
     }
 }
 

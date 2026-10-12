@@ -214,6 +214,47 @@ pub const ENERGY_REGEN_TIME: u64 = 300;
 /// 掉落能量每 tick 衰减 ceil(amount / ENERGY_DECAY)
 pub const ENERGY_DECAY: u32 = 1000;
 
+// ── NPC (invader / source keeper / power bank) ──
+/// Power Bank 初始/最大 hits (官方 POWER_BANK_HITS)
+pub const POWER_BANK_HITS: u32 = 2_000_000;
+/// Power Bank power 量上下限 (官方 POWER_BANK_CAPACITY_MIN/MAX)
+pub const POWER_BANK_CAPACITY_MIN: u32 = 2000;
+pub const POWER_BANK_CAPACITY_MAX: u32 = 5000;
+/// Power Bank 衰减 tick 数 (官方 POWER_BANK_DECAY: 历经这些 tick 后 hits/power 归零)
+pub const POWER_BANK_DECAY: u64 = 5000;
+/// 对 Power Bank 的伤害反弹比例 (官方 POWER_BANK_HIT_BACK)
+pub const POWER_BANK_HIT_BACK: f64 = 0.5;
+/// Power Bank 被摧毁后的重生间隔 (官方 POWER_BANK_RESPAWN_TIME, 未含随机波动)
+pub const POWER_BANK_RESPAWN_TIME: u64 = 50_000;
+/// Power Bank 衰减检查间隔 (每 tick 线性衰减等价, 按块结算省开销)
+pub const POWER_BANK_DECAY_STEP: u64 = 100;
+
+/// Source Keeper lair 默认 hits (官方未公开精确值, 取玩家社区观测 ~5 万)
+pub const KEEPER_LAIR_HITS: u32 = 50_000;
+/// lair 未受扰动时的 keeper 生成周期 (wiki: 300 tick delay between spawns)
+pub const KEEPER_SPAWN_INTERVAL: u64 = 300;
+/// lair 受伤后的重新生成倒计时 (wiki: 受扰后 300 tick 出新 keeper)
+pub const KEEPER_RESPAWN_AFTER_DAMAGE: u64 = 300;
+/// keeper 身体: 15 MOVE + 20 ATTACK + 5 RANGED_ATTACK (社区近似, 官方未公开)
+pub const KEEPER_BODY_MOVE: usize = 15;
+pub const KEEPER_BODY_ATTACK: usize = 20;
+pub const KEEPER_BODY_RANGED_ATTACK: usize = 5;
+/// keeper 攻击玩家的水平 (chebyshev 距离 ≤ 此值才打)
+pub const KEEPER_AGGRO_RANGE: i32 = 4;
+/// keeper 巡逻半径 (距被守卫 source 的 chebyshev 距离; 不出此圈, 不追击)
+pub const KEEPER_GUARD_RANGE: i32 = 3;
+
+/// invader 身体 (默认 5 MOVE + 4 ATTACK + 1 RANGED_ATTACK, 社区近似)
+pub const INVADER_BODY_MOVE: usize = 5;
+pub const INVADER_BODY_ATTACK: usize = 4;
+pub const INVADER_BODY_RANGED_ATTACK: usize = 1;
+/// invader 默认入侵周期 / 首次入侵 / 存活期 (官方: 未占领房间定期生成, 约 1.5 万 tick 后撤离)
+pub const INVADER_DEFAULT_EVERY: u64 = 12_000;
+pub const INVADER_DEFAULT_FIRST: u64 = 6000;
+pub const INVADER_DEFAULT_LIFETIME: u64 = 15_000;
+/// 每波 invader 数量默认值
+pub const INVADER_DEFAULT_SQUAD: usize = 3;
+
 /// Controller 升级进度需求 (当前等级 → 下一级)
 pub const CONTROLLER_LEVELS: &[(u8, u32)] = &[
     (1, 200),
@@ -415,6 +456,8 @@ pub fn structure_hits(structure_type: &str) -> u32 {
         "container" => 250_000,
         "nuker" => 1000,
         "factory" => 1000,
+        "keeperLair" => KEEPER_LAIR_HITS,
+        "powerBank" => POWER_BANK_HITS,
         _ => 0,
     }
 }

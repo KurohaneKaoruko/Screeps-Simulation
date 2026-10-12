@@ -7,6 +7,7 @@ pub mod cpu;
 pub mod intents;
 pub mod metrics;
 pub mod movement;
+pub mod npc;
 pub mod objects;
 pub mod scenario;
 pub mod snapshot;

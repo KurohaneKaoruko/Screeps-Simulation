@@ -140,12 +140,14 @@ impl Room {
     }
 
     /// 我方单位/自有结构/工地在场 → 可见。
-    /// 官方可见性来自带 `user` 的对象: 只有 creep、controller、OwnedStructure、自己的工地算数;
-    /// 路 / 容器 / 墙 / 墓碑没有 user, 不能单独让房间可见。
+    /// 官方可见性来自带 `user` 的对象: creep、controller、OwnedStructure、自己的工地;
+    /// 敌方 creep / 敌方 OwnedStructure 同样带 user (invader/keeper 因此让自己所在的
+    /// 房间对玩家可见, 与官方一致)。路 / 容器 / 墙 / 墓碑 / 中立结构没有 user。
     pub fn visible(&self) -> bool {
         self.objects.values().any(|o| {
             if !o.mine {
-                return false;
+                return o.enemy
+                    && (o.obj_type == "creep" || constants::is_owned_structure(&o.obj_type));
             }
             match o.obj_type.as_str() {
                 "creep" | "controller" | "constructionSite" => true,
@@ -220,6 +222,12 @@ pub struct World {
     pub rng_state: u64,
     /// 最近的终端转账记录 (新→旧, 最多 TRANSACTIONS_KEEP 条), 供 Game.market.*Transactions
     pub transactions: Vec<Transaction>,
+    /// 场景 npcs.invaders 配置 (None = 无 invader 侵袭; keeper/powerBank 由场景结构驱动)
+    #[serde(default)]
+    pub npc_invaders: Option<crate::engine::npc::InvaderConfig>,
+    /// 是否有 NPC 活动 (keeperLair 存在或 invader 侵袭开启): 关时 NPC 相位零开销
+    #[serde(default)]
+    pub npc_enabled: bool,
 }
 
 /// 终端转账记录 (官方 transactions 集合的字段子集)
@@ -256,6 +264,8 @@ impl World {
             power_processed: 0,
             rng_state: 0x9E37_79B9_7F4A_7C15,
             transactions: Vec::new(),
+            npc_invaders: None,
+            npc_enabled: false,
         }
     }
 
@@ -425,6 +435,22 @@ impl World {
                 if obj.pending_cooldown > 0 {
                     mix_u64(&mut h, obj.pending_cooldown as u64);
                 }
+                // NPC 字段: 只在非默认值时混入 (无 NPC 的场景黄金哈希保持不变)
+                if let Some(t) = obj.npc_type.as_deref() {
+                    mix_str(&mut h, t);
+                }
+                if let Some(t) = obj.npc_despawn_time {
+                    mix_u64(&mut h, t);
+                }
+                if let Some(t) = obj.next_spawn_time {
+                    mix_u64(&mut h, t);
+                }
+                if let Some(g) = obj.guard_source {
+                    mix_u64(&mut h, g);
+                }
+                if let Some(g) = obj.guard_lair {
+                    mix_u64(&mut h, g);
+                }
             }
         }
         h
@@ -530,6 +556,18 @@ pub fn prime_world(world: &mut World) {
     for room in world.rooms.values_mut() {
         room.refresh_structure_activity();
     }
+    // NPC: lair/powerBank 初始化 + NPC 活动开关 (关时 tick 相位零开销)
+    crate::engine::npc::prime_lairs(world);
+    crate::engine::npc::prime_power_banks(world);
+    world.npc_enabled = world.npc_invaders.is_some()
+        || world
+            .rooms
+            .values()
+            .any(|r| {
+                r.objects
+                    .values()
+                    .any(|o| o.obj_type == "keeperLair" || o.obj_type == "powerBank")
+            });
 }
 
 /// 场景构造 helper: 放置结构并设定能量

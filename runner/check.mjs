@@ -49,6 +49,11 @@ const STRUCTURE_TYPES = new Set([
 	'container',
 	'nuker',
 	'factory',
+	'keeperLair',
+	'powerBank',
+	'portal',
+	'controller',
+	'invaderCore',
 ])
 
 // controller_structure_limit (constants.rs:280), 索引即 RCL 0..8
@@ -125,6 +130,24 @@ export function checkScenario(sim) {
 	}
 	if (sim.globalResetEvery !== undefined && sim.globalResetEvery <= 0) {
 		err('globalResetEvery', '必须 > 0 (不设置表示不重置)')
+	}
+	// npcs: invader 侵袭配置 (keeper/powerBank 由房间结构 keeperLair/powerBank 直接驱动)
+	if (sim.npcs !== undefined) {
+		if (!sim.npcs || typeof sim.npcs !== 'object' || Array.isArray(sim.npcs)) {
+			err('npcs', '应为对象, 形如 { "invaders": { "every": 8000, "first": 3000, "lifetime": 15000, "squad": 3 } }')
+		} else if (sim.npcs.invaders !== undefined) {
+			const inv = sim.npcs.invaders
+			if (!inv || typeof inv !== 'object' || Array.isArray(inv)) {
+				err('npcs.invaders', '应为对象')
+			} else {
+				if (inv.every !== undefined && !(inv.every > 0)) err('npcs.invaders.every', `必须 > 0 (当前 ${inv.every})`)
+				if (inv.first !== undefined && !(inv.first >= 0)) err('npcs.invaders.first', `不能为负 (当前 ${inv.first})`)
+				if (inv.lifetime !== undefined && !(inv.lifetime > 0)) err('npcs.invaders.lifetime', `必须 > 0 (当前 ${inv.lifetime})`)
+				if (inv.squad !== undefined && !(Number.isInteger(inv.squad) && inv.squad > 0)) {
+					err('npcs.invaders.squad', `必须为正整数 (当前 ${inv.squad})`)
+				}
+			}
+		}
 	}
 	if (sim.seed === 0) {
 		warn('seed', 'seed=0: 地形生成确定, 但 Math.random 不播种 → 模拟不可复现')
@@ -259,9 +282,20 @@ export function checkScenario(sim) {
 		}
 		// RCL 上限 (引擎会把超限结构标记 off 并排除出能量统计)
 		for (const [type, n] of typeCounts) {
-			const limit = CONTROLLER_STRUCTURES[type]?.[Math.min(rcl, 8)] ?? 0
+			// 中立/敌方结构 (keeperLair / powerBank / portal / controller / invaderCore) 无 RCL 上限
+			if (!Object.prototype.hasOwnProperty.call(CONTROLLER_STRUCTURES, type)) continue
+			const limit = CONTROLLER_STRUCTURES[type][Math.min(rcl, 8)] ?? 0
 			if (n > limit) {
 				warn(`${ctx}.structures`, `${type} ×${n} 超过 RCL${rcl} 上限 ${limit}, 超限结构将被引擎标记 off (如非刻意测试 off 行为请修正)`)
+			}
+		}
+		// keeperLair 需要房间内有 source 才能绑定守卫目标 (无 source 则永不生成 keeper)
+		if ((typeCounts.get('keeperLair') ?? 0) > 0) {
+			const sourceCount = Array.isArray(room.sources?.positions)
+				? room.sources.positions.length
+				: (room.sources?.count ?? 0)
+			if (sourceCount === 0) {
+				warn(`${ctx}.structures`, '房间有 keeperLair 但没有 source, 引擎不会生成 keeper (lair 无守卫目标)')
 			}
 		}
 

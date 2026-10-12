@@ -29,7 +29,7 @@
 	],
 	"scripts": {
 		"build": "cargo build --release",
-		"test": "node runner/selftest.mjs && node bin/screeps-sim.mjs test examples/smoke.sim.ts --bundle examples/fixtures/min-bot.js"
+		"test": "node runner/selftest.mjs && node bin/screeps-sim.mjs test examples/smoke.sim.ts examples/npc.sim.ts"
 	},
 	"engines": {
 		"node": ">=22.6"

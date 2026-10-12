@@ -175,7 +175,11 @@ isolate 创建从「编译 540KB 源码」变为「反序列化字节码」。�
 ### PvP/PvE 缺口
 
 5. **safeMode** 拦截攻击、**nuker** (landing→impact 两阶段)、**power creeps** (`PWR_*` 效果);
-6. **NPC**: invader 定期袭击 (对外房 harvest 的惩罚, 官方平衡性核心)、source keeper、power bank;
+6. ✅ **NPC** (2026-10-12 交付): invader 定期袭击 (对外房 harvest 的惩罚, 官方平衡性核心)、
+   source keeper (lair 周期生成/守卫 source/仇恨圈攻击)、power bank (2M hits/半伤害反弹/线性衰减归零掉落)。
+   意图驱动: NPC 每 tick 生成意图并入同一 `apply_intents` 管线 (复用疲劳/碰撞/伤害/互斥表/近战反击);
+   开关 `world.npc_enabled`, 无 NPC 场景黄金基线哈希不变。`tests/npc.rs` 10 项 + `examples/npc.sim.ts`。
+   未做: nuke、power creeps (`PWR_*`)、ruin;
 7. ruin、construction site 过期、portal/highway。
 
 ### 终极正确性工具: 官方引擎对拍 (parity harness)
@@ -238,7 +242,8 @@ isolate 创建从「编译 540KB 源码」变为「反序列化字节码」。�
 > ✅ 模拟前静态检查 (场景语义 + bot bundle 常量拼写/参数顺序/node 泄漏/覆盖度, `runner/check.mjs` + `runner/bundle-check.mjs`) ·
 > ✅ stdin/stdout 管道协议 (`--scenario -` / `--json-report -`, 报告内嵌断言结果) ·
 > ✅ 时间旅行 (`--checkpoint-every/--checkpoint-dir` + `--at/--steps/--dump-state/--resume`, 哈希对拍锁定) ·
-> ✅ watch 模式 (bundle/用例变更自动重跑) · ✅ P0/P1 批次性能优化 (见文首基准)
+> ✅ watch 模式 (bundle/用例变更自动重跑) · ✅ P0/P1 批次性能优化 (见文首基准) ·
+> ✅ NPC (invader 侵袭波 / source keeper / power bank, 意图驱动并入官方结算管线)
 
 | 项 | 影响 | 成本 | 建议批次 |
 |---|---|---|---|
@@ -252,5 +257,5 @@ isolate 创建从「编译 540KB 源码」变为「反序列化字节码」。�
 | boost/lab + market | 高 (经济保真) | 高 | 第三批 |
 | 官方对拍 harness | 极高 (正确性闭环) | 高 | 第三批 |
 | CDP 调试 (`--inspect`) | 高 (DX 质变) | 中-高 | 第四批 |
-| NPC / nuke / power | 中 | 中 | 第四批 |
+| NPC / nuke / power | 中 | 中 | 第四批 (✅ NPC 已交付, nuke/power 待做) |
 | 预编译二进制分发 | 中 (普及) | 中 | 第四批 |

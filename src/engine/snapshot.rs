@@ -392,6 +392,30 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
                 None => out.push_str("null"),
             }
         }
+        "keeperLair" | "powerBank" => {
+            // NPC 结构: lair 的 ticksToSpawn / powerBank 的 power + ticksToDecay
+            write_structure_common(out, obj);
+            if obj.obj_type == "keeperLair" {
+                out.push_str(",\"ticksToSpawn\":");
+                match obj.next_spawn_time {
+                    Some(t) => {
+                        let _ = write!(out, "{}", t.saturating_sub(world.tick));
+                    }
+                    None => out.push_str("null"),
+                }
+            }
+            if obj.obj_type == "powerBank" {
+                out.push_str(",\"power\":");
+                let _ = write!(out, "{}", obj.store.get("power").copied().unwrap_or(0));
+                out.push_str(",\"ticksToDecay\":");
+                match obj.next_decay_time {
+                    Some(t) => {
+                        let _ = write!(out, "{}", t.saturating_sub(world.tick));
+                    }
+                    None => out.push_str("null"),
+                }
+            }
+        }
         _ => {}
     }
     out.push('}');
@@ -701,6 +725,29 @@ fn object_json(obj: &Obj, world: &World) -> Value {
                 extra.insert("ticksToDecay".into(), json!(t.saturating_sub(world.tick)));
             }
             extra.insert("creepName".into(), json!(obj.creep_name.clone()));
+            base(extra)
+        }
+        "keeperLair" | "powerBank" => {
+            // NPC 结构: lair 的 ticksToSpawn / powerBank 的 power + ticksToDecay
+            let mut extra = Map::new();
+            extra.insert("structureType".into(), json!(obj.obj_type));
+            extra.insert("hits".into(), json!(obj.hits));
+            extra.insert("hitsMax".into(), json!(obj.hits_max));
+            extra.insert("my".into(), json!(obj.mine));
+            extra.insert("store".into(), store_json(&obj.store));
+            if obj.obj_type == "keeperLair" {
+                extra.insert(
+                    "ticksToSpawn".into(),
+                    json!(obj.next_spawn_time.map(|t| t.saturating_sub(world.tick))),
+                );
+            }
+            if obj.obj_type == "powerBank" {
+                extra.insert("power".into(), json!(obj.store.get("power").copied().unwrap_or(0)));
+                extra.insert(
+                    "ticksToDecay".into(),
+                    json!(obj.next_decay_time.map(|t| t.saturating_sub(world.tick))),
+                );
+            }
             base(extra)
         }
         other => {

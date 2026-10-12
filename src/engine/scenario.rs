@@ -238,6 +238,9 @@ pub struct Scenario {
     pub rooms: Vec<RoomSpec>,
     #[serde(default)]
     pub asserts: Vec<AssertSpec>,
+    /// NPC 配置: invader 侵袭周期 (keeper/powerBank 由房间结构 keeperLair/powerBank 驱动)
+    #[serde(default)]
+    pub npcs: Option<crate::engine::npc::NpcConfig>,
 }
 
 fn default_true() -> bool {
@@ -273,6 +276,19 @@ impl Scenario {
         if let Some(n) = self.global_reset_every {
             if n == 0 {
                 return Err("globalResetEvery 必须 > 0 (不设置表示不重置)".into());
+            }
+        }
+        if let Some(npcs) = &self.npcs {
+            if let Some(inv) = &npcs.invaders {
+                if inv.every == 0 {
+                    return Err("npcs.invaders.every 必须 > 0".into());
+                }
+                if inv.squad == 0 {
+                    return Err("npcs.invaders.squad 必须 > 0".into());
+                }
+                if inv.lifetime == 0 {
+                    return Err("npcs.invaders.lifetime 必须 > 0".into());
+                }
             }
         }
         let mut rooms = std::collections::BTreeSet::new();
@@ -580,6 +596,11 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
     for room in world.rooms.values_mut() {
         room.refresh_terrain_cache();
     }
+    // NPC: invader 配置进世界 (keeperLair/powerBank 的初始化在 prime_world 内)
+    world.npc_invaders = scenario
+        .npcs
+        .as_ref()
+        .and_then(|n| n.invaders.clone());
     prime_world(&mut world);
     Ok(world)
 }

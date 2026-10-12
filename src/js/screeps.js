@@ -1793,6 +1793,21 @@ class StructureRampart extends OwnedStructure {
 	}
 	setPublic() { return C.OK; }
 }
+/** NPC: source keeper lair — 下一次 keeper 生成的剩余 tick */
+class StructureKeeperLair extends Structure {
+	constructor(raw) {
+		super(raw);
+		this.ticksToSpawn = raw.ticksToSpawn;
+	}
+}
+/** NPC: power bank — 内含 power (摧毁掉落), ticksToDecay 衰减剩余 */
+class StructurePowerBank extends Structure {
+	constructor(raw) {
+		super(raw);
+		this.power = raw.power || 0;
+		this.ticksToDecay = raw.ticksToDecay;
+	}
+}
 
 const STRUCTURE_CLASSES = {
 	spawn: StructureSpawn,
@@ -1800,14 +1815,14 @@ const STRUCTURE_CLASSES = {
 	road: StructureRoad,
 	constructedWall: StructureWall,
 	rampart: StructureRampart,
-	keeperLair: Structure,
+	keeperLair: StructureKeeperLair,
 	portal: Structure,
 	controller: StructureController,
 	link: StructureLink,
 	storage: StructureStorage,
 	tower: StructureTower,
 	observer: StructureObserver,
-	powerBank: Structure,
+	powerBank: StructurePowerBank,
 	powerSpawn: StructurePowerSpawn,
 	extractor: StructureExtractor,
 	lab: StructureLab,
@@ -3006,6 +3021,7 @@ const GLOBAL_CLASSES = {
 	StructureContainer, StructureTerminal, StructureTower, StructureLink, StructureLab,
 	StructureNuker, StructureObserver, StructurePowerSpawn, StructureExtractor,
 	StructureFactory, StructureRoad, StructureWall, StructureRampart,
+	StructureKeeperLair, StructurePowerBank,
 	Ruin, Mineral, Deposit, Nuke, PowerCreep,
 };
 for (const [name, cls] of Object.entries(GLOBAL_CLASSES)) {

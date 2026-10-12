@@ -46,7 +46,7 @@ console.log('场景静态检查 (check.mjs)')
 			{ name: 'W1N1' },
 			{
 				name: 'X1Y1',
-				structures: [{ type: 'portal', pos: [1, 1] }],
+				structures: [{ type: 'ufo', pos: [1, 1] }],
 				creeps: [
 					{ name: 'a', body: ['wing'], pos: [2, 2] },
 					{ name: 'a', body: ['move'], pos: [3, 3] },
@@ -105,6 +105,39 @@ console.log('场景静态检查 (check.mjs)')
 		],
 	})
 	expect(r.warnings.some((w) => w.message.includes('不连通')), '孤立房间 → 连通性警告')
+
+	// NPC: keeperLair / powerBank 是合法结构, 且不吃 RCL 上限警告
+	r = checkScenario({
+		name: 'npc-ok',
+		npcs: { invaders: { every: 8000, first: 3000, lifetime: 15000, squad: 3 } },
+		rooms: [
+			{
+				name: 'W1N1',
+				sources: { positions: [[18, 22]] },
+				structures: [
+					{ type: 'keeperLair', pos: [20, 22] },
+					{ type: 'powerBank', pos: [10, 10], store: { power: 3000 } },
+				],
+			},
+		],
+	})
+	expect(r.errors.length === 0, `NPC 场景合法 (实际: ${r.errors.map((e) => e.message).join('; ')})`)
+	expect(!r.warnings.some((w) => w.message.includes('上限')), 'keeperLair/powerBank 无 RCL 上限警告')
+
+	// NPC: invader 参数非法 → 报错; lair 无 source → 警告
+	r = checkScenario({
+		name: 'npc-bad',
+		npcs: { invaders: { every: 0, squad: 0, lifetime: -1 } },
+		rooms: [{ name: 'W1N1', structures: [{ type: 'keeperLair', pos: [20, 22] }] }],
+	})
+	const npcPaths = r.errors.map((e) => e.path).join('\n')
+	expect(
+		npcPaths.includes('npcs.invaders.every') &&
+			npcPaths.includes('npcs.invaders.squad') &&
+			npcPaths.includes('npcs.invaders.lifetime'),
+		'npcs.invaders 参数校验'
+	)
+	expect(r.warnings.some((w) => w.message.includes('没有 source')), 'keeperLair 无 source → 警告')
 }
 
 console.log('bundle 静态检查 (bundle-check.mjs)')
