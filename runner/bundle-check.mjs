@@ -63,17 +63,10 @@ const MISSING_APIS = [
 // 模拟器覆盖度: bot 用到但模拟器不模拟的 API
 // [匹配, 说明, 级别] —— level: 'error' 调用即抛错 / 'warn' no-op 或恒定值
 const SIM_COVERAGE = [
-	[/\bGame\.market\b/, '市场为 no-op 桩: 订单永远为空, deal 永远失败 —— 市场行为不会被模拟', 'warn'],
-	[/\bGame\.powerCreeps\b/, 'powerCreeps 恒为空对象 —— power creep 不会被模拟', 'warn'],
-	[/\bGame\.gpl\b/, 'GPL 恒为 0 —— power 进阶不会被模拟', 'warn'],
-	[/\brunReaction\s*\(/, '实验室反应未实现 (StructureLab 为空类, 调用即 TypeError)', 'error'],
-	[/\bboostCreep\s*\(/, 'boost 未实现 (方法缺失, 调用即 TypeError) —— boost 数值不会被模拟', 'error'],
-	[/\bunboostCreep\s*\(/, 'boost 未实现 (方法缺失, 调用即 TypeError)', 'error'],
+	[/\bGame\.market\.(?:deal|createOrder|getAllOrders|getHistory|getOrderById|cancelOrder|changeOrderPrice|extendOrder)\b/, '市场订单为 no-op 桩: 订单永远为空, deal 永远失败 —— 市场交易不会被模拟 (terminal.send / calcTransactionCost / 转账记录已实现)', 'warn'],
+	[/\bGame\.market\.credits\b/, 'Game.market.credits 恒为 0 —— 市场交易不会被模拟', 'warn'],
+	[/\bGame\.powerCreeps\b/, 'powerCreeps 恒为空对象 —— power creep 不会被模拟 (PWR_* 效果、有等级的工厂商品均不可用)', 'warn'],
 	[/\blaunchNuke\s*\(/, 'nuker 未实现 (StructureNuker 为空类, 调用即 TypeError)', 'error'],
-	[/\bterminal\.send\s*\(/, 'terminal.send 未实现 (StructureTerminal 为空类, 调用即 TypeError) —— 跨房交易不会被模拟', 'error'],
-	[/\bproduce\s*\(/, 'factory.produce 为 no-op (恒返回 ERR_INVALID_ARGS)', 'warn'],
-	[/\bprocessPower\s*\(/, 'powerSpawn.processPower 为 no-op', 'warn'],
-	[/\bobserveRoom\s*\(/, 'observer.observeRoom 为 no-op', 'warn'],
 ]
 
 /// bundle 里声明过的标识符 (var/let/const/function/class, 含 `var A = 1, B = 2` 与解构)。
