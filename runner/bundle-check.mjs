@@ -92,6 +92,9 @@ export function collectDeclaredNames(source) {
 	for (const m of source.matchAll(/\b(?:var|let|const)\s+([^;]+)/gs)) {
 		for (const d of m[1].matchAll(/(?:^|[{,]\s*)([A-Za-z_$][\w$]*)\s*=(?!=)/g)) names.add(d[1])
 	}
+	// 箭头函数体含 `;` 会截断上面的语句扫描 (如 `const numAt = () => {...}, SPAWN_SLOT_OFFSETS = [...]`),
+	// 兜底收集全源里所有「声明位」的 `NAME =`: 过收集只放宽误报, 真拼写错误 (从未声明) 仍会被报
+	for (const d of source.matchAll(/(?:^|[{,]\s*)([A-Za-z_$][\w$]*)\s*=(?!=)/gm)) names.add(d[1])
 	return names
 }
 

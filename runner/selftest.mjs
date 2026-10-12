@@ -148,6 +148,13 @@ const { TOWER_URGENT } = cfg;
 function LAB_HELPER() {}
 exports.loop = function () { x = CREEP_LIFE + POWER_BATCH + TOWER_URGENT + o.SPAWN_Q + LAB_HELPER(); y = { ENERGY_Z: 1 }; z = 'BOOST_Q'; };`)
 	expect(r.errors.length === 0, `bot 自定义常量不误报 (实际: ${r.errors.map((e) => e.message)})`)
+	// 箭头函数体内的 `;` 会截断声明扫描: 第二个声明符 (跨行的全大写常量) 不应被误报为拼写错误
+	r = checkBundle(`const numAt = () => {
+	const a = 1
+	return a
+}, SPAWN_SLOT_OFFSETS = [10, 20]
+exports.loop = function () { y = SPAWN_SLOT_OFFSETS.length; };`)
+	expect(r.errors.length === 0, `箭头体后的多声明符常量不误报 (实际: ${r.errors.map((e) => e.message)})`)
 	r = checkBundle(`var CREEP_LIFE = 1500;\nexports.loop = function () { w = c ? FIND_SOURCEZ : 0; };`)
 	expect(r.errors.some((e) => e.message.includes('FIND_SOURCEZ')), '三元表达式里的拼写错误仍报')
 
