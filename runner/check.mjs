@@ -188,9 +188,8 @@ export function checkScenario(sim) {
 			if (Array.isArray(room.sources.positions)) {
 				if (room.sources.positions.length === 0) err(`${ctx}.sources.positions`, '不能为空')
 				room.sources.positions.forEach((p, i) => {
-					if (posCheck(`sources.positions[${i}]`, p) && grid && grid[p[1]]?.[p[0]] === 1) {
-						warn(`${ctx}.sources.positions[${i}]`, `(${p[0]},${p[1]}) 在墙上 (引擎会清出周围, 但地形与现实不符)`)
-					}
+					// 真实地图里 source 本来就在墙格上 (显式地形原样使用, 不开洞), 不再警告
+					posCheck(`sources.positions[${i}]`, p)
 				})
 			} else if (room.sources.count !== undefined) {
 				if (!Number.isInteger(room.sources.count) || room.sources.count < 1) {

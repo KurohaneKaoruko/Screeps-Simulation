@@ -416,11 +416,17 @@ fn spawn_extension_off_beyond_rcl_limit() {
 	assert_eq!(off, 2, "RCL1 extension 上限 0, 两个都应为 off");
 }
 
-/// issue#1 §4: GCL 需求公式为累计 (L)^2.4 × 1e6
+/// GCL: 累计分数 gcl, 等级 floor((gcl/1e6)^(1/2.4))+1, 本级总量 L^2.4·1e6 − (L−1)^2.4·1e6 (官方 game.js:130-162)
 #[test]
 fn gcl_progress_total_matches_official() {
 	assert_eq!(constants::gcl_progress_total(1), 1_000_000, "GCL1→2 = 1e6");
-	assert_eq!(constants::gcl_progress_total(2), 5_278_031, "GCL2→3 = 2^2.4 × 1e6");
+	assert_eq!(constants::gcl_progress_total(2), 4_278_031, "GCL2→3 = 2^2.4·1e6 − 1e6");
+	assert_eq!(constants::gcl_level_for(0), 1);
+	assert_eq!(constants::gcl_level_for(999_999), 1);
+	assert_eq!(constants::gcl_level_for(1_000_000), 2);
+	assert_eq!(constants::gcl_level_for(5_278_030), 2);
+	assert_eq!(constants::gcl_level_for(5_278_031), 3, "到 GCL3 累计 2^2.4·1e6");
+	assert_eq!(constants::gcl_level_for(14_000_000), 4, "3^2.4·1e6 ≈ 13.97e6");
 }
 
 /// issue#1 §1.14: 引擎记录官方结构的事件日志, 且每 tick 清空
@@ -1717,4 +1723,79 @@ fn container_decay_interval_uses_controller_level_only() {
 	}
 	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
 	assert_eq!(world.rooms["W5N8"].objects[&id].next_decay_time, Some(500));
+}
+
+/// 保留: 可以连续续保留; 不再续则到期清除 (官方 controllers/tick.js:10);
+/// 被保留期间 source 容量 3000, 到期回中立 1500 (官方 sources/tick.js); 无控制器的房间 4000 (SK 房)
+#[test]
+fn reservation_renew_expire_and_source_capacity() {
+	let (mut world, mut movement) = setup(
+		r#"{
+		"name": "reserve", "seed": 1,
+		"rooms": [
+			{ "name": "W5N8", "terrain": { "kind": "flat" },
+			  "sources": { "positions": [[10, 10]] },
+			  "controller": { "level": 0, "pos": [28, 27], "mine": false } },
+			{ "name": "W4N8", "terrain": { "kind": "flat" }, "sources": { "positions": [[10, 10]] } }
+		]
+	}"#,
+	);
+	let creep = add_creep(&mut world, "R", 27, 27, &["claim", "claim", "move"]);
+	let ctrl = world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "controller").unwrap().id;
+	let src_cap = |w: &World, room: &str| w.rooms[room].objects.values().find(|o| o.obj_type == "source").unwrap().energy_capacity;
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(src_cap(&world, "W5N8"), 1500, "中立房 1500");
+	assert_eq!(src_cap(&world, "W4N8"), 4000, "无控制器 (SK 房) 4000");
+	let json = format!(r#"[{{"o":"{creep:024x}","n":"reserveController","d":{{"id":"{ctrl:024x}"}}}}]"#);
+	for _ in 0..10 {
+		tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	}
+	let left = |w: &World| w.rooms["W5N8"].objects[&ctrl].reservation_end_time.map(|e| e as i64 - w.tick as i64);
+	// 2 CLAIM × 10 tick 续 = 20, 期间流逝 10 → 剩 ~11 (含首次 endTime = now+1)
+	let remaining = left(&world).expect("应处于保留");
+	assert!((10..=12).contains(&remaining), "续保留应累积, 剩余 {remaining}");
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(src_cap(&world, "W5N8"), 3000, "被保留 → 3000");
+	for _ in 0..15 {
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	}
+	assert_eq!(left(&world), None, "不续则到期清除");
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(src_cap(&world, "W5N8"), 1500, "到期回中立 1500");
+}
+
+/// 多房间移动仲裁: 本房被挡的移动只取消本房的, 不能误删另一房间同坐标的移动
+#[test]
+fn blocked_move_cancels_only_same_room() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	// A 在 W4N8 (先仲裁), id 最小, 走向空格 (10,10)
+	let a = add_creep(&mut world, "A", 10, 11, &["move"]);
+	let obj = world.rooms.get_mut("W5N8").unwrap().objects.remove(&a).unwrap();
+	world.rooms.get_mut("W4N8").unwrap().objects.insert(a, obj);
+	// B 在 W5N8 走向被静止 creep 占着的 (10,10)
+	let b = add_creep(&mut world, "B", 10, 11, &["move"]);
+	let _blocker = add_creep(&mut world, "Blocker", 10, 10, &["move"]);
+	let json = format!(
+		r#"[{{"o":"{a:024x}","n":"move","d":{{"direction":1}}}},{{"o":"{b:024x}","n":"move","d":{{"direction":1}}}}]"#
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	let pos = |room: &str, id: u64| (world.rooms[room].objects[&id].x, world.rooms[room].objects[&id].y);
+	assert_eq!(pos("W4N8", a), (10, 10), "W4N8 的 A 不受 W5N8 的阻挡影响");
+	assert_eq!(pos("W5N8", b), (10, 11), "W5N8 的 B 被挡住, 不能叠到 Blocker 身上");
+}
+
+/// suicide 在意图阶段立即生效 (官方 _die 删除 roomObjects): 同 tick 别的 creep 可以走进它的格子
+#[test]
+fn suicide_frees_tile_same_tick() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let dead = add_creep(&mut world, "Dead", 10, 10, &["move"]);
+	let walker = add_creep(&mut world, "Walker", 10, 11, &["move"]);
+	let json = format!(
+		r#"[{{"o":"{dead:024x}","n":"suicide","d":{{}}}},{{"o":"{walker:024x}","n":"move","d":{{"direction":1}}}}]"#
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert!(!world.rooms["W5N8"].objects.contains_key(&dead));
+	let w = &world.rooms["W5N8"].objects[&walker];
+	assert_eq!((w.x, w.y), (10, 10), "自杀者的格子同 tick 空出");
+	assert_eq!(world.creeps_lost, 1);
 }

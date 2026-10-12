@@ -256,26 +256,16 @@ impl World {
     }
 
     pub fn gcl_level(&self) -> u32 {
-        let mut level = 1u32;
-        let mut remaining = self.gcl_progress;
-        loop {
-            let need = constants::gcl_progress_total(level);
-            if remaining >= need && level < 30 {
-                remaining -= need;
-                level += 1;
-            } else {
-                return level;
-            }
-        }
+        constants::gcl_level_for(self.gcl_progress)
     }
 
+    /// (本级进度, 本级总量), 官方 Game.gcl.progress / progressTotal
     pub fn gcl_level_progress(&self) -> (u64, u64) {
         let level = self.gcl_level();
-        let mut remaining = self.gcl_progress;
-        for l in 1..level {
-            remaining -= constants::gcl_progress_total(l);
-        }
-        (remaining, constants::gcl_progress_total(level))
+        (
+            self.gcl_progress - constants::gcl_base_progress(level),
+            constants::gcl_progress_total(level),
+        )
     }
 
     /// 按 id 字符串查对象 (跨房间)

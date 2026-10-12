@@ -234,14 +234,17 @@ impl Movement {
         resolved: &mut BTreeMap<u64, (u8, u8)>,
         key: (u8, u8),
     ) {
-        let object_id = match resolved.iter().find(|(_, &k)| k == key) {
+        // resolved 跨房间共用 (对象 id 全局唯一), 按坐标查找时必须限定在本房间,
+        // 否则会取消先仲裁的另一个房间里同坐标的移动, 而本房被挡的 creep 照样走进占用格。
+        let in_room = |id: &u64| room.objects.contains_key(id);
+        let object_id = match resolved.iter().find(|(id, &k)| k == key && in_room(id)) {
             Some((&id, _)) => id,
             None => return,
         };
         resolved.remove(&object_id);
         if let Some(obj) = room.objects.get(&object_id) {
             let origin = (obj.x, obj.y);
-            if origin != key && resolved.values().any(|&k| k == origin) {
+            if origin != key && resolved.iter().any(|(id, &k)| k == origin && in_room(id)) {
                 Self::remove_from_matrix(room, resolved, origin);
             }
         }

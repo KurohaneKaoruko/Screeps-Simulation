@@ -534,13 +534,27 @@ globalThis.global = globalThis;
 /** 地形缓存: roomName → Uint8Array(2500), 整个进程只解析一次 */
 const terrainCache = new Map();
 
+/**
+ * 快照携带地形的那一 tick (isolate 新建/重置后的首个快照) 立即解析全部房间。
+ * 此前是第一次被访问时才解析: bot 在之后的 tick 才首次读某房地形时快照里已经没有 terrain,
+ * 缓存成全平地且永不更新 —— 寻路穿墙、移动大面积失败 (平地场景测不出来)。
+ */
+function cacheSnapshotTerrain() {
+	const all = __W && __W.terrain;
+	if (!all) return;
+	for (const roomName in all) {
+		const raw = all[roomName];
+		const t = new Uint8Array(2500);
+		for (let i = 0; i < 2500 && i < raw.length; i++) t[i] = +raw[i];
+		terrainCache.set(roomName, t);
+	}
+}
+
 function terrainOf(roomName) {
 	let t = terrainCache.get(roomName);
 	if (!t) {
-		const raw = (__W.terrain || {})[roomName];
-		t = new Uint8Array(2500);
-		if (raw) for (let i = 0; i < 2500 && i < raw.length; i++) t[i] = +raw[i];
-		terrainCache.set(roomName, t);
+		// 不在世界里的房间: 全平地 (不缓存, 以免将来该房地形送达时被挡住)
+		return new Uint8Array(2500);
 	}
 	return t;
 }
@@ -563,6 +577,8 @@ const FREE_INTENT_METHODS = { say: true, pull: true };
 /** 本 tick 已计入 CPU 的 (对象, 意图) 组合 —— 官方 intents.set 只对首次出现计价 */
 let __intentKeys = new Set();
 let __intentCpu = 0;
+/** 本 tick 已提交的 claimController 数 (官方 controllersClaimedInTick) */
+let __controllersClaimedInTick = 0;
 
 function intent(objId, name, data) {
 	const o = typeof objId === "string" ? objId : String(objId);
@@ -824,11 +840,13 @@ class Creep extends RoomObject {
 		super(raw);
 		this.name = raw.name;
 		this.my = raw.my !== false;
-		this.owner = { username: "Nexus" };
+		// 敌方 creep 的 owner 来自场景 (默认 Invader); 此前恒为 Nexus, 按 owner 过滤敌人的 bot 会把敌人当自己
+		this.owner = { username: this.my ? "Nexus" : raw.owner || "Invader" };
 		this.body = raw.body;
 		this.fatigue = raw.fatigue;
 		this.spawning = !!raw.spawning;
-		this.ticksToLive = raw.ticksToLive;
+		// 官方: 没有 ageTime (孵化中/场景首 tick) 时为 undefined, 不是 null
+		this.ticksToLive = raw.ticksToLive == null ? undefined : raw.ticksToLive;
 		this.hits = raw.hits;
 		this.hitsMax = raw.hitsMax;
 		this.__storeRaw = raw.store;
@@ -845,12 +863,15 @@ class Creep extends RoomObject {
 	get carryCapacity() {
 		return this.__storeCap;
 	}
+	/** 官方 creeps.js:95: 别人的 creep 没有 memory (undefined, 也不在 Memory.creeps 里建条目) */
 	get memory() {
+		if (!this.my) return undefined;
 		if (!Memory.creeps) Memory.creeps = {};
 		if (!Memory.creeps[this.name]) Memory.creeps[this.name] = {};
 		return Memory.creeps[this.name];
 	}
 	set memory(v) {
+		if (!this.my) throw new Error("Could not set other player's creep memory");
 		if (!Memory.creeps) Memory.creeps = {};
 		Memory.creeps[this.name] = v;
 	}
@@ -864,7 +885,17 @@ class Creep extends RoomObject {
 	}
 	notifyWhenAttacked(enabled) {
 		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
 		if (typeof enabled !== "boolean") return C.ERR_INVALID_ARGS;
+		return C.OK;
+	}
+	/** 官方 creeps.js:1008: 撤销本 tick 已提交的同名意图 */
+	cancelOrder(name) {
+		const id = String(this.id);
+		const before = __intents.length;
+		__intents = __intents.filter((it) => !(it.o === id && it.n === name));
+		if (__intents.length === before) return C.ERR_NOT_FOUND;
+		__intentKeys.delete(id + "|" + name);
 		return C.OK;
 	}
 	/** 官方 E/game/creeps.js:126-156: move(creep) 跟着相邻 creep 走 (配合 pull), 不查疲劳/MOVE 部件 */
@@ -992,26 +1023,34 @@ class Creep extends RoomObject {
 		intent(this.id, "transfer", { id: target.id, resourceType, amount });
 		return C.OK;
 	}
+	/** 官方 E/game/creeps.js:493-560 的返回码顺序 */
 	withdraw(target, resourceType, amount) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
+		if (amount < 0) return C.ERR_INVALID_ARGS;
 		if (!C.RESOURCES_ALL.includes(resourceType)) return C.ERR_INVALID_ARGS;
-		if (amount !== undefined && amount < 0) return C.ERR_INVALID_ARGS;
-		if (!target || !target.id || !target.store) return C.ERR_INVALID_TARGET;
-		const available = target.store.getUsedCapacity(resourceType);
-		if (amount === undefined) amount = available;
-		if (!available) return C.ERR_NOT_ENOUGH_RESOURCES;
+		// 只能从建筑 / 墓碑 / 废墟取 (不能从别的 creep 身上 withdraw)
+		if (!target || !target.id || !target.store || !(target instanceof Structure || target instanceof Tombstone || target instanceof Ruin)) return C.ERR_INVALID_TARGET;
+		if (target.my === false && target.pos.lookFor("structure").some((i) => i.structureType === "rampart" && !i.my && !i.isPublic)) return C.ERR_NOT_OWNER;
+		if (target.structureType === "nuker" || target.structureType === "powerBank") return C.ERR_INVALID_TARGET;
+		if (!target.store.getCapacity(resourceType) && !target.store[resourceType] && !(target instanceof Tombstone)) return C.ERR_INVALID_TARGET;
 		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
-		if (this.store.getFreeCapacity() <= 0) return C.ERR_FULL;
+		const emptySpace = (this.__storeCap || 0) - this.store.getUsedCapacity();
+		if (emptySpace <= 0) return C.ERR_FULL;
+		const stored = target.store[resourceType] || 0;
+		if (!amount) amount = Math.min(emptySpace, stored);
+		if (amount > emptySpace) return C.ERR_FULL;
+		if (!amount || stored < amount) return C.ERR_NOT_ENOUGH_RESOURCES;
 		intent(this.id, "withdraw", { id: target.id, resourceType, amount });
 		return C.OK;
 	}
+	/** 官方 creeps.js:563-585: 满载判断在距离之前 */
 	pickup(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
 		if (!target || !(target instanceof Resource)) return C.ERR_INVALID_TARGET;
+		if (this.store.getUsedCapacity() >= (this.__storeCap || 0)) return C.ERR_FULL;
 		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
-		if (this.store.getFreeCapacity() <= 0) return C.ERR_FULL;
 		intent(this.id, "pickup", { id: target.id });
 		return C.OK;
 	}
@@ -1057,20 +1096,25 @@ class Creep extends RoomObject {
 		intent(this.id, "repair", { id: target.id });
 		return C.OK;
 	}
+	/** 官方 creeps.js:921-952 */
 	upgradeController(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
 		if (!this.getActiveBodyparts("work")) return C.ERR_NO_BODYPART;
-		if (!this.store.energy) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (!this.store.energy) return C.ERR_NOT_ENOUGH_RESOURCES;
 		if (!target || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
+		if (target.upgradeBlocked && target.upgradeBlocked > 0) return C.ERR_INVALID_TARGET;
 		if (!this.pos.inRangeTo(target.pos, 3)) return C.ERR_NOT_IN_RANGE;
+		if (!target.my) return C.ERR_NOT_OWNER;
+		if (!target.level || !target.owner) return C.ERR_INVALID_TARGET;
 		intent(this.id, "upgradeController", { id: target.id });
 		return C.OK;
 	}
 	say(message, toPublic) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
-		if (typeof message !== "string") return C.ERR_INVALID_ARGS;
+		// 官方把参数转成字符串 (say(creep.ticksToLive) 照样 OK)
+		message = "" + message;
 		intent(this.id, "say", { message: message.substr(0, 10), isPublic: !!toPublic });
 		return C.OK;
 	}
@@ -1134,35 +1178,51 @@ class Creep extends RoomObject {
 		return C.OK;
 	}
 	/** 官方 attackController: CLAIM 部件, 目标须有 owner 或 reservation */
+	/** 官方 creeps.js:879-917 */
 	attackController(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
 		if (!target || !target.id || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
 		if (!this.getActiveBodyparts("claim")) return C.ERR_NO_BODYPART;
 		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
-		if (!target.my && !target.reservation) return C.ERR_INVALID_TARGET;
+		if (!target.owner && !target.reservation) return C.ERR_INVALID_TARGET;
 		if (target.upgradeBlocked > 0) return C.ERR_TIRED;
 		intent(this.id, "attackController", { id: target.id });
 		return C.OK;
 	}
-	/** 官方 claimController: CLAIM 部件, GCL 检查 (官方按已占领房间数) */
+	/** 官方 creeps.js:839-876: GCL 按已占领房间数 + 本 tick 已提交的 claim 计 */
 	claimController(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
-		if (!target || !target.id || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
+		let owned = 0;
+		for (const name in Game.rooms) {
+			const c = Game.rooms[name].controller;
+			if (c && c.my) owned++;
+		}
+		const claimed = owned + __controllersClaimedInTick;
+		// 官方 gcl < calcNeededGcl(claimed + 1) 等价于 GCL 等级 < claimed + 1
+		if (claimed && (!Game.gcl || Game.gcl.level < claimed + 1)) return C.ERR_GCL_NOT_ENOUGH;
+		if (!target || !target.id || !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
 		if (!this.getActiveBodyparts("claim")) return C.ERR_NO_BODYPART;
 		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		if (target.structureType !== "controller") return C.ERR_INVALID_TARGET;
+		if (target.level > 0) return C.ERR_INVALID_TARGET;
+		if (target.reservation && target.reservation.username !== this.owner.username) return C.ERR_INVALID_TARGET;
+		__controllersClaimedInTick++;
 		intent(this.id, "claimController", { id: target.id });
 		return C.OK;
 	}
 	/** 官方 reserveController: CLAIM 部件, 目标须无主且无他人预约 */
+	/** 官方 E/game/creeps.js:955-985 */
 	reserveController(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
-		if (!target || !target.id || !(target instanceof StructureController)) return C.ERR_INVALID_TARGET;
+		if (!target || !target.id || !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
 		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
-		if (target.my) return C.ERR_INVALID_TARGET;
-		if (target.reservation && !target.my) return C.ERR_INVALID_TARGET;
+		if (target.structureType !== "controller") return C.ERR_INVALID_TARGET;
+		if (target.owner) return C.ERR_INVALID_TARGET;
+		// 自己的保留可以续 (此前误用 !target.my, 中立控制器恒为 false, 续保留永远被拒)
+		if (target.reservation && target.reservation.username !== this.owner.username) return C.ERR_INVALID_TARGET;
 		if (!this.getActiveBodyparts("claim")) return C.ERR_NO_BODYPART;
 		intent(this.id, "reserveController", { id: target.id });
 		return C.OK;
@@ -1570,7 +1630,8 @@ class StructureController extends OwnedStructure {
 		this.safeMode = raw.safeMode || null;
 		this.safeModeCooldown = null;
 		this.upgradeBlocked = raw.upgradeBlocked || 0;
-		this.reservation = raw.reservation || null;
+		// 官方 structures.js: 没有保留时为 undefined; 字段名 ticksToEnd
+		this.reservation = raw.reservation || undefined;
 		this.sign = raw.sign || null;
 		this.isPowerEnabled = false;
 	}
@@ -2500,16 +2561,32 @@ var Game = null;
 // Memory: 官方是 globalThis 上的**可配置**属性 (delete global.Memory 不抛错,
 // issue #1 §3.4)。var 创建的属性 configurable:false 且无法重定义, 故用访问器。
 var __memoryValue = null;
-Object.defineProperty(globalThis, "Memory", {
-	configurable: true,
-	enumerable: true,
-	get() {
-		return __memoryValue;
-	},
-	set(v) {
-		__memoryValue = v;
-	},
-});
+/**
+ * 官方 game.js:479-500: Memory 是惰性访问器 —— 第一次读取时 JSON.parse(RawMemory.get()),
+ * 结果挂在 RawMemory._parsed 上, 并把全局 Memory 换成这个值。解析发生在用户代码里, 计入本 tick CPU。
+ * tick 末尾 runtime 序列化的是 RawMemory._parsed (不是全局 Memory) —— memhack 靠这一点把上一 tick 的对象装回去。
+ */
+function __installLazyMemory() {
+	Object.defineProperty(globalThis, "Memory", {
+		configurable: true,
+		enumerable: true,
+		get() {
+			let parsed;
+			try {
+				parsed = JSON.parse(rawMemoryData || "{}");
+			} catch {
+				parsed = null;
+			}
+			RawMemory._parsed = parsed;
+			__memoryValue = parsed;
+			Object.defineProperty(globalThis, "Memory", { configurable: true, enumerable: true, writable: true, value: parsed });
+			return parsed;
+		},
+		set(v) {
+			Object.defineProperty(globalThis, "Memory", { configurable: true, enumerable: true, writable: true, value: v });
+		},
+	});
+}
 
 function buildGame() {
 	byId = new Map();
@@ -2753,12 +2830,9 @@ const RawMemory = {
 		if (typeof value !== "string") throw new Error("Raw memory value is not a string");
 		if (value.length > RAW_MEMORY_MAX_LENGTH) throw new Error("Raw memory length exceeded 2 MB limit");
 		rawMemoryData = value;
-		// 官方 Memory 是 rawMemory 的惰性解析视图: set 之后立即反映新内容
-		try {
-			globalThis.Memory = value ? JSON.parse(value) : {};
-		} catch {
-			globalThis.Memory = {};
-		}
+		// 原始串被替换: 丢弃已解析的对象, 下一次读 Memory 重新解析新内容; 不再读的话保存这段原始串
+		delete RawMemory._parsed;
+		__installLazyMemory();
 	},
 	segments: {},
 	foreignSegment: null,
@@ -2785,6 +2859,10 @@ const RawMemory = {
 		__activeForeignSegment = { username, id: id === undefined ? undefined : __segmentId(id) };
 	},
 };
+// bundle 加载期 (全局代码) 也可能读 Memory: 先装一次惰性访问器
+__installLazyMemory();
+// bundle 加载期 (全局代码) 也可能读 Memory: 先装一次惰性访问器
+__installLazyMemory();
 const InterShardMemory = {
 	getLocal() { return ""; },
 	setLocal() {},
@@ -2929,21 +3007,12 @@ function __runTick() {
 	__intents = [];
 	__intentKeys = new Set();
 	__intentCpu = 0;
+	__controllersClaimedInTick = 0;
 	__consoleLines = [];
 	try {
-		// bot 上一 tick 可能 delete global.Memory: 每 tick 确保访问器存在 (官方由 runtime 重建)
-		if (!Object.getOwnPropertyDescriptor(globalThis, "Memory")) {
-			Object.defineProperty(globalThis, "Memory", {
-				configurable: true,
-				enumerable: true,
-				get() {
-					return __memoryValue;
-				},
-				set(v) {
-					__memoryValue = v;
-				},
-			});
-		}
+		// 每 tick 重建惰性 Memory 访问器 (官方 runtime 每 tick 重新 defineProperty), 清掉上一 tick 的 _parsed
+		delete RawMemory._parsed;
+		__memoryValue = null;
 		// 运行时数据先取 (确定性 CPU 要在 buildGame → makeCpu 取起点之前生效)
 		let rt = {};
 		try {
@@ -2955,13 +3024,10 @@ function __runTick() {
 		// 确定性模式下 Date.now 跟 Game.time 走 (每 tick 3 秒), 不读真实时间
 		Date.now = __virtualCpuStep > 0 ? () => 1600000000000 + (__W ? __W.time : 0) * 3000 : __realDateNow;
 		__W = JSON.parse(__ops.op_sim_get_snapshot());
+		cacheSnapshotTerrain();
 		buildGame();
 		rawMemoryData = __ops.op_sim_get_memory();
-		try {
-			globalThis.Memory = rawMemoryData ? JSON.parse(rawMemoryData) : {};
-		} catch {
-			globalThis.Memory = {};
-		}
+		__installLazyMemory();
 		// 内存段: 宿主注入本 tick 激活的段 (官方 driver 的 data.memorySegments)
 		__nextActiveSegments = null;
 		__publicSegments = null;
@@ -2996,8 +3062,10 @@ function __runTick() {
 	}
 	let memoryOut = "";
 	try {
-		// 官方: 读 rawMemory._parsed (delete global.Memory 只删属性, 底层数据保留并照常保存)
-		memoryOut = JSON.stringify(__memoryValue || {});
+		// 官方: 序列化 RawMemory._parsed (bot 可以把它换成自己的对象, 即 memhack);
+		// 本 tick 没碰过 Memory 时保存原始串 (含 RawMemory.set 写入的)
+		const parsed = RawMemory._parsed;
+		memoryOut = parsed !== undefined && parsed !== null ? JSON.stringify(parsed) : rawMemoryData || "{}";
 	} catch {
 		memoryOut = "{}";
 	}

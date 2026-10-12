@@ -376,11 +376,15 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
     for spec in &scenario.rooms {
         let terrain = build_terrain(spec, seed)?;
         let mut room = crate::engine::world::Room::new(&spec.name, terrain);
-        // 保证关键位置可通行
+        // 显式给定的地形 (rows/raw, 例如从真实服或私服导出) 原样使用, 不开洞;
+        // 只有生成的地形才保证关键位置可通行
+        let keep_terrain = matches!(spec.terrain, Some(TerrainSpec::Rows { .. }) | Some(TerrainSpec::Raw { .. }));
         if let Some(ctrl) = &spec.controller {
             if let Some(pos) = ctrl.pos {
-                room.terrain.set(pos[0] as usize, pos[1] as usize, 0);
-                clear_walls_around(&mut room, pos[0], pos[1]);
+                if !keep_terrain {
+                    room.terrain.set(pos[0] as usize, pos[1] as usize, 0);
+                }
+                clear_walls_around(&mut room, pos[0], pos[1], keep_terrain);
             }
         }
         for st in &spec.structures {
@@ -414,7 +418,7 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
                 for pos in positions {
                     let id = alloc_id(&mut world.next_id);
                     room.objects.insert(id, objects::source(id, pos[0], pos[1], energy));
-                    clear_walls_around(&mut room, pos[0], pos[1]);
+                    clear_walls_around(&mut room, pos[0], pos[1], keep_terrain);
                 }
             }
             Some(SourcesSpec::Auto { count, energy }) => {
@@ -425,7 +429,7 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
                     let id = world.alloc_id();
                     room.objects.insert(id, objects::source(id, pos[0], pos[1], energy));
                     // 保证 source 格可达: 周围开洞
-                    clear_walls_around(&mut room, pos[0], pos[1]);
+                    clear_walls_around(&mut room, pos[0], pos[1], keep_terrain);
                 }
             }
             Some(SourcesSpec::Explicit { positions }) => {
@@ -433,7 +437,7 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
                 for pos in positions {
                     let id = alloc_id(&mut world.next_id);
                     room.objects.insert(id, objects::source(id, pos[0], pos[1], energy));
-                    clear_walls_around(&mut room, pos[0], pos[1]);
+                    clear_walls_around(&mut room, pos[0], pos[1], keep_terrain);
                 }
             }
         }
@@ -443,7 +447,7 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
             let id = world.alloc_id();
             room.objects
                 .insert(id, objects::mineral(id, m.pos[0], m.pos[1], &m.mineral_type, m.amount));
-            clear_walls_around(&mut room, m.pos[0], m.pos[1]);
+            clear_walls_around(&mut room, m.pos[0], m.pos[1], keep_terrain);
         }
 
         // 结构
@@ -544,7 +548,10 @@ fn build_terrain(spec: &RoomSpec, seed: u64) -> Result<Terrain, String> {
 }
 
 /// 清理 (x,y) 周围 3×3 的墙 (保证关键点位可达)
-fn clear_walls_around(room: &mut crate::engine::world::Room, x: u8, y: u8) {
+fn clear_walls_around(room: &mut crate::engine::world::Room, x: u8, y: u8, keep_terrain: bool) {
+    if keep_terrain {
+        return;
+    }
     for dy in -1i32..=1 {
         for dx in -1i32..=1 {
             let nx = x as i32 + dx;

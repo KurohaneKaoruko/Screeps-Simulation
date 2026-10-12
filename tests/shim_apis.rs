@@ -906,3 +906,132 @@ fn rampart_public_and_road_decay_exposed_inner() {
 	let e = entries.iter().find(|(_, n, _)| n == "setPublic").expect("setPublic 意图");
 	assert_eq!(e.2["isPublic"], false, "!!0 → false");
 }
+
+/// reserveController: 自己的保留可以续 (此前 shim 用 !target.my 判断, 第二次起恒返回 ERR_INVALID_TARGET);
+/// reservation 字段名是 ticksToEnd
+#[test]
+fn reserve_controller_renews_own_reservation() {
+	in_tokio(|| {
+		let scenario = Scenario::from_json(
+			r#"{ "name": "r", "seed": 1, "rooms": [{ "name": "W5N8", "terrain": { "kind": "flat" },
+				"controller": { "level": 0, "pos": [28, 27], "mine": false },
+				"creeps": [{ "name": "R", "body": ["claim", "move"], "pos": [27, 27] }] }] }"#,
+		)
+		.unwrap();
+		let mut world = build_world(&scenario).unwrap();
+		let mut movement = Movement::default();
+		let bundle = r#"exports.loop = function() {
+			const c = Game.creeps.R; const ctrl = c.room.controller;
+			console.log(JSON.stringify({ code: c.reserveController(ctrl), res: ctrl.reservation === undefined ? "none" : ctrl.reservation }));
+		};"#;
+		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut memory = String::from("{}");
+		let mut out = Vec::new();
+		for _ in 0..3 {
+			let snapshot = build_snapshot(&world, &SnapshotOptions { cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 }, always_visible: false, include_terrain: true });
+			let r = bot.run_tick(snapshot, memory.clone()).unwrap();
+			memory = r.memory.clone();
+			out.push(serde_json::from_str::<serde_json::Value>(&r.console[0]).unwrap());
+			tick::run_tick(&mut world, &mut movement, &r.intents);
+		}
+		assert_eq!(out[0]["res"], "none", "{out:?}");
+		assert!(out.iter().all(|o| o["code"] == 0), "每 tick 都能续: {out:?}");
+		assert_eq!(out[2]["res"]["username"], "Nexus", "{out:?}");
+		assert!(out[2]["res"]["ticksToEnd"].as_u64().unwrap() >= 1, "ticksToEnd 字段: {out:?}");
+	});
+}
+
+/// Creep API 返回码顺序对齐官方 creeps.js: withdraw / pickup / upgradeController / claimController / cancelOrder / say
+#[test]
+fn creep_api_return_codes_match_official() {
+	in_tokio(|| {
+		let scenario = Scenario::from_json(
+			r#"{ "name": "codes", "seed": 1, "rooms": [
+				{ "name": "W5N8", "terrain": { "kind": "flat" },
+				  "controller": { "level": 2, "pos": [40, 40] },
+				  "structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 }, { "type": "container", "pos": [10, 10] }],
+				  "creeps": [
+					{ "name": "Full", "body": ["carry", "move"], "pos": [30, 30], "store": { "energy": 50 } },
+					{ "name": "Empty", "body": ["carry", "work", "claim", "move"], "pos": [20, 20] },
+					{ "name": "Other", "body": ["carry", "move"], "pos": [21, 20], "store": { "energy": 50 } }
+				  ] },
+				{ "name": "W5N9", "terrain": { "kind": "flat" }, "controller": { "level": 0, "pos": [20, 20], "mine": false } }
+			] }"#,
+		)
+		.unwrap();
+		let world = build_world(&scenario).unwrap();
+		let bundle = r#"exports.loop = function() {
+			const full = Game.creeps.Full, empty = Game.creeps.Empty, other = Game.creeps.Other;
+			const container = empty.room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_CONTAINER } })[0];
+			const spawn = Game.spawns[Object.keys(Game.spawns)[0]];
+			const r = {
+				// 空容器在远处: 官方先查距离 → ERR_NOT_IN_RANGE (此前 shim 先报 ERR_NOT_ENOUGH_RESOURCES)
+				withdrawFarEmpty: empty.withdraw(container, RESOURCE_ENERGY),
+				// 不能从别的 creep 身上 withdraw
+				withdrawCreep: empty.withdraw(other, RESOURCE_ENERGY),
+				// 显式数量超过目标存量
+				withdrawTooMuch: full.withdraw(spawn, RESOURCE_ENERGY, 10),
+				// 满载 creep 远处 pickup: 官方先判满 → ERR_FULL
+				pickupFull: full.pickup(new Resource({ id: "ffff", x: 1, y: 1, roomName: "W5N8", energy: 10, resourceType: "energy" })),
+				say: full.say(123),
+				// 已占 1 房、GCL 1: 官方第一步就是 GCL 检查 → ERR_GCL_NOT_ENOUGH
+				claimGcl: empty.claimController(empty.room.controller),
+				cancelMissing: full.cancelOrder("move"),
+				moveThenCancel: (full.move(TOP), full.cancelOrder("move")),
+			};
+			console.log(JSON.stringify(r));
+		};"#;
+		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let snapshot = build_snapshot(&world, &SnapshotOptions { cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 }, always_visible: false, include_terrain: true });
+		let res = bot.run_tick(snapshot, "{}".to_string()).unwrap();
+		let r: serde_json::Value = serde_json::from_str(res.console.first().map(String::as_str).unwrap_or("{}")).unwrap_or_else(|_| panic!("{:?} {:?}", res.console, res.errors));
+		assert_eq!(r["withdrawFarEmpty"], -9, "{r}");
+		assert_eq!(r["withdrawCreep"], -7, "{r}");
+		assert_eq!(r["withdrawTooMuch"], -9, "距离先于数量: {r}");
+		assert_eq!(r["pickupFull"], -8, "{r}");
+		assert_eq!(r["say"], 0, "{r}");
+		assert_eq!(r["claimGcl"], -15, "{r}");
+		assert_eq!(r["cancelMissing"], -5, "{r}");
+		assert_eq!(r["moveThenCancel"], 0, "{r}");
+		assert!(res.intents.entries.iter().all(|(_, n, _)| n != "move"), "cancelOrder 应撤掉 move 意图");
+	});
+}
+
+/// 回归: 地形只在首个快照携带, shim 曾在「第一次被访问时」才解析 —— bot 第 2 tick 起才读某房地形时
+/// 缓存成全平地且永不更新 (寻路穿墙)。现在收到地形的那一 tick 立即解析全部房间。
+#[test]
+fn terrain_read_after_first_tick_is_correct() {
+	in_tokio(|| {
+		let mut rows = vec!["0".repeat(50); 50];
+		rows[10] = format!("{}1{}", "0".repeat(10), "0".repeat(39));
+		let json = format!(
+			r#"{{ "name": "t", "seed": 1, "rooms": [{{ "name": "W5N8", "terrain": {{ "kind": "rows", "rows": {} }},
+				"controller": {{ "level": 1, "pos": [40, 40] }}, "structures": [{{ "type": "spawn", "pos": [25, 25], "energy": 300 }}] }}] }}"#,
+			serde_json::to_string(&rows).unwrap()
+		);
+		let world = build_world(&Scenario::from_json(&json).unwrap()).unwrap();
+		let bundle = r#"exports.loop = function() {
+			if (Game.time < 1) return;
+			console.log(JSON.stringify({ wall: Game.map.getRoomTerrain("W5N8").get(10, 10), plain: Game.map.getRoomTerrain("W5N8").get(11, 10) }));
+		};"#;
+		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut world = world;
+		let mut memory = String::from("{}");
+		let mut last = String::new();
+		for tick_i in 0..3 {
+			let include = bot.take_terrain_pending();
+			let snapshot = build_snapshot(&world, &SnapshotOptions { cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 }, always_visible: false, include_terrain: include });
+			let r = bot.run_tick(snapshot, memory.clone()).unwrap();
+			memory = r.memory.clone();
+			if let Some(l) = r.console.first() {
+				last = l.clone();
+			}
+			let mut movement = Movement::default();
+			tick::run_tick(&mut world, &mut movement, &r.intents);
+			let _ = tick_i;
+		}
+		let v: serde_json::Value = serde_json::from_str(&last).unwrap_or_else(|_| panic!("无输出: {last}"));
+		assert_eq!(v["wall"], 1, "第 2 tick 起才读的地形也要正确: {v}");
+		assert_eq!(v["plain"], 0, "{v}");
+	});
+}

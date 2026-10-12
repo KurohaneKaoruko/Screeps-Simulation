@@ -123,22 +123,25 @@ fn tick_dropped_energy(world: &mut World, room_name: &str) {
 
 /// Source 再生: 一旦低于容量即挂 300t 计时, 到点整段回满 (不是"清空后计时")
 fn tick_sources(world: &mut World, room_name: &str) {
-    let owned = world.rooms[room_name]
+    // 官方 sources/tick.js: 有主或被保留 → 3000; 中立 → 1500 (能量截到 1500); 没有控制器 (SK 房) → 4000
+    let controller_state = world.rooms[room_name]
         .controller()
-        .map(|c| c.mine)
-        .unwrap_or(false);
+        .map(|c| c.mine || c.enemy || c.reservation_end_time.is_some());
     let tick = world.tick;
     let room = world.rooms.get_mut(room_name).unwrap();
     for obj in room.objects.values_mut() {
         if obj.obj_type != "source" {
             continue;
         }
-        // 自有房间 3000 容量, 中立 1500
-        let capacity = if owned {
-            constants::SOURCE_ENERGY_CAPACITY
-        } else {
-            constants::SOURCE_ENERGY_NEUTRAL_CAPACITY
+        let capacity = match controller_state {
+            Some(true) => constants::SOURCE_ENERGY_CAPACITY,
+            Some(false) => constants::SOURCE_ENERGY_NEUTRAL_CAPACITY,
+            None => constants::SOURCE_ENERGY_KEEPER_CAPACITY,
         };
+        if capacity == constants::SOURCE_ENERGY_NEUTRAL_CAPACITY && obj.energy_capacity != capacity {
+            let e = obj.store.get("energy").copied().unwrap_or(0).min(capacity);
+            obj.store.insert("energy".into(), e);
+        }
         obj.energy_capacity = capacity;
         let energy = obj.store.get("energy").copied().unwrap_or(0);
         if energy < capacity {
@@ -218,12 +221,12 @@ fn tick_creeps(
 
         // 伤害/治疗统一应用 (官方 processor/intents/creeps/tick.js: 在 creep tick 末尾)
         let old_hits = obj.hits;
-        if obj.damage_to_apply > 0 {
-            obj.hits = obj.hits.saturating_sub(obj.damage_to_apply);
+        // 官方: hits -= damage; hits += heal; 截到 hitsMax; <= 0 才死 —— 先扣后加用有符号数,
+        // 同 tick 的治疗救不回已打穿的 (例: 100 血吃 300 伤害 + 150 治疗 → 死)
+        if obj.damage_to_apply > 0 || obj.heal_to_apply > 0 {
+            let h = obj.hits as i64 - obj.damage_to_apply as i64 + obj.heal_to_apply as i64;
+            obj.hits = h.clamp(0, obj.hits_max as i64) as u32;
             obj.damage_to_apply = 0;
-        }
-        if obj.heal_to_apply > 0 {
-            obj.hits = (obj.hits + obj.heal_to_apply).min(obj.hits_max);
             obj.heal_to_apply = 0;
         }
         if obj.hits == 0 {
@@ -346,6 +349,12 @@ fn tick_controllers(world: &mut World, room_name: &str) {
         return;
     };
     let controller = world.rooms.get_mut(room_name).unwrap().objects.get_mut(&controller_id).unwrap();
+    // 官方 controllers/tick.js:10: 保留到期 (gameTime >= endTime-1) 或房间已有主人 → 清除保留
+    if let Some(end) = controller.reservation_end_time {
+        if tick + 1 >= end || controller.mine || controller.enemy {
+            controller.reservation_end_time = None;
+        }
+    }
     if !controller.mine {
         return;
     }

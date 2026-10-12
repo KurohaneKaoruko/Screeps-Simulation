@@ -332,7 +332,7 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             out.push_str(",\"reservation\":");
             match obj.reservation_end_time {
                 Some(end) => {
-                    out.push_str("{\"username\":\"Nexus\",\"ticksToEndTime\":");
+                    out.push_str("{\"username\":\"Nexus\",\"ticksToEnd\":");
                     let _ = write!(out, "{}", end.saturating_sub(world.tick));
                     out.push('}');
                 }
@@ -650,7 +650,7 @@ fn object_json(obj: &Obj, world: &World) -> Value {
                 match obj.reservation_end_time {
                     Some(end) => json!({
                         "username": "Nexus",
-                        "ticksToEndTime": end.saturating_sub(world.tick),
+                        "ticksToEnd": end.saturating_sub(world.tick),
                     }),
                     None => Value::Null,
                 },
