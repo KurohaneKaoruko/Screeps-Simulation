@@ -1,0 +1,3602 @@
+{
+ "name": "bench-midgame",
+ "seed": 42,
+ "ticks": 3000,
+ "cpu": {
+  "limit": 100,
+  "bucket": 10000
+ },
+ "rooms": [
+  {
+   "name": "W5N8",
+   "terrain": {
+    "kind": "flat"
+   },
+   "sources": {
+    "positions": [
+     [
+      18,
+      22
+     ],
+     [
+      32,
+      30
+     ]
+    ]
+   },
+   "mineral": {
+    "pos": [
+     38,
+     38
+    ],
+    "mineral_type": "Z",
+    "amount": 30000
+   },
+   "controller": {
+    "level": 8,
+    "pos": [
+     28,
+     27
+    ],
+    "progress": 100000
+   },
+   "structures": [
+    {
+     "type": "constructedWall",
+     "pos": [
+      20,
+      20
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      20,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      21,
+      20
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      21,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      22,
+      20
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      22,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      23,
+      20
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      23,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      24,
+      20
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      24,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      25,
+      20
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      25,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      26,
+      20
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      26,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      27,
+      20
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      27,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      28,
+      20
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      28,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      29,
+      20
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      29,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      30,
+      20
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      30,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      20,
+      21
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      21,
+      21
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      20,
+      22
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      21,
+      22
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      20,
+      23
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      21,
+      23
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      20,
+      24
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      21,
+      24
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      20,
+      25
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      21,
+      25
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      20,
+      26
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      21,
+      26
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      20,
+      27
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      21,
+      27
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      20,
+      28
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      21,
+      28
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      20,
+      29
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      21,
+      29
+     ]
+    },
+    {
+     "type": "constructedWall",
+     "pos": [
+      20,
+      30
+     ]
+    },
+    {
+     "type": "rampart",
+     "pos": [
+      21,
+      30
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      22,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      25,
+      22
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      23,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      25,
+      23
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      24,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      25,
+      24
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      25,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      25,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      26,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      25,
+      26
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      27,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      25,
+      27
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      28,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      25,
+      28
+     ]
+    },
+    {
+     "type": "spawn",
+     "pos": [
+      24,
+      24
+     ],
+     "energy": 300
+    },
+    {
+     "type": "spawn",
+     "pos": [
+      26,
+      24
+     ],
+     "energy": 300
+    },
+    {
+     "type": "spawn",
+     "pos": [
+      24,
+      26
+     ],
+     "energy": 300
+    },
+    {
+     "type": "extension",
+     "pos": [
+      18,
+      31
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      19,
+      31
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      20,
+      31
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      21,
+      31
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      22,
+      31
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      23,
+      31
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      24,
+      31
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      25,
+      31
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      26,
+      31
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      27,
+      31
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      18,
+      32
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      19,
+      32
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      20,
+      32
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      21,
+      32
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      22,
+      32
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      23,
+      32
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      24,
+      32
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      25,
+      32
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      26,
+      32
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      27,
+      32
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      18,
+      33
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      19,
+      33
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      20,
+      33
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      21,
+      33
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      22,
+      33
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      23,
+      33
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      24,
+      33
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      25,
+      33
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      26,
+      33
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      27,
+      33
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      18,
+      34
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      19,
+      34
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      20,
+      34
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      21,
+      34
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      22,
+      34
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      23,
+      34
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      24,
+      34
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      25,
+      34
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      26,
+      34
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      27,
+      34
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      18,
+      35
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      19,
+      35
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      20,
+      35
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      21,
+      35
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      22,
+      35
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      23,
+      35
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      24,
+      35
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      25,
+      35
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      26,
+      35
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      27,
+      35
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      18,
+      36
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      19,
+      36
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      20,
+      36
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      21,
+      36
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      22,
+      36
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      23,
+      36
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      24,
+      36
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      25,
+      36
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      26,
+      36
+     ],
+     "energy": 200
+    },
+    {
+     "type": "extension",
+     "pos": [
+      27,
+      36
+     ],
+     "energy": 200
+    },
+    {
+     "type": "tower",
+     "pos": [
+      27,
+      27
+     ],
+     "energy": 800
+    },
+    {
+     "type": "tower",
+     "pos": [
+      28,
+      27
+     ],
+     "energy": 800
+    },
+    {
+     "type": "tower",
+     "pos": [
+      29,
+      27
+     ],
+     "energy": 800
+    },
+    {
+     "type": "tower",
+     "pos": [
+      30,
+      27
+     ],
+     "energy": 800
+    },
+    {
+     "type": "tower",
+     "pos": [
+      31,
+      27
+     ],
+     "energy": 800
+    },
+    {
+     "type": "tower",
+     "pos": [
+      32,
+      27
+     ],
+     "energy": 800
+    },
+    {
+     "type": "storage",
+     "pos": [
+      25,
+      24
+     ],
+     "energy": 900000
+    },
+    {
+     "type": "terminal",
+     "pos": [
+      25,
+      26
+     ],
+     "energy": 250000
+    },
+    {
+     "type": "factory",
+     "pos": [
+      26,
+      26
+     ]
+    },
+    {
+     "type": "nuker",
+     "pos": [
+      26,
+      25
+     ]
+    },
+    {
+     "type": "powerSpawn",
+     "pos": [
+      24,
+      25
+     ]
+    },
+    {
+     "type": "observer",
+     "pos": [
+      27,
+      26
+     ]
+    },
+    {
+     "type": "lab",
+     "pos": [
+      28,
+      22
+     ],
+     "energy": 1000
+    },
+    {
+     "type": "lab",
+     "pos": [
+      29,
+      22
+     ],
+     "energy": 1000
+    },
+    {
+     "type": "lab",
+     "pos": [
+      30,
+      22
+     ],
+     "energy": 1000
+    },
+    {
+     "type": "lab",
+     "pos": [
+      28,
+      23
+     ],
+     "energy": 1000
+    },
+    {
+     "type": "lab",
+     "pos": [
+      29,
+      23
+     ],
+     "energy": 1000
+    },
+    {
+     "type": "lab",
+     "pos": [
+      30,
+      23
+     ],
+     "energy": 1000
+    },
+    {
+     "type": "lab",
+     "pos": [
+      28,
+      24
+     ],
+     "energy": 1000
+    },
+    {
+     "type": "lab",
+     "pos": [
+      29,
+      24
+     ],
+     "energy": 1000
+    },
+    {
+     "type": "lab",
+     "pos": [
+      30,
+      24
+     ],
+     "energy": 1000
+    },
+    {
+     "type": "lab",
+     "pos": [
+      28,
+      25
+     ],
+     "energy": 1000
+    },
+    {
+     "type": "link",
+     "pos": [
+      22,
+      28
+     ],
+     "energy": 400
+    },
+    {
+     "type": "link",
+     "pos": [
+      23,
+      28
+     ],
+     "energy": 400
+    },
+    {
+     "type": "link",
+     "pos": [
+      24,
+      28
+     ],
+     "energy": 400
+    },
+    {
+     "type": "link",
+     "pos": [
+      25,
+      28
+     ],
+     "energy": 400
+    },
+    {
+     "type": "link",
+     "pos": [
+      26,
+      28
+     ],
+     "energy": 400
+    },
+    {
+     "type": "link",
+     "pos": [
+      27,
+      28
+     ],
+     "energy": 400
+    },
+    {
+     "type": "container",
+     "pos": [
+      23,
+      29
+     ],
+     "energy": 1500
+    },
+    {
+     "type": "container",
+     "pos": [
+      24,
+      29
+     ],
+     "energy": 1500
+    },
+    {
+     "type": "container",
+     "pos": [
+      25,
+      29
+     ],
+     "energy": 1500
+    },
+    {
+     "type": "container",
+     "pos": [
+      26,
+      29
+     ],
+     "energy": 1500
+    },
+    {
+     "type": "container",
+     "pos": [
+      27,
+      29
+     ],
+     "energy": 1500
+    }
+   ],
+   "creeps": [
+    {
+     "name": "c00",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      22,
+      22
+     ],
+     "store": {
+      "energy": 0
+     }
+    },
+    {
+     "name": "c01",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      23,
+      22
+     ],
+     "store": {
+      "energy": 37
+     }
+    },
+    {
+     "name": "c02",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      24,
+      22
+     ],
+     "store": {
+      "energy": 74
+     }
+    },
+    {
+     "name": "c03",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      25,
+      22
+     ],
+     "store": {
+      "energy": 111
+     }
+    },
+    {
+     "name": "c04",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      26,
+      22
+     ],
+     "store": {
+      "energy": 148
+     }
+    },
+    {
+     "name": "c05",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      27,
+      22
+     ],
+     "store": {
+      "energy": 185
+     }
+    },
+    {
+     "name": "c06",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      28,
+      22
+     ],
+     "store": {
+      "energy": 222
+     }
+    },
+    {
+     "name": "c07",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      29,
+      22
+     ],
+     "store": {
+      "energy": 259
+     }
+    },
+    {
+     "name": "c08",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      22,
+      23
+     ],
+     "store": {
+      "energy": 296
+     }
+    },
+    {
+     "name": "c09",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      23,
+      23
+     ],
+     "store": {
+      "energy": 333
+     }
+    },
+    {
+     "name": "c10",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      24,
+      23
+     ],
+     "store": {
+      "energy": 370
+     }
+    },
+    {
+     "name": "c11",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      25,
+      23
+     ],
+     "store": {
+      "energy": 407
+     }
+    },
+    {
+     "name": "c12",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      26,
+      23
+     ],
+     "store": {
+      "energy": 444
+     }
+    },
+    {
+     "name": "c13",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      27,
+      23
+     ],
+     "store": {
+      "energy": 481
+     }
+    },
+    {
+     "name": "c14",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      28,
+      23
+     ],
+     "store": {
+      "energy": 18
+     }
+    },
+    {
+     "name": "c15",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      29,
+      23
+     ],
+     "store": {
+      "energy": 55
+     }
+    },
+    {
+     "name": "c16",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      22,
+      24
+     ],
+     "store": {
+      "energy": 92
+     }
+    },
+    {
+     "name": "c17",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      23,
+      24
+     ],
+     "store": {
+      "energy": 129
+     }
+    },
+    {
+     "name": "c18",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      24,
+      24
+     ],
+     "store": {
+      "energy": 166
+     }
+    },
+    {
+     "name": "c19",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      25,
+      24
+     ],
+     "store": {
+      "energy": 203
+     }
+    },
+    {
+     "name": "c20",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      26,
+      24
+     ],
+     "store": {
+      "energy": 240
+     }
+    },
+    {
+     "name": "c21",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      27,
+      24
+     ],
+     "store": {
+      "energy": 277
+     }
+    },
+    {
+     "name": "c22",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      28,
+      24
+     ],
+     "store": {
+      "energy": 314
+     }
+    },
+    {
+     "name": "c23",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      29,
+      24
+     ],
+     "store": {
+      "energy": 351
+     }
+    },
+    {
+     "name": "c24",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      22,
+      25
+     ],
+     "store": {
+      "energy": 388
+     }
+    },
+    {
+     "name": "c25",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      23,
+      25
+     ],
+     "store": {
+      "energy": 425
+     }
+    },
+    {
+     "name": "c26",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      24,
+      25
+     ],
+     "store": {
+      "energy": 462
+     }
+    },
+    {
+     "name": "c27",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      25,
+      25
+     ],
+     "store": {
+      "energy": 499
+     }
+    },
+    {
+     "name": "c28",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      26,
+      25
+     ],
+     "store": {
+      "energy": 36
+     }
+    },
+    {
+     "name": "c29",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      27,
+      25
+     ],
+     "store": {
+      "energy": 73
+     }
+    },
+    {
+     "name": "c30",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      28,
+      25
+     ],
+     "store": {
+      "energy": 110
+     }
+    },
+    {
+     "name": "c31",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      29,
+      25
+     ],
+     "store": {
+      "energy": 147
+     }
+    },
+    {
+     "name": "c32",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      22,
+      26
+     ],
+     "store": {
+      "energy": 184
+     }
+    },
+    {
+     "name": "c33",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      23,
+      26
+     ],
+     "store": {
+      "energy": 221
+     }
+    },
+    {
+     "name": "c34",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      24,
+      26
+     ],
+     "store": {
+      "energy": 258
+     }
+    },
+    {
+     "name": "c35",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      25,
+      26
+     ],
+     "store": {
+      "energy": 295
+     }
+    },
+    {
+     "name": "c36",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      26,
+      26
+     ],
+     "store": {
+      "energy": 332
+     }
+    },
+    {
+     "name": "c37",
+     "body": [
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "work",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move"
+     ],
+     "pos": [
+      27,
+      26
+     ],
+     "store": {
+      "energy": 369
+     }
+    },
+    {
+     "name": "c38",
+     "body": [
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "carry",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work"
+     ],
+     "pos": [
+      28,
+      26
+     ],
+     "store": {
+      "energy": 406
+     }
+    },
+    {
+     "name": "c39",
+     "body": [
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "move",
+      "work",
+      "carry"
+     ],
+     "pos": [
+      29,
+      26
+     ],
+     "store": {
+      "energy": 443
+     }
+    }
+   ]
+  },
+  {
+   "name": "W4N8",
+   "terrain": {
+    "kind": "flat"
+   },
+   "sources": {
+    "count": 2,
+    "energy": 3000
+   },
+   "structures": [
+    {
+     "type": "container",
+     "pos": [
+      25,
+      25
+     ],
+     "energy": 800
+    },
+    {
+     "type": "road",
+     "pos": [
+      24,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      26,
+      25
+     ]
+    }
+   ]
+  },
+  {
+   "name": "W5N7",
+   "terrain": {
+    "kind": "flat"
+   },
+   "sources": {
+    "count": 2,
+    "energy": 3000
+   },
+   "structures": [
+    {
+     "type": "container",
+     "pos": [
+      25,
+      25
+     ],
+     "energy": 800
+    },
+    {
+     "type": "road",
+     "pos": [
+      24,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      26,
+      25
+     ]
+    }
+   ]
+  },
+  {
+   "name": "W5N9",
+   "terrain": {
+    "kind": "flat"
+   },
+   "sources": {
+    "count": 2,
+    "energy": 3000
+   },
+   "structures": [
+    {
+     "type": "container",
+     "pos": [
+      25,
+      25
+     ],
+     "energy": 800
+    },
+    {
+     "type": "road",
+     "pos": [
+      24,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      26,
+      25
+     ]
+    }
+   ]
+  },
+  {
+   "name": "W6N8",
+   "terrain": {
+    "kind": "flat"
+   },
+   "sources": {
+    "count": 2,
+    "energy": 3000
+   },
+   "structures": [
+    {
+     "type": "container",
+     "pos": [
+      25,
+      25
+     ],
+     "energy": 800
+    },
+    {
+     "type": "road",
+     "pos": [
+      24,
+      25
+     ]
+    },
+    {
+     "type": "road",
+     "pos": [
+      26,
+      25
+     ]
+    }
+   ]
+  }
+ ],
+ "asserts": [],
+ "description": "基准: 真实规模世界 (192 对象 RCL8 满结构 + 40 单位) 的底噪与满密度意图"
+}
