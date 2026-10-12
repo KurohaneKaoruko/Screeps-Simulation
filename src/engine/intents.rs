@@ -18,7 +18,7 @@ pub const EVENT_REPAIR: u32 = 7;
 pub const EVENT_RESERVE_CONTROLLER: u32 = 8;
 pub const EVENT_UPGRADE_CONTROLLER: u32 = 9;
 pub const EVENT_EXIT: u32 = 10;
-pub const EVENT_TRANSFER: u32 = 11;
+pub const EVENT_TRANSFER: u32 = 12;
 
 /// 官方 `processor/intents/creeps/intents.js` 的 creepActions 执行顺序
 const CREEP_ACTIONS: &[&str] = &[
