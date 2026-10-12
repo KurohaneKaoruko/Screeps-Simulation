@@ -51,7 +51,9 @@
   运行时致命错误会计入错误统计并以退出码 1 结束（不再"带着错误通过断言"）。
 - **JS shim** (`src/js/screeps.js`)：官方 runtime 语义的 API 层 —— 全局常量（对齐官方
   `constants.js`，含 `CONTROLLER_STRUCTURES` / `EVENT_*` / `TOWER_*` / `ROAD_*` 等）、
-  类体系（可被 `Creep.prototype.move` 等原型补丁正常包装）、意图提交与返回码校验、
+  类体系（可被 `Creep.prototype.move` 等原型补丁正常包装；含 `StructureKeeperLair`/`StructurePortal`/
+  `StructurePowerBank`/`StructureInvaderCore` 与旧别名 `Spawn`）、意图提交与返回码校验
+  （含旧 API `createCreep`/`canCreateCreep`，检查顺序按官方与 `spawnCreep` 不同）、
   `Store`（Proxy 实现，只枚举非零资源、缺失资源返回 0）、
   `PathFinder`（多房 A*，CostMatrix 列优先 `x*50+y` / clamp 0..255 / `serialize` 与官方一致）、
   `moveTo`/`findPath`（reusePath=5 缓存、plainCost 2 / swampCost 10 + 结构成本矩阵）、

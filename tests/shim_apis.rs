@@ -1117,3 +1117,124 @@ fn controller_safe_mode_and_props_inner() {
 	let b = world.rooms["W5N7"].controller().unwrap();
 	assert!(!b.mine && b.level == 0, "unclaim 生效");
 }
+
+// ═════════════════════════ 旧 API / 全局类 (官方 createCreep / canCreateCreep / notifyWhenAttacked) ═════════════════════════
+
+/// createCreep/canCreateCreep 的检查顺序 (能量先于 off、名字最后), 成功返回名字并写 Memory;
+/// Spawn 别名与 KeeperLair/Portal/PowerBank/InvaderCore 全局类; notifyWhenAttacked 非布尔 → ERR_INVALID_ARGS
+#[test]
+fn legacy_spawn_api_and_globals() {
+	in_tokio(|| legacy_spawn_api_and_globals_inner());
+}
+
+fn legacy_spawn_api_and_globals_inner() {
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "legacy", "seed": 1,
+		"rooms": [{ "name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 1, "pos": [28, 27] },
+			"structures": [{ "type": "spawn", "pos": [25, 25], "energy": 300 },
+			               { "type": "road", "pos": [10, 10] }],
+			"creeps": [{ "name": "Old", "body": ["move"], "pos": [5, 5] }] }]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let mut movement = Movement::default();
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	let bundle = r#"
+		exports.loop = function() {
+			const s = Game.spawns.Spawn1;
+			const road = s.room.find(FIND_STRUCTURES).find(x => x.structureType === STRUCTURE_ROAD);
+			console.log(JSON.stringify({
+				alias: Spawn === StructureSpawn && s instanceof Spawn,
+				classes: [typeof StructureKeeperLair, typeof StructurePortal, typeof StructurePowerBank, typeof StructureInvaderCore],
+				lairProto: Object.getPrototypeOf(StructureKeeperLair.prototype) === OwnedStructure.prototype,
+				portalProto: Object.getPrototypeOf(StructurePortal.prototype) === Structure.prototype,
+				canBad: s.canCreateCreep(["nope"]),
+				canPoor: s.canCreateCreep(["work", "work", "work", "work"]),
+				canDup: s.canCreateCreep(["move"], "Old"),
+				canLong: s.canCreateCreep(["move"], "x".repeat(101)),
+				canOk: s.canCreateCreep(["move"]),
+				created: s.createCreep(["move"], "Neo", { role: "a" }),
+				dupSameTick: s.createCreep(["move"], "Neo"),
+				hasNeo: !!Game.creeps.Neo && Game.creeps.Neo.spawning,
+				auto: typeof s.canCreateCreep(["move"]),
+				notifyBad: s.notifyWhenAttacked(1),
+				notifyOk: s.notifyWhenAttacked(false),
+				roadBad: road.notifyWhenAttacked("yes"),
+				roadOk: road.notifyWhenAttacked(true),
+				creepBad: Game.creeps.Old.notifyWhenAttacked(0),
+			}));
+		};
+	"#;
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let r = bot.run_tick(snapshot_of(&world), "{}".to_string()).unwrap();
+	let i: serde_json::Value = serde_json::from_str(&r.console[0]).unwrap();
+	assert_eq!(i["alias"], true, "{i}");
+	assert_eq!(i["classes"], serde_json::json!(["function", "function", "function", "function"]), "{i}");
+	assert_eq!(i["lairProto"], true, "{i}");
+	assert_eq!(i["portalProto"], true, "{i}");
+	assert_eq!(i["canBad"], -10, "{i}");
+	assert_eq!(i["canPoor"], -6, "{i}");
+	assert_eq!(i["canDup"], -3, "{i}");
+	assert_eq!(i["canLong"], -10, "{i}");
+	assert_eq!(i["canOk"], 0, "{i}");
+	assert_eq!(i["created"], "Neo", "成功返回名字: {i}");
+	assert_eq!(i["dupSameTick"], -3, "同 tick 重名: {i}");
+	assert_eq!(i["hasNeo"], true, "{i}");
+	assert_eq!(i["notifyBad"], -10, "{i}");
+	assert_eq!(i["notifyOk"], 0, "{i}");
+	assert_eq!(i["roadBad"], -10, "{i}");
+	assert_eq!(i["roadOk"], 0, "{i}");
+	assert_eq!(i["creepBad"], -10, "{i}");
+	let mem: serde_json::Value = serde_json::from_str(&r.memory).unwrap();
+	assert_eq!(mem["creeps"]["Neo"]["role"], "a", "{mem}");
+	let spawns: Vec<_> = r.intents.entries.iter().filter(|(_, n, _)| n == "spawnCreep").collect();
+	assert_eq!(spawns.len(), 1);
+	assert_eq!(spawns[0].2["name"], "Neo");
+	tick::run_tick(&mut world, &mut movement, &r.intents);
+	assert!(world.rooms["W5N8"].objects.values().any(|o| o.name.as_deref() == Some("Neo")), "createCreep 生效");
+}
+
+/// 停用的 spawn: spawnCreep 在能量检查之前、canCreateCreep 在能量检查之后返回 ERR_RCL_NOT_ENOUGH
+#[test]
+fn off_spawn_returns_rcl_not_enough() {
+	in_tokio(|| {
+		let scenario = Scenario::from_json(
+			r#"{
+			"name": "off", "seed": 1,
+			"rooms": [{ "name": "W5N8", "terrain": { "kind": "flat" },
+				"controller": { "level": 1, "pos": [10, 10] },
+				"structures": [{ "type": "spawn", "pos": [12, 12], "energy": 300, "name": "Near" },
+				               { "type": "spawn", "pos": [40, 40], "energy": 0, "name": "Far" }] }]
+		}"#,
+		)
+		.unwrap();
+		let mut world = build_world(&scenario).unwrap();
+		let mut movement = Movement::default();
+		tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+		let bundle = r#"
+			exports.loop = function() {
+				const far = _.find(Game.spawns, s => s.pos.x === 40);
+				console.log(JSON.stringify({
+					active: far.isActive(),
+					spawn: far.spawnCreep(["move"], "X"),
+					spawnPoor: far.spawnCreep(Array(10).fill("work"), "Y"),
+					can: far.canCreateCreep(["move"]),
+					canPoor: far.canCreateCreep(Array(10).fill("work")),
+					create: far.createCreep(["move"]),
+				}));
+			};
+		"#;
+		let (entries, console) = run_once(bundle, &mut world);
+		let i: serde_json::Value = serde_json::from_str(&console[0]).unwrap();
+		assert_eq!(i["active"], false, "{i}");
+		assert_eq!(i["spawn"], -14, "{i}");
+		assert_eq!(i["spawnPoor"], -14, "spawnCreep 先查 off 再查能量: {i}");
+		assert_eq!(i["can"], -14, "{i}");
+		assert_eq!(i["canPoor"], -6, "canCreateCreep 先查能量再查 off: {i}");
+		assert_eq!(i["create"], -14, "{i}");
+		assert!(entries.iter().all(|(_, n, _)| n != "spawnCreep"), "{entries:?}");
+	});
+}

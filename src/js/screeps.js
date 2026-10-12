@@ -1396,7 +1396,12 @@ class Structure extends RoomObject {
 		intent("room", "destroyStructure", { id: this.id, room: room.name });
 		return C.OK;
 	}
-	notifyWhenAttacked() {
+	/** 官方 E/game/structures.js:89-106 (模拟器没有被攻击通知, 只校验参数不发意图) */
+	notifyWhenAttacked(enabled) {
+		if (!this.room) return C.ERR_INVALID_TARGET;
+		const ctrl = this.room.controller;
+		if (this.my === false || (ctrl && ctrl.owner && !ctrl.my)) return C.ERR_NOT_OWNER;
+		if (typeof enabled !== "boolean") return C.ERR_INVALID_ARGS;
 		return C.OK;
 	}
 	toString() {
@@ -1560,6 +1565,12 @@ class StructureSpawn extends OwnedStructure {
 		placeholderCreep(this, name, body);
 		intent(this.id, "spawnCreep", { name, body });
 		return name;
+	}
+	/** 官方 E/game/structures.js:1220-1235: spawn 版本只校验归属与参数类型 */
+	notifyWhenAttacked(enabled) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (typeof enabled !== "boolean") return C.ERR_INVALID_ARGS;
+		return C.OK;
 	}
 	/** 官方 E/game/structures.js:1237-1266 */
 	renewCreep(target) {
@@ -1766,6 +1777,48 @@ class StructureExtractor extends OwnedStructure { constructor(raw) { super(raw);
 class StructureFactory extends OwnedStructure { constructor(raw) { super(raw); this.cooldown = 0; this.level = 0; } produce() { return C.ERR_INVALID_ARGS; } }
 class StructureRoad extends Structure { constructor(raw) { super(raw); this.ticksToDecay = raw.ticksToDecay; this.owner = undefined; this.my = undefined; } }
 class StructureWall extends Structure { constructor(raw) { super(raw); this.owner = undefined; this.my = undefined; } }
+/** 官方 E/game/structures.js:279-291: 永远 my=false, owner 为 Source Keeper */
+class StructureKeeperLair extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.my = false;
+		this.owner = { username: "Source Keeper" };
+		this.ticksToSpawn = raw.ticksToSpawn == null ? undefined : raw.ticksToSpawn;
+	}
+}
+/** 官方 E/game/structures.js:579-592 */
+class StructurePowerBank extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.my = false;
+		this.owner = { username: "Power Bank" };
+		this.power = raw.store ? raw.store.power || 0 : 0;
+		this.ticksToDecay = raw.ticksToDecay == null ? undefined : raw.ticksToDecay;
+	}
+}
+/** 官方 E/game/structures.js:1398-1419: 无主结构, destination 为 RoomPosition 或 {shard, room} */
+class StructurePortal extends Structure {
+	constructor(raw) {
+		super(raw);
+		this.owner = undefined;
+		this.my = undefined;
+		const d = raw.destination;
+		this.destination = !d ? undefined : d.shard ? { shard: d.shard, room: d.room } : new RoomPosition(d.x, d.y, d.room);
+		this.ticksToDecay = raw.ticksToDecay == null ? undefined : raw.ticksToDecay;
+	}
+}
+/** 官方 E/game/structures.js:1474-1490 */
+class StructureInvaderCore extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.level = raw.level || 0;
+		this.spawning = null;
+		this.ticksToDeploy = raw.ticksToDeploy == null ? undefined : raw.ticksToDeploy;
+	}
+	toString() {
+		return `[invaderCore #${this.id}]`;
+	}
+}
 class StructureRampart extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
@@ -1786,14 +1839,14 @@ const STRUCTURE_CLASSES = {
 	road: StructureRoad,
 	constructedWall: StructureWall,
 	rampart: StructureRampart,
-	keeperLair: Structure,
-	portal: Structure,
+	keeperLair: StructureKeeperLair,
+	portal: StructurePortal,
 	controller: StructureController,
 	link: StructureLink,
 	storage: StructureStorage,
 	tower: StructureTower,
 	observer: StructureObserver,
-	powerBank: Structure,
+	powerBank: StructurePowerBank,
 	powerSpawn: StructurePowerSpawn,
 	extractor: StructureExtractor,
 	lab: StructureLab,
@@ -1801,7 +1854,7 @@ const STRUCTURE_CLASSES = {
 	container: StructureContainer,
 	nuker: StructureNuker,
 	factory: StructureFactory,
-	invaderCore: Structure,
+	invaderCore: StructureInvaderCore,
 };
 
 class Flag extends RoomObject {
@@ -2974,11 +3027,14 @@ const GLOBAL_CLASSES = {
 	StructureContainer, StructureTerminal, StructureTower, StructureLink, StructureLab,
 	StructureNuker, StructureObserver, StructurePowerSpawn, StructureExtractor,
 	StructureFactory, StructureRoad, StructureWall, StructureRampart,
+	StructureKeeperLair, StructurePortal, StructurePowerBank, StructureInvaderCore,
 	Ruin, Mineral, Deposit, Nuke, PowerCreep,
 };
 for (const [name, cls] of Object.entries(GLOBAL_CLASSES)) {
 	globalThis[name] = cls;
 }
+// 官方 E/game/structures.js:1293: 旧别名 Spawn === StructureSpawn
+globalThis.Spawn = StructureSpawn;
 // PathFinder 命名空间 + CostMatrix 全局
 globalThis.PathFinder = PathFinder;
 globalThis.CostMatrix = CostMatrix;

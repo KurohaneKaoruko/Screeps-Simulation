@@ -1861,3 +1861,30 @@ fn unclaim_resets_controller() {
 	assert_eq!((c.level, c.progress, c.downgrade_time, c.safe_mode, c.safe_mode_available), (0, 0, None, None, 0));
 	assert_eq!(c.safe_mode_cooldown, Some(t + constants::SAFE_MODE_COOLDOWN));
 }
+
+/// 官方 spawns/create-creep.js: 停用 (超 RCL 上限) 或非我方的 spawn 不处理 spawnCreep 意图
+#[test]
+fn spawn_creep_intent_ignored_on_off_or_foreign_spawn() {
+	let json = r#"{
+		"name": "t", "seed": 1,
+		"rooms": [{
+			"name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 1, "pos": [10, 10] },
+			"structures": [
+				{ "type": "spawn", "pos": [40, 40], "energy": 300 },
+				{ "type": "spawn", "pos": [12, 12], "energy": 300 }
+			]
+		}]
+	}"#;
+	let (mut world, mut movement) = setup(json);
+	let spawn_at = |w: &World, x: u8| w.rooms["W5N8"].objects.values().find(|o| o.obj_type == "spawn" && o.x == x).unwrap().id;
+	let far = spawn_at(&world, 40);
+	let near = spawn_at(&world, 12);
+	assert!(world.rooms["W5N8"].objects[&far].off);
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(far, "spawnCreep", r#"{"name":"A","body":["move"]}"#));
+	assert!(creep_named(&world, "A").is_none(), "停用 spawn 不孵化");
+	assert!(world.rooms["W5N8"].objects[&far].spawn_job.is_none());
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&near).unwrap().mine = false;
+	tick::run_tick(&mut world, &mut movement, &spawn_intent(near, "spawnCreep", r#"{"name":"B","body":["move"]}"#));
+	assert!(creep_named(&world, "B").is_none(), "非我方 spawn 不孵化");
+}
