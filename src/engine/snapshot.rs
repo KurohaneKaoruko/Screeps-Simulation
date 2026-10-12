@@ -274,7 +274,13 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             out.push_str(",\"hitsMax\":");
             let _ = write!(out, "{}", obj.hits_max);
             if obj.obj_type == "rampart" {
-                out.push_str(",\"isPublic\":false");
+                out.push_str(",\"my\":");
+                let _ = write!(out, "{}", obj.mine);
+                out.push_str(",\"isPublic\":");
+                let _ = write!(out, "{}", obj.is_public);
+            }
+            // 官方 StructureRoad / StructureRampart.ticksToDecay
+            if obj.obj_type == "rampart" || obj.obj_type == "road" {
                 if let Some(t) = obj.next_decay_time {
                     out.push_str(",\"ticksToDecay\":");
                     let _ = write!(out, "{}", t.saturating_sub(world.tick));
@@ -588,7 +594,10 @@ fn object_json(obj: &Obj, world: &World) -> Value {
             extra.insert("hits".into(), json!(obj.hits));
             extra.insert("hitsMax".into(), json!(obj.hits_max));
             if obj.obj_type == "rampart" {
-                extra.insert("isPublic".into(), json!(false));
+                extra.insert("my".into(), json!(obj.mine));
+                extra.insert("isPublic".into(), json!(obj.is_public));
+            }
+            if obj.obj_type == "rampart" || obj.obj_type == "road" {
                 if let Some(t) = obj.next_decay_time {
                     extra.insert("ticksToDecay".into(), json!(t.saturating_sub(world.tick)));
                 }

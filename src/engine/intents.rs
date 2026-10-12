@@ -1177,6 +1177,15 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     .saturating_sub(constants::TOWER_ENERGY_COST);
                 tower.store.insert("energy".into(), e);
             }
+            ("rampart", "setPublic") => {
+                // 官方 ramparts/set-public.js
+                let is_public = data.get("isPublic").map(truthy).unwrap_or(false);
+                if let Some(r) = room.objects.get_mut(&id) {
+                    if r.mine {
+                        r.is_public = is_public;
+                    }
+                }
+            }
             ("link", "transferEnergy") => {
                 let Some(target_id) = id_of(data, "id") else { continue };
                 let amount_req = data.get("amount").and_then(Value::as_u64).unwrap_or(0) as u32;
@@ -1341,6 +1350,17 @@ fn dir_offset(dir: i32) -> Option<(i32, i32)> {
         7 => Some((-1, 0)),
         8 => Some((-1, -1)),
         _ => None,
+    }
+}
+
+/// JS 真值语义 (`!!value`)
+fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().map(|f| f != 0.0 && !f.is_nan()).unwrap_or(false),
+        Value::String(s) => !s.is_empty(),
+        _ => true,
     }
 }
 

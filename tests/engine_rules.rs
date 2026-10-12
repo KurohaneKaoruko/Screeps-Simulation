@@ -1663,3 +1663,58 @@ fn destroy_spawning_spawn_removes_creep() {
 	assert!(creep_named(&world, "Kid").is_none(), "孵化中的 creep 随 spawn 一起消失");
 	assert!(world.rooms["W5N8"].objects.values().any(|o| o.obj_type == "ruin"));
 }
+
+// ═════════════════════════ rampart / container / road 细节 (官方 ramparts/tick.js, containers/tick.js) ═════════════════════════
+
+/// rampart hitsMax 每 tick 刷新 (不等衰减到期); 与控制器不同归属 → 0
+#[test]
+fn rampart_hits_max_refreshes_every_tick() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let id = add_structure(&mut world, "W5N8", "rampart", 10, 10);
+	{
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&id).unwrap();
+		o.hits = 5000;
+		o.hits_max = 0;
+		o.next_decay_time = Some(50);
+	}
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(world.rooms["W5N8"].objects[&id].hits_max, constants::rampart_hits_max(3), "未到衰减点也刷新");
+	assert_eq!(world.rooms["W5N8"].objects[&id].hits, 5000, "未到衰减点不掉血");
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 5;
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(world.rooms["W5N8"].objects[&id].hits_max, constants::rampart_hits_max(5));
+	mark_enemy(&mut world, id);
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(world.rooms["W5N8"].objects[&id].hits_max, 0, "敌方 rampart 在我方控制器房间 hitsMax=0");
+}
+
+/// rampart.setPublic 意图写入 isPublic 并持久
+#[test]
+fn rampart_set_public_persists() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let id = add_structure(&mut world, "W5N8", "rampart", 10, 10);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&id).unwrap().hits = 5000;
+	let set = |v: &str| IntentList::parse(&format!(r#"[{{"o":"{id:024x}","n":"setPublic","d":{{"isPublic":{v}}}}}]"#));
+	tick::run_tick(&mut world, &mut movement, &set("true"));
+	assert!(world.rooms["W5N8"].objects[&id].is_public);
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert!(world.rooms["W5N8"].objects[&id].is_public, "跨 tick 保留");
+	tick::run_tick(&mut world, &mut movement, &set("false"));
+	assert!(!world.rooms["W5N8"].objects[&id].is_public);
+}
+
+/// 官方 containers/tick.js: 控制器 level > 0 (不论归属) → 衰减周期 500
+#[test]
+fn container_decay_interval_uses_controller_level_only() {
+	let (mut world, mut movement) = setup(RCL3_ROOM);
+	let id = add_structure(&mut world, "W5N8", "container", 10, 10);
+	{
+		let room = world.rooms.get_mut("W5N8").unwrap();
+		let o = room.objects.get_mut(&id).unwrap();
+		o.mine = false;
+		o.next_decay_time = Some(0);
+		room.controller_mut().unwrap().mine = false; // 别人的 3 级控制器
+	}
+	tick::run_tick(&mut world, &mut movement, &IntentList { entries: vec![] });
+	assert_eq!(world.rooms["W5N8"].objects[&id].next_decay_time, Some(500));
+}

@@ -397,11 +397,10 @@ fn controller_levels(level: u8) -> u32 {
 /// 道路/容器/rampart 衰减
 fn tick_decay_structures(world: &mut World, room_name: &str) {
     let tick = world.tick;
-    let owned = world.rooms[room_name]
-        .controller()
-        .map(|c| c.mine && c.level > 0)
-        .unwrap_or(false);
-    let rcl = world.rooms[room_name].rcl();
+    // 官方 containers/tick.js: 只看 roomController.level > 0 (不论归属) 决定 500t / 100t 衰减周期
+    let ctrl_leveled = world.rooms[room_name].controller().map(|c| c.level > 0).unwrap_or(false);
+    // 官方 ramparts/tick.js: (控制器归属, 等级); 无控制器时不改 hitsMax
+    let ctrl_info = world.rooms[room_name].controller().map(|c| (c.mine, c.enemy, c.level));
     let ids: Vec<u64> = world.rooms[room_name]
         .objects
         .values()
@@ -411,6 +410,17 @@ fn tick_decay_structures(world: &mut World, room_name: &str) {
     for id in ids {
         let room = world.rooms.get_mut(room_name).unwrap();
         let Some(obj) = room.objects.get_mut(&id) else { continue };
+        // 官方 ramparts/tick.js:19-24: 每 tick 先刷新 hitsMax (在衰减判定之前);
+        // rampart 与控制器不同归属 → 0
+        if obj.obj_type == "rampart" {
+            if let Some((c_mine, c_enemy, level)) = ctrl_info {
+                obj.hits_max = if obj.mine == c_mine && obj.enemy == c_enemy {
+                    constants::rampart_hits_max(level)
+                } else {
+                    0
+                };
+            }
+        }
         let due = obj
             .next_decay_time
             .map(|t| tick >= t.saturating_sub(1))
@@ -429,11 +439,8 @@ fn tick_decay_structures(world: &mut World, room_name: &str) {
                 }
                 amount
             }
-            "rampart" => {
-                // 官方 ramparts/tick.js:19-40: 每 100t 减 300, hitsMax 按 RCL
-                obj.hits_max = constants::rampart_hits_max(rcl);
-                constants::RAMPART_DECAY_AMOUNT
-            }
+            // 官方 ramparts/tick.js:26-40: 每 100t 减 300
+            "rampart" => constants::RAMPART_DECAY_AMOUNT,
             _ => constants::CONTAINER_DECAY,
         };
         obj.hits = obj.hits.saturating_sub(decay_amount);
@@ -452,7 +459,7 @@ fn tick_decay_structures(world: &mut World, room_name: &str) {
             let interval = match obj.obj_type.as_str() {
                 "road" => constants::ROAD_DECAY_TIME,
                 "rampart" => constants::RAMPART_DECAY_TIME,
-                _ if owned => constants::CONTAINER_DECAY_TIME_OWNED,
+                _ if ctrl_leveled => constants::CONTAINER_DECAY_TIME_OWNED,
                 _ => constants::CONTAINER_DECAY_TIME,
             };
             obj.next_decay_time = Some(tick + interval);

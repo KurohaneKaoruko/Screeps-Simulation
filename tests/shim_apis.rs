@@ -856,3 +856,53 @@ fn destroy_and_ruin_object_inner() {
 	assert_eq!(r["owned"], false);
 	assert_eq!(r["isStructure"], true);
 }
+
+// ═════════════════════════ rampart / road 属性 ═════════════════════════
+
+/// rampart.isPublic 来自快照、setPublic 提交意图; road.ticksToDecay 不再被强制为 undefined
+#[test]
+fn rampart_public_and_road_decay_exposed() {
+	in_tokio(|| rampart_public_and_road_decay_exposed_inner());
+}
+
+fn rampart_public_and_road_decay_exposed_inner() {
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "rampart", "seed": 1,
+		"rooms": [{ "name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 3, "pos": [28, 27] },
+			"structures": [
+				{ "type": "spawn", "pos": [25, 25], "energy": 300 },
+				{ "type": "rampart", "pos": [20, 20], "hits": 5000 },
+				{ "type": "road", "pos": [10, 10] }
+			] }]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	for o in world.rooms.get_mut("W5N8").unwrap().objects.values_mut() {
+		if o.obj_type == "rampart" {
+			o.is_public = true;
+		}
+	}
+	let bundle = r#"
+		exports.loop = function() {
+			const room = Game.rooms.W5N8;
+			const rampart = room.find(FIND_MY_STRUCTURES, { filter: { structureType: STRUCTURE_RAMPART } })[0];
+			const road = room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_ROAD } })[0];
+			console.log(JSON.stringify({
+				isPublic: rampart.isPublic, my: rampart.my, roadTtd: road.ticksToDecay, rampartTtd: rampart.ticksToDecay,
+				set: rampart.setPublic(0),
+			}));
+		};
+	"#;
+	let (entries, console) = run_once(bundle, &mut world);
+	let info: serde_json::Value = serde_json::from_str(&console[0]).unwrap();
+	assert_eq!(info["isPublic"], true, "{info}");
+	assert_eq!(info["my"], true, "{info}");
+	assert_eq!(info["roadTtd"], 1000, "{info}");
+	assert_eq!(info["rampartTtd"], 100, "{info}");
+	assert_eq!(info["set"], 0, "{info}");
+	let e = entries.iter().find(|(_, n, _)| n == "setPublic").expect("setPublic 意图");
+	assert_eq!(e.2["isPublic"], false, "!!0 → false");
+}

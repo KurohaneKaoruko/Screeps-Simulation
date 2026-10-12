@@ -1676,15 +1676,20 @@ class StructureObserver extends OwnedStructure { observeRoom() { return C.ERR_IN
 class StructurePowerSpawn extends OwnedStructure { processPower() { return C.ERR_NOT_ENOUGH_RESOURCES; } }
 class StructureExtractor extends OwnedStructure { constructor(raw) { super(raw); this.cooldown = 0; } }
 class StructureFactory extends OwnedStructure { constructor(raw) { super(raw); this.cooldown = 0; this.level = 0; } produce() { return C.ERR_INVALID_ARGS; } }
-class StructureRoad extends Structure { constructor(raw) { super(raw); this.ticksToDecay = undefined; this.owner = undefined; this.my = undefined; } }
+class StructureRoad extends Structure { constructor(raw) { super(raw); this.ticksToDecay = raw.ticksToDecay; this.owner = undefined; this.my = undefined; } }
 class StructureWall extends Structure { constructor(raw) { super(raw); this.owner = undefined; this.my = undefined; } }
 class StructureRampart extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
-		this.isPublic = false;
+		this.isPublic = !!raw.isPublic;
 		this.ticksToDecay = raw.ticksToDecay;
 	}
-	setPublic() { return C.OK; }
+	/** 官方 E/game/structures.js:651-657 */
+	setPublic(isPublic) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		intent(this.id, "setPublic", { isPublic: !!isPublic });
+		return C.OK;
+	}
 }
 
 const STRUCTURE_CLASSES = {
