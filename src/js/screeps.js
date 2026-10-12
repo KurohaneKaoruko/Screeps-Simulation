@@ -2494,8 +2494,17 @@ function makeMap() {
 
 const __ops = globalThis.Deno && globalThis.Deno.core ? globalThis.Deno.core.ops : null;
 const runtimeStart = __ops && __ops.op_sim_now ? __ops.op_sim_now() : 0;
+// 确定性 CPU (场景 cpu.deterministic / --deterministic-cpu): 不读墙钟, 每次取时间推进固定步长,
+// Game.cpu.getUsed() 与本 tick cpuUsed 只由调用次数和意图数决定 → 同一场景每次运行逐位一致。
+let __virtualCpuStep = 0;
+let __virtualClock = 0;
+const __realDateNow = Date.now;
 function nowMs() {
-	return __ops && __ops.op_sim_now ? __ops.op_sim_now() - runtimeStart : Date.now() - runtimeStart;
+	if (__virtualCpuStep > 0) {
+		__virtualClock += __virtualCpuStep;
+		return __virtualClock;
+	}
+	return __ops && __ops.op_sim_now ? __ops.op_sim_now() - runtimeStart : __realDateNow() - runtimeStart;
 }
 
 /** 可复现实验: Math.random 换 mulberry32 */
@@ -2728,6 +2737,16 @@ function __runTick() {
 				},
 			});
 		}
+		// 运行时数据先取 (确定性 CPU 要在 buildGame → makeCpu 取起点之前生效)
+		let rt = {};
+		try {
+			rt = JSON.parse((__ops.op_sim_get_runtime && __ops.op_sim_get_runtime()) || "{}");
+		} catch {
+			rt = {};
+		}
+		__virtualCpuStep = +rt.virtualCpuStep || 0;
+		// 确定性模式下 Date.now 跟 Game.time 走 (每 tick 3 秒), 不读真实时间
+		Date.now = __virtualCpuStep > 0 ? () => 1600000000000 + (__W ? __W.time : 0) * 3000 : __realDateNow;
 		__W = JSON.parse(__ops.op_sim_get_snapshot());
 		buildGame();
 		rawMemoryData = __ops.op_sim_get_memory();
@@ -2743,7 +2762,6 @@ function __runTick() {
 		__activeForeignSegment = null;
 		RawMemory.segments = {};
 		try {
-			const rt = JSON.parse((__ops.op_sim_get_runtime && __ops.op_sim_get_runtime()) || "{}");
 			__activeSegments = rt.activeSegments || [];
 			for (const id of __activeSegments) {
 				RawMemory.segments[id] = (rt.segments || {})[id] || "";

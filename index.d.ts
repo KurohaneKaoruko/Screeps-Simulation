@@ -99,6 +99,11 @@ export interface CpuSpec {
 	tickLimit?: number
 	/** 超过 tickLimit 时强制中断当 tick (默认仅计量) */
 	enforce?: boolean
+	/** 确定性 CPU: Game.cpu.getUsed() 不读墙钟 (每次取时间推进 deterministicStep 毫秒 + 意图 0.2), Date.now 跟 Game.time 走;
+	 *  同一场景每次运行逐位一致, bot 按 CPU 做决策时也能做 A/B 对比。CLI 等价开关 --deterministic-cpu */
+	deterministic?: boolean
+	/** 确定性模式下每次取时间推进的毫秒数, 默认 0.01 */
+	deterministicStep?: number
 }
 
 export interface SimScenario {

@@ -62,6 +62,7 @@ async fn async_main() {
     let mut dump_memory_path: Option<String> = None;
     let mut render_room: Option<String> = None;
     let mut seed_random = true;
+    let mut deterministic_cpu = false;
     // 意图录制/回放 (P1-3): 录制 = 每 tick 意图落盘 JSONL; 回放 = 纯引擎重放, 零 JS
     let mut record_intents_path: Option<String> = None;
     let mut replay_path: Option<String> = None;
@@ -107,6 +108,10 @@ async fn async_main() {
             }
             "--no-seed-random" => {
                 seed_random = false;
+                i += 1;
+            }
+            "--deterministic-cpu" => {
+                deterministic_cpu = true;
                 i += 1;
             }
             "--record-intents" => {
@@ -214,7 +219,13 @@ async fn async_main() {
     let mut bot = if replaying {
         None
     } else {
-        Some(BotRuntime::new(&bundle, seed).unwrap_or_else(|e| panic!("{e}")))
+        let mut rt = BotRuntime::new(&bundle, seed).unwrap_or_else(|e| panic!("{e}"));
+        // 确定性 CPU: 场景 cpu.deterministic 或 --deterministic-cpu
+        let step = scenario.cpu_virtual_step().or(if deterministic_cpu { Some(0.01) } else { None });
+        if let Some(step) = step {
+            rt.set_virtual_cpu_step(step);
+        }
+        Some(rt)
     };
     let mut replay_reader = replay_path.as_ref().map(|p| {
         std::io::BufReader::new(

@@ -71,7 +71,7 @@
 | 战斗（近似完成） | 近战/远程/群体攻击、治疗、拆除、claim/reserve/sign/attackController 已对齐官方语义（含 hit-back、rampart 重定向、部件从头损坏、伤害 tick 末统一应用、意图互斥表）；未覆盖：Power 效果（`PWR_FORTIFY` 等护盾）、safeMode 拦截、nuker |
 | 地形生成 | `generated` 为噪声近似，不复刻官方地形算法；可用 `rows`/`raw` 显式给定真实地形 |
 | 事件日志结构 | 已实现 `EVENT_HARVEST/BUILD/REPAIR/UPGRADE_CONTROLLER/TRANSFER/OBJECT_DESTROYED/EXIT/ATTACK/HEAL/ATTACK_CONTROLLER/RESERVE_CONTROLLER`；`objectId` 取发起动作的对象，目标 id 放在 `data.targetId`/`data.sourceId` |
-| CPU 墙钟耗时 | `usedTime` 只计 `loop()` 墙钟 + 意图计价，不含 Memory 解析/序列化；跨机器不可复现（P95 断言请留足余量） |
+| CPU 墙钟耗时 | `usedTime` 只计 `loop()` 墙钟 + 意图计价，不含 Memory 解析/序列化；跨机器不可复现（P95 断言请留足余量）。bot 按 `getUsed()` 做决策时每次运行结果会不同，需要逐位复现（A/B 对比）时打开 `cpu.deterministic` |
 | CPU 中断的意图 | 看门狗中断后该 tick 的意图全部丢弃（官方 runtime 的 `intentsList` 只在 `game.run()` 正常返回后回传），仅保留中断前已刷出的 `console` 输出便于排查 |
 | 全局重置触发条件 | 官方按 isolate 堆占用触发；这里用场景的 `globalResetEvery` 固定周期模拟（语义一致：全局变量丢失、Memory 保留） |
 | 内存段校验失败的后果 | 官方在 tick 末尾 `throw` 使整个 tick 结果作废；这里改为记入 `errors` 并丢弃该次段写入，其余 tick 结果照常提交 |
@@ -271,6 +271,7 @@ CLI 选项：
 | `-v, --verbose` | 打印全部 `console.log` |
 | `--dump-memory <path>` | 落盘最终 Memory |
 | `--render-terrain <room>` | 打印指定房间的 ASCII 地形与墙/沼泽占比 |
+| `--deterministic-cpu` | 确定性 CPU (等价场景 `cpu.deterministic: true`): bot 读到的 CPU 只由调用次数和意图数决定, 两次运行状态哈希一致 |
 | `--no-seed-random` | 关闭 `Math.random` 播种（默认播种，seed 取自场景 `seed`） |
 
 ### V8 预编译库下载失败时
@@ -308,7 +309,9 @@ cargo build --release
     "limit": 100,             // 每 tick CPU 上限 (ms)
     "bucket": 10000,          // 初始 bucket
     "tick_limit": 500,        // 覆盖 tickLimit; 默认按官方公式 min(500, max(0, bucket) + limit) 逐 tick 计算
-    "enforce": false          // true 时超 tickLimit 由看门狗强制中断当 tick (默认仅计量)
+    "enforce": false,         // true 时超 tickLimit 由看门狗强制中断当 tick (默认仅计量)
+    "deterministic": false,   // true: getUsed() 不读墙钟 (每次取时间 +0.01ms, 意图另计 0.2), 同场景每次运行逐位一致
+    "deterministicStep": 0.01 // 确定性模式的时间步长 (毫秒/次)
   },
   "globalResetEvery": 0,      // >0 时每 N tick 重建 isolate 做一次全局重置; 省略/0 表示不重置
   "always_visible": false,    // 调试: 全房间常可见

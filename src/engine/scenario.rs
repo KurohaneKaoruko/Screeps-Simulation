@@ -146,6 +146,12 @@ pub struct CpuSpec {
     /// 超过 tickLimit 时是否中断当 tick (默认仅计量)
     #[serde(default)]
     pub enforce: bool,
+    /// 确定性 CPU: bot 读到的 CPU 不来自墙钟, 同一场景每次运行逐位一致 (A/B 对比用)
+    #[serde(default)]
+    pub deterministic: bool,
+    /// 确定性模式下每次取时间推进的毫秒数 (默认 0.01; 意图另按官方 0.2 计价)
+    #[serde(default, alias = "deterministicStep")]
+    pub deterministic_step: Option<f64>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -319,6 +325,15 @@ impl Scenario {
         self.cpu_tick_limit_override().unwrap_or_else(|| {
             crate::engine::cpu::CpuState::new(self.cpu_limit(), self.cpu_bucket()).tick_limit()
         })
+    }
+
+    /// 确定性 CPU 的时间步长 (None = 用墙钟)
+    pub fn cpu_virtual_step(&self) -> Option<f64> {
+        let c = self.cpu.as_ref()?;
+        if !c.deterministic {
+            return None;
+        }
+        Some(c.deterministic_step.unwrap_or(0.01))
     }
 
     pub fn cpu_enforce(&self) -> bool {
