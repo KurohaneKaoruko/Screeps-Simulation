@@ -719,12 +719,39 @@ function storeSum(target) {
 	return sum;
 }
 
+/** 官方 utils.capacityForResource: 专用格 (storeCapacityResource) 优先, 否则是总容量减去专用格之和 */
+function capacityForResource(meta, resource) {
+	if (meta.capacities && meta.capacities[resource]) return meta.capacities[resource];
+	let reserved = 0;
+	if (meta.capacities) for (const k in meta.capacities) reserved += meta.capacities[k];
+	return Math.max(0, (meta.capacity || 0) - reserved);
+}
+
+/** 官方 E/game/store.js getCapacity: 专用仓不传资源返回 null, 容量为 0 也返回 null */
 function storeCapacityOf(target, resource) {
 	const meta = storeMeta.get(target);
-	if (!meta) return 0;
-	if (resource === undefined || resource === null) return meta.capacity;
-	if (meta.capacities) return meta.capacities[resource] || 0;
-	return meta.capacity;
+	if (!meta) return null;
+	if (!resource) return meta.capacities ? null : meta.capacity || null;
+	return capacityForResource(meta, resource) || null;
+}
+
+function storeUsedOf(target, resource) {
+	const meta = storeMeta.get(target) || {};
+	if (!resource) {
+		if (meta.capacities && capacityForResource(meta, resource) === 0) return null;
+		return storeSum(target);
+	}
+	return target[resource] || (meta.capacities && capacityForResource(meta, resource) === 0 ? null : 0);
+}
+
+function storeFreeOf(target, resource) {
+	const meta = storeMeta.get(target) || {};
+	if (capacityForResource(meta, resource) === 0) return null;
+	if (!meta.capacity) return storeCapacityOf(target, resource) - storeUsedOf(target, resource);
+	const capacity = storeCapacityOf(target, resource);
+	if (!capacity) return null;
+	if (meta.capacities) return capacity - storeUsedOf(target, resource);
+	return capacity - storeSum(target);
 }
 
 const storeHandler = {
@@ -733,12 +760,9 @@ const storeHandler = {
 			case "getCapacity":
 				return (resource) => storeCapacityOf(target, resource);
 			case "getUsedCapacity":
-				return (resource) => {
-					if (resource === undefined || resource === null) return storeSum(target);
-					return target[resource] || 0;
-				};
+				return (resource) => storeUsedOf(target, resource);
 			case "getFreeCapacity":
-				return (resource) => storeCapacityOf(target, resource) - (resource === undefined || resource === null ? storeSum(target) : (target[resource] || 0));
+				return (resource) => storeFreeOf(target, resource);
 			case "toJSON":
 				return () => Object.assign({}, target);
 			default:
@@ -933,21 +957,31 @@ class Creep extends RoomObject {
 		intent(this.id, "harvest", { id: target.id });
 		return C.OK;
 	}
-	/** 官方 E/game/creeps.js:428-500 的返回码顺序 */
+	/** 官方 E/game/creeps.js:428-490 的返回码顺序 */
 	transfer(target, resourceType, amount) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
+		if (amount < 0) return C.ERR_INVALID_ARGS;
 		if (!C.RESOURCES_ALL.includes(resourceType)) return C.ERR_INVALID_ARGS;
-		if (amount !== undefined && amount < 0) return C.ERR_INVALID_ARGS;
-		if (!target || !target.id || target.spawning) return C.ERR_INVALID_TARGET;
+		// 官方只拒绝「正在孵化的 creep」; 正在孵化的 spawn (spawning 为 Spawning 对象) 照样能收货
+		if (!target || !target.id || (target instanceof Creep && target.spawning)) return C.ERR_INVALID_TARGET;
 		if (!(target instanceof Creep) && !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
-		const store = this.store;
-		if (!store[resourceType]) return C.ERR_NOT_ENOUGH_RESOURCES;
-		if (amount === undefined) amount = store[resourceType];
-		// 官方: 数量超过持有量返回错误而不是截断
-		if (amount > store[resourceType]) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (target instanceof StructureController) {
+			if (resourceType === C.RESOURCE_ENERGY) return this.upgradeController(target);
+			return C.ERR_INVALID_TARGET;
+		}
+		if (!target.store) return C.ERR_INVALID_TARGET;
+		const capacity = target.store.getCapacity(resourceType);
+		if (!capacity) return C.ERR_INVALID_TARGET;
 		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
-		if (target.store && target.store.getFreeCapacity(resourceType) <= 0) return C.ERR_FULL;
+		const have = this.store[resourceType];
+		if (!have) return C.ERR_NOT_ENOUGH_RESOURCES;
+		// 单资源仓 (spawn/extension/tower/lab…) 按该资源计, 通用仓 (creep/container/storage) 按总量计
+		const stored = target.store.getCapacity() === null ? target.store[resourceType] : target.store.getUsedCapacity();
+		if (stored >= capacity) return C.ERR_FULL;
+		if (!amount) amount = Math.min(have, capacity - stored);
+		if (have < amount) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (amount + stored > capacity) return C.ERR_FULL;
 		intent(this.id, "transfer", { id: target.id, resourceType, amount });
 		return C.OK;
 	}
@@ -1195,6 +1229,28 @@ class Tombstone extends RoomObject {
 	}
 }
 
+/**
+ * 官方各建筑的 store 形状 (storeCapacity / storeCapacityResource), 决定 getCapacity()/getFreeCapacity() 的语义:
+ * 只存能量的建筑是专用仓 (不传资源时 getCapacity() 为 null), container/storage/terminal/factory 是通用仓。
+ */
+function structureStoreShape(type, cap) {
+	switch (type) {
+		case "spawn":
+		case "extension":
+		case "tower":
+		case "link":
+			return [null, { energy: cap }];
+		case "lab":
+			return [C.LAB_MINERAL_CAPACITY + C.LAB_ENERGY_CAPACITY, { energy: C.LAB_ENERGY_CAPACITY }];
+		case "powerSpawn":
+			return [null, { energy: C.POWER_SPAWN_ENERGY_CAPACITY, power: C.POWER_SPAWN_POWER_CAPACITY }];
+		case "nuker":
+			return [null, { energy: C.NUKER_ENERGY_CAPACITY, G: C.NUKER_GHODIUM_CAPACITY }];
+		default:
+			return [cap, null];
+	}
+}
+
 class Structure extends RoomObject {
 	constructor(raw) {
 		super(raw);
@@ -1208,7 +1264,10 @@ class Structure extends RoomObject {
 		this.__off = !!raw.off;
 	}
 	get store() {
-		if (!this.__storeObj && this.__storeRaw) this.__storeObj = makeStore(this.__storeRaw, this.__storeCap, null);
+		if (!this.__storeObj && this.__storeRaw) {
+			const [cap, caps] = structureStoreShape(this.structureType, this.__storeCap);
+			this.__storeObj = makeStore(this.__storeRaw, cap, caps);
+		}
 		return this.__storeObj;
 	}
 	/** 官方 isActive(): 超出 RCL 上限被停用的 spawn/extension 返回 false */

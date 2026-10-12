@@ -424,3 +424,90 @@ fn loop_exception_keeps_intents_and_memory_inner() {
 	assert_eq!(world.rooms["W5N8"].objects[&id].x, 26, "已登记意图应真实生效");
 }
 
+
+// ═════════════════════════ 转移: 正在孵化的 spawn 仍可收货 ═════════════════════════
+
+/// 回归: shim 曾把 `target.spawning` 当成「目标是正在孵化的 creep」, 而 spawn 孵化时 `spawning` 是
+/// Spawning 对象 (truthy), 导致孵化期间所有 transfer(spawn) 返回 ERR_INVALID_TARGET。
+/// 官方 creeps.js:445 只拒绝 `target instanceof Creep && target.spawning`。真实 bot 里表现为
+/// spawn 一直在孵化 → 搬运工送不进能量 → 房间能量卡在 300、升级停摆数千 tick。
+#[test]
+fn transfer_into_busy_spawn() {
+	in_tokio(|| transfer_into_busy_spawn_inner());
+}
+
+fn transfer_into_busy_spawn_inner() {
+	let scenario = Scenario::from_json(
+		r#"{
+		"name": "busy-spawn", "seed": 1,
+		"rooms": [{ "name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 2, "pos": [28, 27] },
+			"structures": [
+				{ "type": "spawn", "pos": [25, 25], "energy": 300 },
+				{ "type": "extension", "pos": [22, 22], "energy": 0 }
+			],
+			"creeps": [{ "name": "Hauler", "body": ["carry", "carry", "move"], "pos": [26, 25], "store": { "energy": 100 } }]
+		}]
+	}"#,
+	)
+	.unwrap();
+	let mut world = build_world(&scenario).unwrap();
+	let mut movement = Movement::default();
+	let bundle = r#"
+		exports.loop = function() {
+			const spawn = Game.spawns[Object.keys(Game.spawns)[0]];
+			const hauler = Game.creeps.Hauler;
+			if (!spawn.spawning) {
+				console.log(JSON.stringify({ phase: "spawn", code: spawn.spawnCreep([WORK, WORK, CARRY, MOVE], "Kid") }));
+				return;
+			}
+			const ext = spawn.room.find(FIND_STRUCTURES, { filter: { structureType: STRUCTURE_EXTENSION } })[0];
+			console.log(JSON.stringify({
+				phase: "transfer",
+				spawnEnergy: spawn.store[RESOURCE_ENERGY],
+				free: spawn.store.getFreeCapacity(RESOURCE_ENERGY),
+				cap: spawn.store.getCapacity(),
+				extCap: ext.store.getCapacity(RESOURCE_ENERGY),
+				extFree: ext.store.getFreeCapacity(RESOURCE_ENERGY),
+				ghost: spawn.store.getCapacity(RESOURCE_HYDROGEN),
+				badRes: hauler.transfer(spawn, RESOURCE_HYDROGEN),
+				code: hauler.transfer(spawn, RESOURCE_ENERGY),
+			}));
+		};
+	"#;
+	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let mut memory = String::from("{}");
+	let mut infos = Vec::new();
+	for _ in 0..2 {
+		let snapshot = build_snapshot(
+			&world,
+			&SnapshotOptions {
+				cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
+				always_visible: false,
+				include_terrain: true,
+			},
+		);
+		let result = bot.run_tick(snapshot, memory.clone()).unwrap();
+		memory = result.memory.clone();
+		infos.push(serde_json::from_str::<serde_json::Value>(result.console.first().map(String::as_str).unwrap_or("{}")).unwrap());
+		tick::run_tick(&mut world, &mut movement, &result.intents);
+	}
+	assert_eq!(infos[0]["code"], 0, "spawnCreep 应 OK: {}", infos[0]);
+	let t = &infos[1];
+	assert_eq!(t["phase"], "transfer", "第二 tick spawn 应在孵化: {t}");
+	assert_eq!(t["spawnEnergy"], 1, "孵化扣掉 300, 再按官方自动回能 +1: {t}");
+	assert_eq!(t["free"], 299, "{t}");
+	assert_eq!(t["cap"], serde_json::Value::Null, "专用仓 getCapacity() 为 null: {t}");
+	assert_eq!(t["extCap"], 50, "{t}");
+	assert_eq!(t["extFree"], 50, "{t}");
+	assert_eq!(t["ghost"], serde_json::Value::Null, "spawn 不收 H: {t}");
+	assert_eq!(t["badRes"], -7, "非能量进 spawn → ERR_INVALID_TARGET (官方 capacityForResource 为 0): {t}");
+	assert_eq!(t["code"], 0, "正在孵化的 spawn 应能收货: {t}");
+	let spawn_energy = world.rooms["W5N8"]
+		.objects
+		.values()
+		.find(|o| o.obj_type == "spawn")
+		.and_then(|o| o.store.get("energy").copied())
+		.unwrap_or(0);
+	assert_eq!(spawn_energy, 101 + 1, "能量应进 spawn (1 + 100, 本 tick 房间能量仍 < 300 再回 1)");
+}
