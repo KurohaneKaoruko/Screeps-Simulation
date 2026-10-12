@@ -45,6 +45,12 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
         }
     }
 
+    for (room_name, puller, target) in &effects.pulls {
+        if let Some(room) = world.rooms.get(room_name) {
+            movement.add_pulling(room, *puller, *target);
+        }
+    }
+
     // 2) 每房间移动仲裁 (官方 processor.js:225,324: 每房间各自 movement.check)
     for (room_name, room) in &world.rooms {
         movement.check(room_name, room);
@@ -199,8 +205,12 @@ fn tick_creeps(
             continue;
         }
 
-        // 疲劳恢复
-        movement::recover_fatigue(obj);
+        // 疲劳恢复 (官方 creeps/tick.js: -2 × MOVE, 经 _add-fatigue 先抵自己、剩余交给拉人者)
+        let moves = obj.live_parts("move") as i64;
+        if moves > 0 {
+            movement.add_fatigue(room, id, -2 * moves);
+        }
+        let Some(obj) = room.objects.get_mut(&id) else { continue };
 
         // 伤害/治疗统一应用 (官方 processor/intents/creeps/tick.js: 在 creep tick 末尾)
         let old_hits = obj.hits;

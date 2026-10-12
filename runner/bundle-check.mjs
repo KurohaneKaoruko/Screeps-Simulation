@@ -71,7 +71,6 @@ const SIM_COVERAGE = [
 	[/\bunboostCreep\s*\(/, 'boost 未实现 (方法缺失, 调用即 TypeError)', 'error'],
 	[/\blaunchNuke\s*\(/, 'nuker 未实现 (StructureNuker 为空类, 调用即 TypeError)', 'error'],
 	[/\bterminal\.send\s*\(/, 'terminal.send 未实现 (StructureTerminal 为空类, 调用即 TypeError) —— 跨房交易不会被模拟', 'error'],
-	[/\bCreep\.prototype\.pull\b|\b\.pull\s*\(/, 'Creep.pull 未实现 (明确抛错)', 'error'],
 	[/\bproduce\s*\(/, 'factory.produce 为 no-op (恒返回 ERR_INVALID_ARGS)', 'warn'],
 	[/\bprocessPower\s*\(/, 'powerSpawn.processPower 为 no-op', 'warn'],
 	[/\bobserveRoom\s*\(/, 'observer.observeRoom 为 no-op', 'warn'],

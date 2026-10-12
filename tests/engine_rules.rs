@@ -1263,3 +1263,45 @@ fn snapshot_direct_serializer_matches_value_tree() {
 		}
 	}
 }
+
+/// pull: 无 MOVE 的矿工被拖车拉着走, 矿工的移动疲劳记到拖车身上 (官方 _add-fatigue 沿 _pulled 链)。
+/// 拖车 2 MOVE、矿工 5 WORK: 每步给拖车加 5×2=10 疲劳, 拖车每 tick 回 4 → 每 3 tick 走一步。
+#[test]
+fn pull_moves_creep_without_move_parts() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let tug = add_creep(&mut world, "Tug", 25, 20, &["move", "move"]);
+	let miner = add_creep(&mut world, "Miner", 24, 20, &["work", "work", "work", "work", "work"]);
+	let json = format!(
+		r#"[{{"o":"{tug:024x}","n":"move","d":{{"direction":3}}}},
+		    {{"o":"{tug:024x}","n":"pull","d":{{"id":"{miner:024x}"}}}},
+		    {{"o":"{miner:024x}","n":"move","d":{{"id":"{tug:024x}"}}}}]"#
+	);
+	let mut trail = Vec::new();
+	for _ in 0..7 {
+		tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+		let (_, tx, _) = find_creep(&world, "Tug");
+		let (_, mx, _) = find_creep(&world, "Miner");
+		let tf = world.rooms["W5N8"].objects[&tug].fatigue;
+		let mf = world.rooms["W5N8"].objects[&miner].fatigue;
+		trail.push((tx, mx, tf, mf));
+	}
+	assert_eq!(trail[0], (26, 25, 6, 0), "第 1 tick: 两者各进一格, 矿工的 10 疲劳记给拖车再回 4: {trail:?}");
+	assert_eq!(trail.last().map(|t| (t.0, t.1)), Some((28, 27)), "7 tick 走 3 步: {trail:?}");
+	assert!(trail.iter().all(|t| t.3 == 0), "被拉者自身不积累疲劳: {trail:?}");
+}
+
+/// 没有 pull 时, 无 MOVE 的 creep 跟随 move(creep) 也不能动
+#[test]
+fn move_toward_creep_without_pull_needs_move_parts() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let tug = add_creep(&mut world, "Tug", 25, 20, &["move", "move"]);
+	let _miner = add_creep(&mut world, "Miner", 24, 20, &["work"]);
+	let miner = find_creep(&world, "Miner").0;
+	let json = format!(
+		r#"[{{"o":"{tug:024x}","n":"move","d":{{"direction":3}}}},
+		    {{"o":"{miner:024x}","n":"move","d":{{"id":"{tug:024x}"}}}}]"#
+	);
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	assert_eq!(find_creep(&world, "Tug").1, 26);
+	assert_eq!(find_creep(&world, "Miner").1, 24, "没人拉、没 MOVE → 原地");
+}

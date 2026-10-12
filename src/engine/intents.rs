@@ -133,6 +133,8 @@ impl IntentList {
 pub struct TickEffects {
     /// 本 tick 移动意图 (roomName, objId, dx, dy, oldFatigue)
     pub moves: Vec<(String, u64, i32, i32, u32)>,
+    /// 本 tick 拉拽意图 (roomName, 拉人者, 被拉者), 官方 processor/intents/creeps/pull.js
+    pub pulls: Vec<(String, u64, u64)>,
     /// 单位死亡待结算 (roomName, objId)
     pub deaths: Vec<(String, u64)>,
     /// 错误日志 (结算层异常, 不应出现)
@@ -142,6 +144,7 @@ pub struct TickEffects {
 pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
     let mut effects = TickEffects {
         moves: vec![],
+        pulls: vec![],
         deaths: vec![],
         errors: vec![],
     };
@@ -210,8 +213,17 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
         let room = world.rooms.get_mut(&room_name).unwrap();
         match (obj_type.as_str(), name.as_str()) {
             ("creep", "move") => {
-                let dir = data.get("direction").and_then(Value::as_i64).unwrap_or(0) as i32;
-                let Some((dx, dy)) = dir_offset(dir) else {
+                // 官方 move.js: direction 或 id (跟随相邻 creep, 配合 pull); id 有效时覆盖 direction
+                let mut d = dir_offset(data.get("direction").and_then(Value::as_i64).unwrap_or(0) as i32);
+                if let (Some(tid), Some(me)) = (id_of(data, "id"), room.objects.get(&id)) {
+                    if let Some(t) = room.objects.get(&tid) {
+                        let (dx, dy) = (t.x as i32 - me.x as i32, t.y as i32 - me.y as i32);
+                        if t.obj_type == "creep" && dx.abs().max(dy.abs()) == 1 {
+                            d = Some((dx, dy));
+                        }
+                    }
+                }
+                let Some((dx, dy)) = d else {
                     continue;
                 };
                 if let Some(obj) = room.objects.get(&id) {
@@ -232,6 +244,23 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     if !blocked {
                         effects.moves.push((room_name.clone(), id, dx, dy, old_fatigue));
                     }
+                }
+            }
+            ("creep", "pull") => {
+                // 官方 pull.js: 双方都是未在孵化的 creep 且相邻, 才登记拉拽关系
+                let Some(tid) = id_of(data, "id") else { continue };
+                let ok = match (room.objects.get(&id), room.objects.get(&tid)) {
+                    (Some(me), Some(t)) => {
+                        !me.spawning
+                            && t.obj_type == "creep"
+                            && !t.spawning
+                            && (t.x as i32 - me.x as i32).abs() <= 1
+                            && (t.y as i32 - me.y as i32).abs() <= 1
+                    }
+                    _ => false,
+                };
+                if ok {
+                    effects.pulls.push((room_name.clone(), id, tid));
                 }
             }
             ("creep", "harvest") => {

@@ -867,9 +867,16 @@ class Creep extends RoomObject {
 		if (typeof enabled !== "boolean") return C.ERR_INVALID_ARGS;
 		return C.OK;
 	}
+	/** 官方 E/game/creeps.js:126-156: move(creep) 跟着相邻 creep 走 (配合 pull), 不查疲劳/MOVE 部件 */
 	move(direction) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
+		if (direction && direction instanceof Creep) {
+			if (!direction.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+			intent(this.id, "move", { id: direction.id });
+			return C.OK;
+		}
+		if (this.fatigue > 0) return C.ERR_TIRED;
 		if (!this.getActiveBodyparts("move")) return C.ERR_NO_BODYPART;
 		direction = +direction;
 		if (!direction || direction < 1 || direction > 8) return C.ERR_INVALID_ARGS;
@@ -1168,7 +1175,15 @@ class Creep extends RoomObject {
 		intent(this.id, "signController", { id: target.id, sign: "" + sign });
 		return C.OK;
 	}
-	pull() { throw unimplemented("Creep.pull"); }
+	/** 官方 E/game/creeps.js:1093-1113 */
+	pull(target) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!target || !target.id || !(target instanceof Creep) || !target.my && !Game.getObjectById(target.id) || target.spawning || target.id === this.id) return C.ERR_INVALID_TARGET;
+		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "pull", { id: target.id });
+		return C.OK;
+	}
 	suicide() {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;

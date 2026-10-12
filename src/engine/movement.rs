@@ -19,6 +19,11 @@ pub struct Movement {
     affected_cnt: BTreeMap<(String, u8, u8), usize>,
     /// move 意图提交时的疲劳快照 (engine: _oldFatigue, 提交时疲劳非 0 则不可动)
     old_fatigue: BTreeMap<u64, u32>,
+    /// 拉拽关系 (官方 object._pull / target._pulled): 拉人者 → 被拉者, 被拉者 → 拉人者
+    pull: BTreeMap<u64, u64>,
+    pulled: BTreeMap<u64, u64>,
+    /// 本 tick 的疲劳累计 (官方 object._fatigue, tick 内可为负, 落库时取 max(0, ·))
+    fatigue_acc: BTreeMap<u64, i64>,
 }
 
 impl Movement {
@@ -27,6 +32,58 @@ impl Movement {
         self.resolved.clear();
         self.affected_cnt.clear();
         self.old_fatigue.clear();
+        self.pull.clear();
+        self.pulled.clear();
+        self.fatigue_acc.clear();
+    }
+
+    /// 官方 movement.addPulling: 拉拽链不能成环 (A 拉 B、B 拉 A 时后者被忽略)
+    pub fn add_pulling(&mut self, room: &Room, puller: u64, target: u64) {
+        let mut t = target;
+        for _ in 0..1000 {
+            if t == puller {
+                return;
+            }
+            match self.pull.get(&t) {
+                Some(&next) if room.objects.contains_key(&next) => t = next,
+                _ => break,
+            }
+        }
+        self.pull.insert(puller, target);
+        self.pulled.insert(target, puller);
+    }
+
+    /// 官方 creeps/_add-fatigue.js: 负值 (MOVE 恢复) 先抵自己的疲劳, 剩余部分与正值 (移动消耗)
+    /// 都沿 _pulled 链交给最前面的拉人者 —— 被拉者的移动疲劳由拉它的 creep 承担。
+    pub fn add_fatigue(&mut self, room: &mut Room, id: u64, mut d: i64) {
+        let Some(own) = room.objects.get(&id).map(|o| o.fatigue as i64) else { return };
+        let own = *self.fatigue_acc.entry(id).or_insert(own);
+        if own > 0 && d < 0 {
+            let resting = own.min(-d);
+            let left = own - resting;
+            self.fatigue_acc.insert(id, left);
+            if let Some(o) = room.objects.get_mut(&id) {
+                o.fatigue = left.max(0) as u32;
+            }
+            d += resting;
+            if d == 0 {
+                return;
+            }
+        }
+        let mut head = id;
+        for _ in 0..1000 {
+            match self.pulled.get(&head) {
+                Some(&p) if room.objects.contains_key(&p) => head = p,
+                _ => break,
+            }
+        }
+        let Some(base) = room.objects.get(&head).map(|o| o.fatigue as i64) else { return };
+        let acc = self.fatigue_acc.entry(head).or_insert(base);
+        *acc += d;
+        let f = (*acc).max(0) as u32;
+        if let Some(o) = room.objects.get_mut(&head) {
+            o.fatigue = f;
+        }
     }
 
     pub fn add(&mut self, room_name: &str, id: u64, x: u8, y: u8, old_fatigue: u32) {
@@ -41,8 +98,10 @@ impl Movement {
         self.matrix.contains_key(&(room_name.to_string(), x, y))
     }
 
+    /// 官方 canMove: 被拉的 creep 不看疲劳和 MOVE 部件
     fn can_move(&self, id: u64, obj: &Obj) -> bool {
-        self.old_fatigue.get(&id).copied().unwrap_or(0) == 0 && obj.live_parts("move") > 0
+        self.pulled.contains_key(&id)
+            || self.old_fatigue.get(&id).copied().unwrap_or(0) == 0 && obj.live_parts("move") > 0
     }
 
     /// 目标格是否存在阻挡: 静止 creep / 阻挡结构 / 墙 (有路除外)
@@ -115,7 +174,9 @@ impl Movement {
                                 .unwrap_or(0) as u32
                         };
                         let rate4 = obj.live_parts("move") as f64 / move_weight(obj).max(1) as f64;
-                        (rate1, 0, 0, rate4, id)
+                        let rate2 = self.pulled.contains_key(&id) as u32;
+                        let rate3 = self.pull.contains_key(&id) as u32;
+                        (rate1, rate2, rate3, rate4, id)
                     })
                     .collect();
                 rated.sort_by(|a, b| {
@@ -142,6 +203,17 @@ impl Movement {
             .collect();
         for id in ids {
             let Some(&key) = self.resolved.get(&id) else { continue };
+            // 官方: 被拉者必须正走进拉人者当前所在格, 且拉人者确实拉的是它, 否则拉拽关系作废
+            if let Some(&p) = self.pulled.get(&id) {
+                let valid = self.pull.get(&p) == Some(&id)
+                    && room.objects.get(&p).is_some_and(|po| (po.x, po.y) == key);
+                if !valid {
+                    self.pulled.remove(&id);
+                    if self.pull.get(&p) == Some(&id) {
+                        self.pull.remove(&p);
+                    }
+                }
+            }
             let blocked = room
                 .objects
                 .get(&id)
@@ -214,8 +286,10 @@ impl Movement {
         if at_edge_after && !at_edge_before {
             // 从房内进入边缘格: 不加疲劳 (跨房过渡)
             obj.fatigue = 0;
+            self.fatigue_acc.insert(id, 0);
         } else {
-            obj.fatigue = obj.fatigue.saturating_add(fatigue_rate * move_weight(obj));
+            let d = (fatigue_rate * move_weight(obj)) as i64;
+            self.add_fatigue(room, id, d);
         }
 
         // 道路磨损: 提前到期 nextDecayTime (等价官方 nextDecayTime -= wear)
