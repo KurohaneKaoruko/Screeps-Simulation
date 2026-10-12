@@ -14,6 +14,15 @@ pub fn store_sum(store: &Store) -> u32 {
 pub struct BodyPart {
     pub part_type: String,
     pub hits: u32,
+    /// 官方 body[i].boost: 实验室强化所用化合物 (None = 未强化)
+    pub boost: Option<String>,
+}
+
+impl BodyPart {
+    /// 满血、未强化的部件
+    pub fn new(part_type: &str) -> BodyPart {
+        BodyPart { part_type: part_type.to_string(), hits: 100, boost: None }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +84,15 @@ pub struct Obj {
     // ── mineral ──
     pub mineral_type: Option<String>,
     pub mineral_amount: Option<u32>,
+    /// 官方 mineral.density (DENSITY_LOW..DENSITY_ULTRA)
+    pub density: u8,
+    // ── 工业结构 ──
+    /// 官方 cooldownTime: lab / terminal / factory 的冷却到期 tick (API cooldown = max(0, cooldownTime - time))
+    pub cooldown_time: u64,
+    /// 官方 extractor `_cooldown`: 本 tick 采矿后待写入的冷却 (tick 阶段先递减旧值再写入)
+    pub pending_cooldown: u32,
+    /// 官方 observer.observeRoom: 本 tick 观察的房间 (下一 tick 对 bot 可见, 再下一 tick 清空)
+    pub observe_room: Option<String>,
 }
 
 /// 孵化任务: name=目标单位名, need_time=总时长, spawn_time=完成 tick
@@ -116,36 +134,166 @@ impl Obj {
 
     pub fn store_capacity(&self) -> u32 {
         match self.obj_type.as_str() {
-            // 官方 storeCapacity = 存活 CARRY 部件 × 50 (受损部件不计入, 见 _recalc-body)
-            "creep" => self.live_parts("carry") as u32 * constants::CARRY_CAPACITY,
+            // 官方 _recalc-body: storeCapacity = calcBodyEffectiveness(CARRY, 'capacity', 50, withoutOldHits)
+            // —— 存活 CARRY 部件 × 50 × boost 倍率 (KH ×2 / KH2O ×3 / XKH2O ×4)
+            "creep" => self.calc_body_effectiveness("carry", "capacity", constants::CARRY_CAPACITY),
             "tombstone" | "energy" => u32::MAX / 4,
             "link" => constants::LINK_CAPACITY,
             "container" => constants::CONTAINER_CAPACITY,
             "storage" => constants::STORAGE_CAPACITY,
-            "terminal" => constants::TERMINAL_CAPACITY,
+            // 官方 terminals/tick.js / factories/tick.js: 房间 RCL 不允许时 storeCapacity 为 0 (见 tick_store_capacity)
+            "terminal" | "factory" => self.energy_capacity,
+            "lab" => constants::LAB_ENERGY_CAPACITY + constants::LAB_MINERAL_CAPACITY,
             _ => self.energy_capacity,
         }
     }
 
-    /// 官方 `capacityForResource`: 该对象能容纳多少 `resource`。
-    /// creep 是 CARRY×50, link 是 800, 只存能量的结构对非 energy 资源为 0。
-    pub fn capacity_for_resource(&self, resource: &str) -> u32 {
-        if self.obj_type == "creep" {
-            return self.store_capacity();
-        }
-        constants::structure_capacity_for_resource(&self.obj_type, resource, self.energy_capacity)
+    /// 官方 `storeCapacityResource` 存在 (专用格) 的对象: transfer 时按该资源单独计量,
+    /// 否则按总量计量 (官方 transfer.js: `storeCapacityResource ? store[r] : calcResources`)
+    pub fn has_resource_slots(&self) -> bool {
+        matches!(
+            self.obj_type.as_str(),
+            "spawn" | "extension" | "tower" | "link" | "lab" | "powerSpawn" | "nuker"
+        )
     }
 
-    /// 官方 `isActive()`: 超出 RCL 上限被停用的 spawn/extension 不参与能量结算
+    /// transfer 判满时与容量比较的已存量
+    pub fn stored_for_capacity(&self, resource: &str) -> u32 {
+        if self.has_resource_slots() {
+            self.store.get(resource).copied().unwrap_or(0)
+        } else {
+            store_sum(&self.store)
+        }
+    }
+
+    /// 官方 lab.mineralType: store 中第一个非能量且数量 > 0 的资源
+    pub fn lab_mineral_type(&self) -> Option<&str> {
+        self.store
+            .iter()
+            .find(|(k, v)| k.as_str() != "energy" && **v > 0)
+            .map(|(k, _)| k.as_str())
+    }
+
+    /// 官方 lab.mineralAmount: store 总量 - 能量
+    pub fn lab_mineral_amount(&self) -> u32 {
+        store_sum(&self.store) - self.store.get("energy").copied().unwrap_or(0)
+    }
+
+    /// 掉落资源堆的资源类型 (每堆只有一种资源, 官方 `resourceType`)
+    pub fn resource_type(&self) -> &str {
+        self.store
+            .keys()
+            .next()
+            .map(String::as_str)
+            .unwrap_or("energy")
+    }
+
+    /// 掉落资源堆的数量 (官方 `object[resourceType]`)
+    pub fn resource_amount(&self) -> u32 {
+        self.store.values().next().copied().unwrap_or(0)
+    }
+
+    /// 官方 `capacityForResource`: 该对象能容纳多少 `resource`。
+    /// creep 是 CARRY 容量, link 是 800, 只存能量的结构对非 energy 资源为 0;
+    /// lab: 能量 2000, 矿物 3000 且只能是 lab 已持有的那一种 (官方 storeCapacityResource 随持有矿物切换)。
+    pub fn capacity_for_resource(&self, resource: &str) -> u32 {
+        match self.obj_type.as_str() {
+            "creep" => self.store_capacity(),
+            "lab" => {
+                if resource == "energy" {
+                    constants::LAB_ENERGY_CAPACITY
+                } else {
+                    match self.lab_mineral_type() {
+                        Some(m) if m != resource => 0,
+                        _ => constants::LAB_MINERAL_CAPACITY,
+                    }
+                }
+            }
+            "powerSpawn" => match resource {
+                "energy" => constants::POWER_SPAWN_ENERGY_CAPACITY,
+                "power" => constants::POWER_SPAWN_POWER_CAPACITY,
+                _ => 0,
+            },
+            "nuker" => match resource {
+                "energy" => constants::NUKER_ENERGY_CAPACITY,
+                "G" => constants::NUKER_GHODIUM_CAPACITY,
+                _ => 0,
+            },
+            "terminal" | "factory" => self.store_capacity(),
+            t => constants::structure_capacity_for_resource(t, resource, self.energy_capacity),
+        }
+    }
+
+    /// 官方 `isActive()`: 超出 RCL 上限被停用的结构 (见 Room::refresh_structure_activity)
     pub fn is_active(&self) -> bool {
         !self.off
     }
 
-    /// 官方 `utils.calcBodyEffectiveness` (无 boost): 存活部件数 × 基础功率。
+    /// 官方 `utils.calcBodyEffectiveness(body, part, method, basePower)`:
+    /// 存活部件逐个累加 basePower × BOOSTS[part][boost][method] (无该 boost 加成按 1 倍)。
     /// 官方还会把 `_oldHits > 0` 的部件计入, 但伤害在 tick 末尾才应用, 意图阶段读到的
     /// 始终是 tick 开始的身体, 因此本模拟器用 `hits > 0` 即等价 (见 README 已知近似)。
-    pub fn calc_body_effectiveness(&self, part: &str, base_power: u32) -> u32 {
-        self.live_parts(part) as u32 * base_power
+    pub fn calc_body_effectiveness(&self, part: &str, method: &str, base_power: u32) -> u32 {
+        let mut power = 0.0f64;
+        for p in &self.body {
+            if p.hits == 0 || p.part_type != part {
+                continue;
+            }
+            let mut ipower = base_power as f64;
+            if let Some(b) = &p.boost {
+                if let Some(mult) = constants::boost_effect(part, b, method) {
+                    ipower *= mult;
+                }
+            }
+            power += ipower;
+        }
+        power as u32
+    }
+
+    /// 官方 build/repair/upgradeController 的 boost 加成: 每个强化 WORK 部件的额外量
+    /// (`(倍率 - 1) × perPart`), 降序排列后只取前 `limit` 个 (官方 `boostedParts.slice(0, effect)`)。
+    /// 注意官方不过滤受损部件 (map 全身体)。
+    pub fn boosted_work_bonus(&self, method: &str, per_part: f64, limit: u32) -> f64 {
+        let mut parts: Vec<f64> = self
+            .body
+            .iter()
+            .map(|p| match (&p.boost, p.part_type.as_str()) {
+                (Some(b), "work") => match constants::boost_effect("work", b, method) {
+                    Some(m) if m > 0.0 => (m - 1.0) * per_part,
+                    _ => 0.0,
+                },
+                _ => 0.0,
+            })
+            .collect();
+        parts.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        parts.into_iter().take(limit as usize).sum()
+    }
+
+    /// 官方 creeps/tick.js `_applyDamage`: 有强化部件时, 伤害从身体头部起逐件按 TOUGH 的
+    /// damage 倍率折减 (GO 0.7 / GHO2 0.5 / XGHO2 0.3), 返回实际扣血量。
+    pub fn effective_damage(&self, damage: u32) -> u32 {
+        if !self.body.iter().any(|p| p.boost.is_some()) {
+            return damage;
+        }
+        let mut reduce = 0.0f64;
+        let mut effective = damage as f64;
+        for p in &self.body {
+            if effective <= 0.0 {
+                break;
+            }
+            let ratio = p
+                .boost
+                .as_deref()
+                .and_then(|b| constants::boost_effect(&p.part_type, b, "damage"))
+                .unwrap_or(1.0);
+            let part_hits_effective = p.hits as f64 / ratio;
+            let used = part_hits_effective.min(effective);
+            reduce += used * (1.0 - ratio);
+            effective -= used;
+        }
+        // 官方 damage -= Math.round(damageReduce) (JS round: .5 向上)
+        let reduce = (reduce + 0.5).floor() as i64;
+        (damage as i64 - reduce).max(0) as u32
     }
 
     /// 官方 `processor/intents/creeps/_recalc-body.js`: 由总 hits 反推各部件 hits。
@@ -204,6 +352,10 @@ pub fn structure(id: u64, structure_type: &str, x: u8, y: u8, mine: bool) -> Obj
         upgrade_blocked: 0,
         mineral_type: None,
         mineral_amount: None,
+        density: 0,
+        cooldown_time: 0,
+        pending_cooldown: 0,
+        observe_room: None,
     }
 }
 
@@ -228,6 +380,7 @@ pub fn mineral(id: u64, x: u8, y: u8, mineral_type: &str, amount: u32) -> Obj {
     let mut o = structure(id, "mineral", x, y, false);
     o.mineral_type = Some(mineral_type.to_string());
     o.mineral_amount = Some(amount);
+    o.density = constants::DENSITY_MODERATE;
     o
 }
 
@@ -268,12 +421,21 @@ pub fn creep_obj(id: u64, name: &str, x: u8, y: u8, body: Vec<BodyPart>) -> Obj 
         upgrade_blocked: 0,
         mineral_type: None,
         mineral_amount: None,
+        density: 0,
+        cooldown_time: 0,
+        pending_cooldown: 0,
+        observe_room: None,
     }
 }
 
 pub fn dropped_energy(id: u64, x: u8, y: u8, amount: u32) -> Obj {
+    dropped_resource(id, x, y, "energy", amount)
+}
+
+/// 地上的资源堆 (官方 type 'energy' 对象, 每堆一种 resourceType)
+pub fn dropped_resource(id: u64, x: u8, y: u8, resource: &str, amount: u32) -> Obj {
     let mut o = structure(id, "energy", x, y, false);
-    o.store.insert("energy".into(), amount);
+    o.store.insert(resource.to_string(), amount);
     o
 }
 

@@ -7,6 +7,7 @@
 //   deterministicRandom  → deterministic_random
 //   mineral.type         → mineral.mineral_type (引擎同时 alias 接受 mineralType)
 //   globalResetEvery     → 原样 (引擎 wire 键本来就是 camelCase, serde rename)
+//   structures[].store / structures[].level / mineral.density / creeps[].body 的 {type, boost} → 同名直传
 export function toWireScenario(sim) {
 	const wire = { ...sim }
 	delete wire.__simCase

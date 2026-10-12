@@ -106,21 +106,15 @@ const C = {
 	BODYPARTS_ALL: ["move", "work", "carry", "attack", "ranged_attack", "tough", "heal", "claim"],
 	// 官方 RESOURCES_ALL (common/lib/constants.js)。此前是拼装出的错误列表 (含 HH/OO)。
 	RESOURCES_ALL: [
-		"energy", "power",
-		"H", "O", "U", "L", "K", "Z", "X", "G",
-		"OH", "ZK", "UL",
-		"UH", "UO", "KH", "KO", "LH", "LO", "ZH", "ZO", "GH", "GO",
-		"UH2O", "UHO2", "KH2O", "KHO2", "LH2O", "LHO2", "ZH2O", "ZHO2", "GH2O", "GHO2",
-		"XUH2O", "XUHO2", "XKH2O", "XKHO2", "XLH2O", "XLHO2", "XZH2O", "XZHO2", "XGH2O", "XGHO2",
-		"ops", "silicon", "metal", "biomass", "mist",
-		"utrium_bar", "lemergium_bar", "zynthium_bar", "keanium_bar", "ghodium_melt",
-		"utrium_oxide", "lemergium_oxide", "zynthium_oxide", "keanium_oxide", "ghodium_oxide",
-		"utrium_acid", "lemergium_acid", "zynthium_acid", "keanium_acid", "ghodium_acid",
-		"utrium_alkalide", "lemergium_alkalide", "zynthium_alkalide", "keanium_alkalide", "ghodium_alkalide",
-		"catalyzed_utrium_acid", "catalyzed_lemergium_acid", "catalyzed_zynthium_acid", "catalyzed_keanium_acid", "catalyzed_ghodium_acid",
-		"catalyzed_utrium_alkalide", "catalyzed_lemergium_alkalide", "catalyzed_zynthium_alkalide", "catalyzed_keanium_alkalide", "catalyzed_ghodium_alkalide",
+		"energy", "power", "H", "O", "U", "K", "L", "Z", "X", "G", "OH", "ZK",
+		"UL", "UH", "UO", "KH", "KO", "LH", "LO", "ZH", "ZO", "GH", "GO", "UH2O",
+		"UHO2", "KH2O", "KHO2", "LH2O", "LHO2", "ZH2O", "ZHO2", "GH2O", "GHO2", "XUH2O", "XUHO2", "XKH2O",
+		"XKHO2", "XLH2O", "XLHO2", "XZH2O", "XZHO2", "XGH2O", "XGHO2", "ops", "silicon", "metal", "biomass", "mist",
+		"utrium_bar", "lemergium_bar", "zynthium_bar", "keanium_bar", "ghodium_melt", "oxidant", "reductant", "purifier", "battery", "composite", "crystal", "liquid",
+		"wire", "switch", "transistor", "microchip", "circuit", "device", "cell", "phlegm", "tissue", "muscle", "organoid", "organism",
+		"alloy", "tube", "fixtures", "frame", "hydraulics", "machine", "condensate", "concentrate", "extract", "spirit", "emanation", "essence",
 	],
-	INTERSHARD_RESOURCES: ["token"],
+	INTERSHARD_RESOURCES: ["token", "cpuUnlock", "pixel", "accessKey"],
 
 	RESOURCE_ENERGY: "energy",
 	RESOURCE_POWER: "power",
@@ -176,7 +170,7 @@ const C = {
 	RESOURCE_MIST: "mist",
 	// ── 商品 tier1 ──
 	RESOURCE_UTRIUM_BAR: "utrium_bar",
-	RESOURCE_LEMERGIUM_BAR: "lergium_bar",
+	RESOURCE_LEMERGIUM_BAR: "lemergium_bar",
 	RESOURCE_KEANIUM_BAR: "keanium_bar",
 	RESOURCE_ZYNTHIUM_BAR: "zynthium_bar",
 	RESOURCE_GHODIUM_MELT: "ghodium_melt",
@@ -363,7 +357,7 @@ const C = {
 	MINERAL_DENSITY_PROBABILITY: { 1: 0.1, 2: 0.5, 3: 0.9, 4: 1.0 },
 	MINERAL_DENSITY_CHANGE: 0.05,
 	DEPOSIT_EXHAUST_MULTIPLY: 0.001,
-	DEPOSIT_EXHAUST_POW: 1.6,
+	DEPOSIT_EXHAUST_POW: 1.2,
 	DEPOSIT_DECAY_TIME: 50000,
 	CONTROLLER_STRUCTURES: {
 		spawn: { 0: 0, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 2, 8: 3 },
@@ -395,7 +389,7 @@ const C = {
 	EVENT_RESERVE_CONTROLLER: 8,
 	EVENT_UPGRADE_CONTROLLER: 9,
 	EVENT_EXIT: 10,
-	EVENT_TRANSFER: 11,
+	EVENT_TRANSFER: 12,
 	EVENT_ATTACK_TYPE_MELEE: 1,
 	EVENT_ATTACK_TYPE_RANGED: 2,
 	EVENT_ATTACK_TYPE_RANGED_MASS: 3,
@@ -410,7 +404,7 @@ const C = {
 	PIXEL_BUY_PRICE: 1,
 	PIXEL_SELL_PRICE: 1,
 	MARKET_MAX_ORDERS: 300,
-	MARKET_ORDER_LIFE_TIME: 10000,
+	MARKET_ORDER_LIFE_TIME: 1000*60*60*24*30,
 	MAX_CONSTRUCTION_SITES_PER_TICK: 1,
 	ORDER_SELL: "sell",
 	ORDER_BUY: "buy",
@@ -470,6 +464,8 @@ const C = {
 	REACTIONS: { H: { O: "OH", L: "LH", K: "KH", U: "UH", Z: "ZH", G: "GH" }, O: { H: "OH", L: "LO", K: "KO", U: "UO", Z: "ZO", G: "GO" }, Z: { K: "ZK", H: "ZH", O: "ZO" }, L: { U: "UL", H: "LH", O: "LO" }, K: { Z: "ZK", H: "KH", O: "KO" }, G: { H: "GH", O: "GO" }, U: { L: "UL", H: "UH", O: "UO" }, OH: { UH: "UH2O", UO: "UHO2", ZH: "ZH2O", ZO: "ZHO2", KH: "KH2O", KO: "KHO2", LH: "LH2O", LO: "LHO2", GH: "GH2O", GO: "GHO2" }, X: { UH2O: "XUH2O", UHO2: "XUHO2", LH2O: "XLH2O", LHO2: "XLHO2", KH2O: "XKH2O", KHO2: "XKHO2", ZH2O: "XZH2O", ZHO2: "XZHO2", GH2O: "XGH2O", GHO2: "XGHO2" }, ZK: { UL: "G" }, UL: { ZK: "G" }, LH: { OH: "LH2O" }, ZH: { OH: "ZH2O" }, GH: { OH: "GH2O" }, KH: { OH: "KH2O" }, UH: { OH: "UH2O" }, LO: { OH: "LHO2" }, ZO: { OH: "ZHO2" }, KO: { OH: "KHO2" }, UO: { OH: "UHO2" }, GO: { OH: "GHO2" }, LH2O: { X: "XLH2O" }, KH2O: { X: "XKH2O" }, ZH2O: { X: "XZH2O" }, UH2O: { X: "XUH2O" }, GH2O: { X: "XGH2O" }, LHO2: { X: "XLHO2" }, UHO2: { X: "XUHO2" }, KHO2: { X: "XKHO2" }, ZHO2: { X: "XZHO2" }, GHO2: { X: "XGHO2" } },
 	BOOSTS: { work: { UO: { harvest: 3 }, UHO2: { harvest: 5 }, XUHO2: { harvest: 7 }, LH: { build: 1.5, repair: 1.5 }, LH2O: { build: 1.8, repair: 1.8 }, XLH2O: { build: 2, repair: 2 }, ZH: { dismantle: 2 }, ZH2O: { dismantle: 3 }, XZH2O: { dismantle: 4 }, GH: { upgradeController: 1.5 }, GH2O: { upgradeController: 1.8 }, XGH2O: { upgradeController: 2 } }, attack: { UH: { attack: 2 }, UH2O: { attack: 3 }, XUH2O: { attack: 4 } }, ranged_attack: { KO: { rangedAttack: 2, rangedMassAttack: 2 }, KHO2: { rangedAttack: 3, rangedMassAttack: 3 }, XKHO2: { rangedAttack: 4, rangedMassAttack: 4 } }, heal: { LO: { heal: 2, rangedHeal: 2 }, LHO2: { heal: 3, rangedHeal: 3 }, XLHO2: { heal: 4, rangedHeal: 4 } }, carry: { KH: { capacity: 2 }, KH2O: { capacity: 3 }, XKH2O: { capacity: 4 } }, move: { ZO: { fatigue: 2 }, ZHO2: { fatigue: 3 }, XZHO2: { fatigue: 4 } }, tough: { GO: { damage: .7 }, GHO2: { damage: .5 }, XGHO2: { damage: .3 } } },
 	REACTION_TIME: { OH: 20, ZK: 5, UL: 5, G: 5, UH: 10, UH2O: 5, XUH2O: 60, UO: 10, UHO2: 5, XUHO2: 60, KH: 10, KH2O: 5, XKH2O: 60, KO: 10, KHO2: 5, XKHO2: 60, LH: 15, LH2O: 10, XLH2O: 65, LO: 10, LHO2: 5, XLHO2: 60, ZH: 20, ZH2O: 40, XZH2O: 160, ZO: 10, ZHO2: 5, XZHO2: 60, GH: 10, GH2O: 15, XGH2O: 80, GO: 10, GHO2: 30, XGHO2: 150, },
+	// 官方 COMMODITIES (common/lib/constants.js): 工厂配方 {level?, amount, cooldown, components}
+	COMMODITIES: {"utrium_bar":{"amount":100,"cooldown":20,"components":{"U":500,"energy":200}},"U":{"amount":500,"cooldown":20,"components":{"utrium_bar":100,"energy":200}},"lemergium_bar":{"amount":100,"cooldown":20,"components":{"L":500,"energy":200}},"L":{"amount":500,"cooldown":20,"components":{"lemergium_bar":100,"energy":200}},"zynthium_bar":{"amount":100,"cooldown":20,"components":{"Z":500,"energy":200}},"Z":{"amount":500,"cooldown":20,"components":{"zynthium_bar":100,"energy":200}},"keanium_bar":{"amount":100,"cooldown":20,"components":{"K":500,"energy":200}},"K":{"amount":500,"cooldown":20,"components":{"keanium_bar":100,"energy":200}},"ghodium_melt":{"amount":100,"cooldown":20,"components":{"G":500,"energy":200}},"G":{"amount":500,"cooldown":20,"components":{"ghodium_melt":100,"energy":200}},"oxidant":{"amount":100,"cooldown":20,"components":{"O":500,"energy":200}},"O":{"amount":500,"cooldown":20,"components":{"oxidant":100,"energy":200}},"reductant":{"amount":100,"cooldown":20,"components":{"H":500,"energy":200}},"H":{"amount":500,"cooldown":20,"components":{"reductant":100,"energy":200}},"purifier":{"amount":100,"cooldown":20,"components":{"X":500,"energy":200}},"X":{"amount":500,"cooldown":20,"components":{"purifier":100,"energy":200}},"battery":{"amount":50,"cooldown":10,"components":{"energy":600}},"energy":{"amount":500,"cooldown":10,"components":{"battery":50}},"composite":{"level":1,"amount":20,"cooldown":50,"components":{"utrium_bar":20,"zynthium_bar":20,"energy":20}},"crystal":{"level":2,"amount":6,"cooldown":21,"components":{"lemergium_bar":6,"keanium_bar":6,"purifier":6,"energy":45}},"liquid":{"level":3,"amount":12,"cooldown":60,"components":{"oxidant":12,"reductant":12,"ghodium_melt":12,"energy":90}},"wire":{"amount":20,"cooldown":8,"components":{"utrium_bar":20,"silicon":100,"energy":40}},"switch":{"level":1,"amount":5,"cooldown":70,"components":{"wire":40,"oxidant":95,"utrium_bar":35,"energy":20}},"transistor":{"level":2,"amount":1,"cooldown":59,"components":{"switch":4,"wire":15,"reductant":85,"energy":8}},"microchip":{"level":3,"amount":1,"cooldown":250,"components":{"transistor":2,"composite":50,"wire":117,"purifier":25,"energy":16}},"circuit":{"level":4,"amount":1,"cooldown":800,"components":{"microchip":1,"transistor":5,"switch":4,"oxidant":115,"energy":32}},"device":{"level":5,"amount":1,"cooldown":600,"components":{"circuit":1,"microchip":3,"crystal":110,"ghodium_melt":150,"energy":64}},"cell":{"amount":20,"cooldown":8,"components":{"lemergium_bar":20,"biomass":100,"energy":40}},"phlegm":{"level":1,"amount":2,"cooldown":35,"components":{"cell":20,"oxidant":36,"lemergium_bar":16,"energy":8}},"tissue":{"level":2,"amount":2,"cooldown":164,"components":{"phlegm":10,"cell":10,"reductant":110,"energy":16}},"muscle":{"level":3,"amount":1,"cooldown":250,"components":{"tissue":3,"phlegm":3,"zynthium_bar":50,"reductant":50,"energy":16}},"organoid":{"level":4,"amount":1,"cooldown":800,"components":{"muscle":1,"tissue":5,"purifier":208,"oxidant":256,"energy":32}},"organism":{"level":5,"amount":1,"cooldown":600,"components":{"organoid":1,"liquid":150,"tissue":6,"cell":310,"energy":64}},"alloy":{"amount":20,"cooldown":8,"components":{"zynthium_bar":20,"metal":100,"energy":40}},"tube":{"level":1,"amount":2,"cooldown":45,"components":{"alloy":40,"zynthium_bar":16,"energy":8}},"fixtures":{"level":2,"amount":1,"cooldown":115,"components":{"composite":20,"alloy":41,"oxidant":161,"energy":8}},"frame":{"level":3,"amount":1,"cooldown":125,"components":{"fixtures":2,"tube":4,"reductant":330,"zynthium_bar":31,"energy":16}},"hydraulics":{"level":4,"amount":1,"cooldown":800,"components":{"liquid":150,"fixtures":3,"tube":15,"purifier":208,"energy":32}},"machine":{"level":5,"amount":1,"cooldown":600,"components":{"hydraulics":1,"frame":2,"fixtures":3,"tube":12,"energy":64}},"condensate":{"amount":20,"cooldown":8,"components":{"keanium_bar":20,"mist":100,"energy":40}},"concentrate":{"level":1,"amount":3,"cooldown":41,"components":{"condensate":30,"keanium_bar":15,"reductant":54,"energy":12}},"extract":{"level":2,"amount":2,"cooldown":128,"components":{"concentrate":10,"condensate":30,"oxidant":60,"energy":16}},"spirit":{"level":3,"amount":1,"cooldown":200,"components":{"extract":2,"concentrate":6,"reductant":90,"purifier":20,"energy":16}},"emanation":{"level":4,"amount":1,"cooldown":800,"components":{"spirit":2,"extract":2,"concentrate":3,"keanium_bar":112,"energy":32}},"essence":{"level":5,"amount":1,"cooldown":600,"components":{"emanation":1,"spirit":3,"crystal":110,"ghodium_melt":150,"energy":64}}},
 	PORTAL_UNSTABLE: 10*24*3600*1000,
 	PORTAL_MIN_TIMEOUT: 12*24*3600*1000,
 	PORTAL_MAX_TIMEOUT: 22*24*3600*1000,
@@ -985,13 +981,26 @@ class Creep extends RoomObject {
 		if (path.length === 0) return C.ERR_NO_PATH;
 		return this.move(path[0].direction);
 	}
+	/** 官方 E/game/creeps.js:335-400 (Source / Mineral 两个分支) */
 	harvest(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
 		if (!this.getActiveBodyparts("work")) return C.ERR_NO_BODYPART;
-		if (!target || !target.id || !(target instanceof Source)) return C.ERR_INVALID_TARGET;
-		if (!target.energy) return C.ERR_NOT_ENOUGH_RESOURCES;
-		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		if (!target || !target.id) return C.ERR_INVALID_TARGET;
+		if (target instanceof Source) {
+			if (!target.energy) return C.ERR_NOT_ENOUGH_RESOURCES;
+			if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		} else if (target instanceof Mineral) {
+			if (!target.mineralAmount) return C.ERR_NOT_ENOUGH_RESOURCES;
+			if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+			const extractor = target.pos.lookFor(C.LOOK_STRUCTURES).find((s) => s.structureType === C.STRUCTURE_EXTRACTOR);
+			if (!extractor) return C.ERR_NOT_FOUND;
+			if (extractor.owner && !extractor.my) return C.ERR_NOT_OWNER;
+			if (!extractor.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+			if (extractor.cooldown) return C.ERR_TIRED;
+		} else {
+			return C.ERR_INVALID_TARGET;
+		}
 		intent(this.id, "harvest", { id: target.id });
 		return C.OK;
 	}
@@ -1267,11 +1276,16 @@ class Source extends RoomObject {
 	}
 }
 
+/** 官方 E/game/resources.js: 每堆一种 resourceType; `energy` 只在能量堆上有值 */
 class Resource extends RoomObject {
 	constructor(raw) {
 		super(raw);
-		this.resourceType = "energy";
-		this.amount = raw.energy;
+		this.resourceType = raw.resourceType || C.RESOURCE_ENERGY;
+		this.amount = raw.amount !== undefined ? raw.amount : raw.energy;
+		this.energy = raw.energy;
+	}
+	toString() {
+		return `[resource (${this.resourceType}) #${this.id}]`;
 	}
 }
 
@@ -1308,15 +1322,20 @@ class Tombstone extends RoomObject {
  * 官方各建筑的 store 形状 (storeCapacity / storeCapacityResource), 决定 getCapacity()/getFreeCapacity() 的语义:
  * 只存能量的建筑是专用仓 (不传资源时 getCapacity() 为 null), container/storage/terminal/factory 是通用仓。
  */
-function structureStoreShape(type, cap) {
+function structureStoreShape(type, cap, raw) {
 	switch (type) {
 		case "spawn":
 		case "extension":
 		case "tower":
 		case "link":
 			return [null, { energy: cap }];
-		case "lab":
+		case "lab": {
+			// 官方: 持有矿物时 storeCapacityResource = {energy: 2000, [矿物]: 3000}, storeCapacity = null;
+			// 空 lab 为 storeCapacity 5000 + {energy: 2000} —— 已有矿物时放入其他矿物的容量为 0
+			const mineral = labMineralType(raw);
+			if (mineral) return [null, { energy: C.LAB_ENERGY_CAPACITY, [mineral]: C.LAB_MINERAL_CAPACITY }];
 			return [C.LAB_MINERAL_CAPACITY + C.LAB_ENERGY_CAPACITY, { energy: C.LAB_ENERGY_CAPACITY }];
+		}
 		case "powerSpawn":
 			return [null, { energy: C.POWER_SPAWN_ENERGY_CAPACITY, power: C.POWER_SPAWN_POWER_CAPACITY }];
 		case "nuker":
@@ -1324,6 +1343,40 @@ function structureStoreShape(type, cap) {
 		default:
 			return [cap, null];
 	}
+}
+
+/** 官方 lab.mineralType: store 中第一个非能量且数量 > 0 的资源 */
+function labMineralType(raw) {
+	if (!raw) return undefined;
+	for (const k of Object.keys(raw)) if (k !== C.RESOURCE_ENERGY && raw[k] > 0) return k;
+	return undefined;
+}
+/** 官方 lab.mineralAmount: store 总量 - 能量 */
+function labMineralAmount(raw) {
+	let sum = 0;
+	for (const k of Object.keys(raw || {})) if (k !== C.RESOURCE_ENERGY) sum += +raw[k] || 0;
+	return sum;
+}
+/** 官方 utils.calcRoomsDistance(room1, room2, continuous=true) */
+function calcRoomsDistance(room1, room2) {
+	const [x1, y1] = roomNameToXY(room1);
+	const [x2, y2] = roomNameToXY(room2);
+	let dx = Math.abs(x2 - x1);
+	let dy = Math.abs(y2 - y1);
+	const worldSize = Game.map && Game.map.getWorldSize ? Game.map.getWorldSize() : 50;
+	dx = Math.min(worldSize - dx, dx);
+	dy = Math.min(worldSize - dy, dy);
+	return Math.max(dx, dy);
+}
+/** 官方 utils.calcTerminalEnergyCost */
+function calcTerminalEnergyCost(amount, range) {
+	return Math.ceil(amount * (1 - Math.exp(-range / 30)));
+}
+/** 官方 utils.getReactionVariants */
+function getReactionVariants(compound) {
+	const result = [];
+	for (const r1 in C.REACTIONS) for (const r2 in C.REACTIONS[r1]) if (C.REACTIONS[r1][r2] === compound) result.push([r1, r2]);
+	return result;
 }
 
 class Structure extends RoomObject {
@@ -1340,7 +1393,7 @@ class Structure extends RoomObject {
 	}
 	get store() {
 		if (!this.__storeObj && this.__storeRaw) {
-			const [cap, caps] = structureStoreShape(this.structureType, this.__storeCap);
+			const [cap, caps] = structureStoreShape(this.structureType, this.__storeCap, this.__storeRaw);
 			this.__storeObj = makeStore(this.__storeRaw, cap, caps);
 		}
 		return this.__storeObj;
@@ -1497,7 +1550,32 @@ class StructureContainer extends Structure {
 		this.my = undefined;
 	}
 }
-class StructureTerminal extends OwnedStructure { }
+/** 官方 E/game/structures.js:698-747 */
+class StructureTerminal extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.storeCapacity = raw.storeCapacity;
+		this.cooldown = raw.cooldown || 0;
+	}
+	send(resourceType, amount, targetRoomName, description) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!/^(W|E)\d+(N|S)\d+$/.test(targetRoomName)) return C.ERR_INVALID_ARGS;
+		if (!C.RESOURCES_ALL.includes(resourceType)) return C.ERR_INVALID_ARGS;
+		const store = this.__raw.store || {};
+		if (!store[resourceType] || store[resourceType] < amount) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		const range = calcRoomsDistance(this.pos.roomName, targetRoomName);
+		const cost = calcTerminalEnergyCost(amount, range);
+		const energy = store.energy || 0;
+		if (resourceType !== C.RESOURCE_ENERGY && energy < cost || resourceType === C.RESOURCE_ENERGY && energy < amount + cost) {
+			return C.ERR_NOT_ENOUGH_RESOURCES;
+		}
+		if (description && (typeof description !== "string" || description.length > 100)) return C.ERR_INVALID_ARGS;
+		intent(this.id, "send", { resourceType, amount, targetRoomName, description });
+		return C.OK;
+	}
+}
 class StructureTower extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
@@ -1552,12 +1630,146 @@ class StructureLink extends OwnedStructure {
 		return C.OK;
 	}
 }
-class StructureLab extends OwnedStructure { }
+/** 官方 E/game/structures.js:294-468 (StructureLab) */
+class StructureLab extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.cooldown = raw.cooldown || 0;
+		this.mineralType = labMineralType(raw.store);
+		this.mineralAmount = labMineralAmount(raw.store);
+		this.mineralCapacity = C.LAB_MINERAL_CAPACITY;
+		this.energy = raw.store ? raw.store.energy || 0 : 0;
+		this.energyCapacity = C.LAB_ENERGY_CAPACITY;
+	}
+	runReaction(lab1, lab2) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!lab1 || !lab1.id || !(lab1 instanceof Structure) || lab1.structureType !== C.STRUCTURE_LAB || lab1.id === this.id) return C.ERR_INVALID_TARGET;
+		if (!lab2 || !lab2.id || !(lab2 instanceof Structure) || lab2.structureType !== C.STRUCTURE_LAB || lab2.id === this.id) return C.ERR_INVALID_TARGET;
+		if (this.pos.getRangeTo(lab1) > 2 || this.pos.getRangeTo(lab2) > 2) return C.ERR_NOT_IN_RANGE;
+		const reactionAmount = C.LAB_REACTION_AMOUNT;
+		if (this.mineralAmount > this.mineralCapacity - reactionAmount) return C.ERR_FULL;
+		if (lab1.mineralAmount < reactionAmount || lab2.mineralAmount < reactionAmount) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (!(lab1.mineralType in C.REACTIONS) || !C.REACTIONS[lab1.mineralType][lab2.mineralType] ||
+			this.mineralType && this.mineralType !== C.REACTIONS[lab1.mineralType][lab2.mineralType]) {
+			return C.ERR_INVALID_ARGS;
+		}
+		intent(this.id, "runReaction", { lab1: lab1.id, lab2: lab2.id });
+		return C.OK;
+	}
+	reverseReaction(lab1, lab2) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!lab1 || !lab1.id || !(lab1 instanceof Structure) || lab1.structureType !== C.STRUCTURE_LAB || lab1.id === this.id) return C.ERR_INVALID_TARGET;
+		if (!lab2 || !lab2.id || !(lab2 instanceof Structure) || lab2.structureType !== C.STRUCTURE_LAB || lab2.id === this.id) return C.ERR_INVALID_TARGET;
+		if (this.pos.getRangeTo(lab1) > 2 || this.pos.getRangeTo(lab2) > 2) return C.ERR_NOT_IN_RANGE;
+		if (lab1 === lab2 || lab1.id === lab2.id) return C.ERR_INVALID_ARGS;
+		const reactionAmount = C.LAB_REACTION_AMOUNT;
+		if (!this.mineralType || this.mineralAmount < reactionAmount) return C.ERR_NOT_ENOUGH_RESOURCES;
+		const variant = getReactionVariants(this.mineralType).find((v) =>
+			(!lab1.mineralType || lab1.mineralType === v[0]) && (!lab2.mineralType || lab2.mineralType === v[1]));
+		if (!variant) return C.ERR_INVALID_ARGS;
+		if (lab1.mineralAmount + reactionAmount > lab1.mineralCapacity || lab2.mineralAmount + reactionAmount > lab2.mineralCapacity) return C.ERR_FULL;
+		intent(this.id, "reverseReaction", { lab1: lab1.id, lab2: lab2.id });
+		return C.OK;
+	}
+	boostCreep(target, bodyPartsCount) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!target || !target.id || !(target instanceof Creep) || target.spawning) return C.ERR_INVALID_TARGET;
+		if (!this.pos.isNearTo(target)) return C.ERR_NOT_IN_RANGE;
+		if (this.energy < C.LAB_BOOST_ENERGY) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (this.mineralAmount < C.LAB_BOOST_MINERAL) return C.ERR_NOT_ENOUGH_RESOURCES;
+		bodyPartsCount = bodyPartsCount || 0;
+		const mineral = this.mineralType;
+		const nonBoostedParts = target.body.filter((i) => !i.boost && C.BOOSTS[i.type] && C.BOOSTS[i.type][mineral]).length;
+		if (!nonBoostedParts || bodyPartsCount && bodyPartsCount > nonBoostedParts) return C.ERR_NOT_FOUND;
+		intent(this.id, "boostCreep", { id: target.id, bodyPartsCount });
+		return C.OK;
+	}
+	unboostCreep(target) {
+		if (!target || !target.id || !(target instanceof Creep)) return C.ERR_INVALID_TARGET;
+		if (!this.my || !target.my) return C.ERR_NOT_OWNER;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		if (!target.body.some((p) => !!p.boost)) return C.ERR_NOT_FOUND;
+		if (!this.pos.isNearTo(target)) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "unboostCreep", { id: target.id });
+		return C.OK;
+	}
+}
 class StructureNuker extends OwnedStructure { }
-class StructureObserver extends OwnedStructure { observeRoom() { return C.ERR_INVALID_ARGS; } }
-class StructurePowerSpawn extends OwnedStructure { processPower() { return C.ERR_NOT_ENOUGH_RESOURCES; } }
-class StructureExtractor extends OwnedStructure { constructor(raw) { super(raw); this.cooldown = 0; } }
-class StructureFactory extends OwnedStructure { constructor(raw) { super(raw); this.cooldown = 0; this.level = 0; } produce() { return C.ERR_INVALID_ARGS; } }
+/** 官方 E/game/structures.js:538-572 */
+class StructureObserver extends OwnedStructure {
+	observeRoom(roomName) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (typeof roomName !== "string" || !/^(W|E)\d+(S|N)\d+$/.test(roomName)) return C.ERR_INVALID_ARGS;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		const [tx, ty] = roomNameToXY(roomName);
+		const [x, y] = roomNameToXY(this.pos.roomName);
+		if (Math.abs(tx - x) > C.OBSERVER_RANGE || Math.abs(ty - y) > C.OBSERVER_RANGE) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "observeRoom", { roomName });
+		return C.OK;
+	}
+}
+/** 官方 E/game/structures.js:595-633 */
+class StructurePowerSpawn extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.energy = raw.store ? raw.store.energy || 0 : 0;
+		this.energyCapacity = C.POWER_SPAWN_ENERGY_CAPACITY;
+		this.power = raw.store ? raw.store.power || 0 : 0;
+		this.powerCapacity = C.POWER_SPAWN_POWER_CAPACITY;
+	}
+	processPower() {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		const amount = 1;
+		if (this.power < amount || this.energy < amount * C.POWER_SPAWN_ENERGY_RATIO) return C.ERR_NOT_ENOUGH_RESOURCES;
+		intent(this.id, "processPower", {});
+		return C.OK;
+	}
+}
+/** 官方 E/game/structures.js:258-272 */
+class StructureExtractor extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.cooldown = raw.cooldown || 0;
+	}
+}
+/** 官方 E/game/structures.js:1421-1468 */
+class StructureFactory extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.cooldown = raw.cooldown || 0;
+		this.level = raw.level || undefined;
+		this.storeCapacity = raw.storeCapacity;
+	}
+	produce(resourceType) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		const recipe = C.COMMODITIES[resourceType];
+		if (!recipe) return C.ERR_INVALID_ARGS;
+		const level = this.__raw.level || 0;
+		if (!!recipe.level && recipe.level !== level) return C.ERR_INVALID_TARGET;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		// 有等级的商品需要 PWR_OPERATE_FACTORY 效果; 本模拟器没有 power creep, 恒为 ERR_BUSY
+		if (!!recipe.level && level > 0) return C.ERR_BUSY;
+		const store = this.__raw.store || {};
+		for (const p of Object.keys(recipe.components)) {
+			if ((store[p] || 0) < recipe.components[p]) return C.ERR_NOT_ENOUGH_RESOURCES;
+		}
+		let total = 0;
+		for (const k of Object.keys(store)) total += store[k];
+		let componentsTotal = 0;
+		for (const k of Object.keys(recipe.components)) componentsTotal += recipe.components[k];
+		if (!this.storeCapacity || total - componentsTotal + (recipe.amount || 1) > this.storeCapacity) return C.ERR_FULL;
+		intent(this.id, "produce", { resourceType });
+		return C.OK;
+	}
+}
 class StructureRoad extends Structure { constructor(raw) { super(raw); this.ticksToDecay = undefined; this.owner = undefined; this.my = undefined; } }
 class StructureWall extends Structure { constructor(raw) { super(raw); this.owner = undefined; this.my = undefined; } }
 class StructureRampart extends OwnedStructure {
@@ -1705,7 +1917,10 @@ class Room {
 		const cell = this.__occupied.get(`${x},${y}`) || [];
 		switch (type) {
 			case C.LOOK_CREEPS: return cell.filter((o) => o instanceof Creep);
-			case C.LOOK_ENERGY: return cell.filter((o) => o instanceof Resource);
+			// 官方 LOOK_ENERGY 与 LOOK_RESOURCES 指向同一个掉落资源登记表 (任意 resourceType)
+			case C.LOOK_ENERGY:
+			case C.LOOK_RESOURCES: return cell.filter((o) => o instanceof Resource);
+			case C.LOOK_MINERALS: return cell.filter((o) => o instanceof Mineral);
 			case C.LOOK_SOURCES: return cell.filter((o) => o instanceof Source);
 			case C.LOOK_STRUCTURES: return cell.filter((o) => o instanceof Structure);
 			case C.LOOK_CONSTRUCTION_SITES: return cell.filter((o) => o instanceof ConstructionSite);
@@ -1721,7 +1936,8 @@ class Room {
 	lookAt(x, y) {
 		if (typeof x === "object") { y = x.y; x = x.x; }
 		const out = [];
-		for (const type of ["creep", "energy", "source", "structure", "constructionSite", "tombstone", "terrain"]) {
+		// 官方 rooms.js lookAt 的类型顺序 (无对象的类型自然为空)
+		for (const type of ["creep", "energy", "resource", "source", "mineral", "structure", "flag", "constructionSite", "terrain", "tombstone"]) {
 			for (const v of this.lookForAt(type, x, y)) out.push({ type, [type]: v });
 		}
 		return out;
@@ -2420,11 +2636,19 @@ function buildGame() {
 		resources: {},
 		cpu: makeCpu(__W.cpu),
 		gcl: __W.gcl,
-		gpl: { level: 0, progress: 0, progressTotal: 0 },
+		// 官方 game.js:133-167: GPL 由账户累计 processPower 推导 (引擎侧计算后经快照下发)
+		gpl: __W.gpl || { level: 0, progress: 0, progressTotal: 1000 },
 		shard: { name: "shard0", type: "world", ptr: false },
 		market: {
-			credits: 0, incomingTransactions: [], outgoingTransactions: [], orders: {},
-			calcTransactionCost() { return Infinity; }, createOrder() { return C.ERR_INVALID_ARGS; },
+			credits: 0, orders: {},
+			// 官方 market.js: 终端转账记录 (单玩家: 发往自己终端的转账同时出现在两侧)
+			incomingTransactions: (__W.transactions || []).filter((t) => t.recipient).map((t) => ({ ...t })),
+			outgoingTransactions: (__W.transactions || []).map((t) => ({ ...t })),
+			/** 官方 market.js:31-34 */
+			calcTransactionCost(amount, roomName1, roomName2) {
+				return calcTerminalEnergyCost(amount, calcRoomsDistance(roomName1, roomName2));
+			},
+			createOrder() { return C.ERR_INVALID_ARGS; },
 			deal() { return C.ERR_INVALID_ARGS; }, cancelOrder() { return C.OK; }, changeOrderPrice() { return C.OK; },
 			extendOrder() { return C.OK; }, getAllOrders() { return []; }, getHistory() { return []; }, getOrderById() { return null; },
 		},

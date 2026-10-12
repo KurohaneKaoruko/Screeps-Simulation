@@ -44,7 +44,7 @@ fn add_creep(world: &mut World, name: &str, x: u8, y: u8, body: &[&str]) -> u64 
 	let id = alloc_id(&mut world.next_id);
 	let body: Vec<BodyPart> = body
 		.iter()
-		.map(|p| BodyPart { part_type: p.to_string(), hits: 100 })
+		.map(|p| BodyPart::new(p))
 		.collect();
 	let creep = creep_obj(id, name, x, y, body);
 	let room = world.rooms.get_mut("W5N8").unwrap();
@@ -485,7 +485,7 @@ fn add_creep_in(world: &mut World, room: &str, name: &str, x: u8, y: u8, body: &
 	let id = alloc_id(&mut world.next_id);
 	let body: Vec<BodyPart> = body
 		.iter()
-		.map(|p| BodyPart { part_type: p.to_string(), hits: 100 })
+		.map(|p| BodyPart::new(p))
 		.collect();
 	let creep = creep_obj(id, name, x, y, body);
 	let room = world.rooms.get_mut(room).unwrap();
@@ -1310,6 +1310,578 @@ fn move_toward_creep_without_pull_needs_move_parts() {
 	tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
 	assert_eq!(find_creep(&world, "Tug").1, 26);
 	assert_eq!(find_creep(&world, "Miner").1, 24, "没人拉、没 MOVE → 原地");
+}
+
+// ═════════════════════════ 工业: 矿物 / 强化 / 实验室 / 终端 / 观察者 / PowerSpawn / 工厂 ═════════════════════════
+
+/// RCL8 工业房 (W5N8) + 邻房终端 (W4N8, 距离 1) + 空房 (W5N9, 供 observer)
+const INDUSTRY: &str = r#"{
+	"name": "industry", "seed": 7,
+	"rooms": [
+		{ "name": "W5N8", "terrain": { "kind": "flat" },
+		  "sources": { "positions": [[5, 5]] },
+		  "mineral": { "pos": [40, 40], "mineral_type": "H", "amount": 1000 },
+		  "controller": { "level": 8, "pos": [25, 25] },
+		  "structures": [
+			{ "type": "spawn", "pos": [10, 25], "energy": 300 },
+			{ "type": "extractor", "pos": [40, 40] },
+			{ "type": "lab", "pos": [30, 30], "store": { "energy": 2000, "H": 100 } },
+			{ "type": "lab", "pos": [31, 30], "store": { "energy": 2000, "O": 100 } },
+			{ "type": "lab", "pos": [32, 31], "store": { "energy": 2000 } },
+			{ "type": "terminal", "pos": [20, 20], "store": { "energy": 10000, "H": 5000 } },
+			{ "type": "observer", "pos": [21, 20] },
+			{ "type": "powerSpawn", "pos": [22, 20], "store": { "energy": 100, "power": 2 } },
+			{ "type": "factory", "pos": [23, 20], "store": { "energy": 1000, "U": 1000 } }
+		  ],
+		  "creeps": [{ "name": "Miner", "body": ["work", "work", "work", "work", "work", "carry", "move"], "pos": [41, 41] }] },
+		{ "name": "W4N8", "terrain": { "kind": "flat" },
+		  "controller": { "level": 6, "pos": [25, 25] },
+		  "structures": [{ "type": "terminal", "pos": [20, 20] }] },
+		{ "name": "W5N9", "terrain": { "kind": "flat" } }
+	]
+}"#;
+
+fn obj_at(world: &World, room: &str, x: u8, y: u8, ty: &str) -> u64 {
+	world.rooms[room]
+		.objects
+		.values()
+		.find(|o| o.x == x && o.y == y && o.obj_type == ty)
+		.unwrap_or_else(|| panic!("{room} ({x},{y}) 没有 {ty}"))
+		.id
+}
+
+fn res_of(world: &World, id: u64, res: &str) -> u32 {
+	for room in world.rooms.values() {
+		if let Some(o) = room.objects.get(&id) {
+			return o.store.get(res).copied().unwrap_or(0);
+		}
+	}
+	panic!("对象 {id} 不存在")
+}
+
+fn intent_json(id: u64, name: &str, data: &str) -> String {
+	format!(r#"{{"o":"{id:024x}","n":"{name}","d":{data}}}"#)
+}
+
+fn run(world: &mut World, movement: &mut Movement, items: &[String]) {
+	let json = format!("[{}]", items.join(","));
+	tick::run_tick(world, movement, &IntentList::parse(&json));
+}
+
+fn empty_tick(world: &mut World, movement: &mut Movement) {
+	tick::run_tick(world, movement, &IntentList { entries: vec![] });
+}
+
+fn add_boosted_creep(world: &mut World, name: &str, x: u8, y: u8, body: &[(&str, Option<&str>)]) -> u64 {
+	use screeps_sim::engine::objects::{creep_obj, BodyPart};
+	let id = alloc_id(&mut world.next_id);
+	let body: Vec<BodyPart> = body
+		.iter()
+		.map(|(t, b)| BodyPart { part_type: t.to_string(), hits: 100, boost: b.map(str::to_string) })
+		.collect();
+	let mut creep = creep_obj(id, name, x, y, body);
+	creep.age_time = Some(world.tick + 1500);
+	world.rooms.get_mut("W5N8").unwrap().objects.insert(id, creep);
+	id
+}
+
+/// 官方 checkStructureAgainstController: 超限时离控制器**近**的先占名额 (此前实现反了, 远的保留)
+#[test]
+fn structure_activity_keeps_closest_to_controller() {
+	let json = r#"{
+		"name": "t", "seed": 1,
+		"rooms": [{
+			"name": "W5N8", "terrain": { "kind": "flat" },
+			"controller": { "level": 2, "pos": [25, 25] },
+			"structures": [
+				{ "type": "extension", "pos": [40, 40] },
+				{ "type": "extension", "pos": [26, 25] },
+				{ "type": "extension", "pos": [27, 25] },
+				{ "type": "extension", "pos": [28, 25] },
+				{ "type": "extension", "pos": [29, 25] },
+				{ "type": "extension", "pos": [30, 25] },
+				{ "type": "lab", "pos": [20, 20] },
+				{ "type": "terminal", "pos": [21, 21] }
+			]
+		}]
+	}"#;
+	let (world, _) = setup(json);
+	let room = &world.rooms["W5N8"];
+	let far = obj_at(&world, "W5N8", 40, 40, "extension");
+	assert!(room.objects[&far].off, "RCL2 只有 5 个 extension 名额, 最远的那个被停用");
+	let near_off = room.objects.values().filter(|o| o.obj_type == "extension" && o.off).count();
+	assert_eq!(near_off, 1, "近处 5 个都激活");
+	assert!(room.objects[&obj_at(&world, "W5N8", 20, 20, "lab")].off, "RCL2 没有 lab 名额");
+	assert!(room.objects[&obj_at(&world, "W5N8", 21, 21, "terminal")].off, "RCL2 没有 terminal 名额");
+}
+
+/// 官方 _create-energy.js / pickup.js / energy/tick.js: 掉落资源每种一堆, 拾取按堆的 resourceType, 衰减对任意资源生效
+#[test]
+fn dropped_resources_are_per_type() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let c = add_creep(&mut world, "D", 10, 10, &["carry", "carry", "move"]);
+	{
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&c).unwrap();
+		o.store.insert("H".into(), 60);
+		o.store.insert("energy".into(), 40);
+	}
+	run(&mut world, &mut movement, &[intent_json(c, "drop", r#"{"resourceType":"H","amount":60}"#)]);
+	run(&mut world, &mut movement, &[intent_json(c, "drop", r#"{"resourceType":"energy","amount":40}"#)]);
+	let piles: Vec<(String, u32)> = world.rooms["W5N8"]
+		.objects
+		.values()
+		.filter(|o| o.obj_type == "energy")
+		.map(|o| (o.resource_type().to_string(), o.resource_amount()))
+		.collect();
+	// 掉落当 tick 即参与衰减: H 经过 2 tick (60 → 58), energy 1 tick (40 → 39)
+	assert_eq!(piles, vec![("H".to_string(), 58), ("energy".to_string(), 39)], "同格两种资源各成一堆, 都按 ⌈n/1000⌉ 衰减");
+	let h_pile = world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "energy" && o.resource_type() == "H").unwrap().id;
+	run(&mut world, &mut movement, &[intent_json(c, "pickup", &format!(r#"{{"id":"{h_pile:024x}"}}"#))]);
+	assert_eq!(res_of(&world, c, "H"), 58, "pickup 拾取 H 堆的全部 58");
+	assert_eq!(res_of(&world, c, "energy"), 0, "能量堆不受影响");
+}
+
+/// 官方 _create-energy.js: 掉落先装同格容器, 容量按**总量** (2000 - 已存全部资源) 计
+#[test]
+fn container_fill_counts_total_store() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let cont = add_structure(&mut world, "W5N8", "container", 12, 12);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&cont).unwrap().store.insert("energy".into(), 1900);
+	let c = add_creep(&mut world, "D", 12, 12, &["carry", "carry", "carry", "carry", "carry", "carry", "carry", "carry", "carry", "carry", "move"]);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&c).unwrap().store.insert("H".into(), 500);
+	run(&mut world, &mut movement, &[intent_json(c, "drop", r#"{"resourceType":"H","amount":500}"#)]);
+	assert_eq!(res_of(&world, cont, "H"), 100, "容器只剩 100 空间");
+	let pile = world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "energy").unwrap();
+	assert_eq!((pile.resource_type(), pile.resource_amount()), ("H", 400 - 1), "其余 400 落地 (已衰减 1)");
+}
+
+/// 采矿: HARVEST_MINERAL_POWER × WORK, extractor 冷却 EXTRACTOR_COOLDOWN (下一 tick 读到 5, 每 6 tick 采一次)
+#[test]
+fn mineral_harvest_with_extractor_cooldown() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let (miner, _, _) = find_creep(&world, "Miner");
+	let mineral = obj_at(&world, "W5N8", 40, 40, "mineral");
+	let ext = obj_at(&world, "W5N8", 40, 40, "extractor");
+	let h = intent_json(miner, "harvest", &format!(r#"{{"id":"{mineral:024x}"}}"#));
+	run(&mut world, &mut movement, &[h.clone()]);
+	assert_eq!(res_of(&world, miner, "H"), 5, "5 WORK × HARVEST_MINERAL_POWER(1)");
+	assert_eq!(world.rooms["W5N8"].objects[&mineral].mineral_amount, Some(995));
+	assert_eq!(world.rooms["W5N8"].objects[&ext].cooldown, 5, "官方: 采矿后 extractor.cooldown = 5");
+	let mut harvested_at = vec![];
+	for t in 1..=12 {
+		run(&mut world, &mut movement, &[h.clone()]);
+		if res_of(&world, miner, "H") > 5 * (harvested_at.len() as u32 + 1) {
+			harvested_at.push(t);
+		}
+	}
+	assert_eq!(harvested_at, vec![6, 12], "冷却 5 → 4 → … → 0, 每 6 tick 采一次");
+	// 事件: 官方 EVENT_HARVEST 的 amount 为 harvestAmount
+	assert!(world.rooms["W5N8"].events.iter().any(|e| e.event == 5 && e.data["amount"] == 5));
+}
+
+/// 没有 extractor / extractor 被 RCL 停用 → 采矿无效; 超容量的矿物原地掉落
+#[test]
+fn mineral_harvest_requires_active_extractor_and_drops_overflow() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let (miner, _, _) = find_creep(&world, "Miner");
+	let mineral = obj_at(&world, "W5N8", 40, 40, "mineral");
+	let ext = obj_at(&world, "W5N8", 40, 40, "extractor");
+	let h = intent_json(miner, "harvest", &format!(r#"{{"id":"{mineral:024x}"}}"#));
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 5;
+	run(&mut world, &mut movement, &[h.clone()]);
+	assert_eq!(res_of(&world, miner, "H"), 0, "RCL5 extractor 停用 (isActive=false), 采不到");
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 8;
+	world.rooms.get_mut("W5N8").unwrap().objects.remove(&ext);
+	run(&mut world, &mut movement, &[h.clone()]);
+	assert_eq!(res_of(&world, miner, "H"), 0, "没有 extractor 采不到");
+	// 重新放 extractor, creep 背包差 2 满
+	add_structure(&mut world, "W5N8", "extractor", 40, 40);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&miner).unwrap().store.insert("energy".into(), 47);
+	run(&mut world, &mut movement, &[h]);
+	assert_eq!(res_of(&world, miner, "H"), 3, "容量 50: 采 5 只留 3");
+	let pile = world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "energy").unwrap();
+	assert_eq!((pile.resource_type(), pile.resource_amount()), ("H", 2 - 1), "超出的 2 H 掉在脚下 (当 tick 衰减 1)");
+}
+
+/// 矿物再生 (官方 minerals/tick.js): 归零起 MINERAL_REGEN_TIME 计时, 到点按**旧**密度回满;
+/// DENSITY_LOW 必然换成另一个密度 (引擎随机数由场景 seed 播种, 可复现)
+#[test]
+fn mineral_regenerates_by_density() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let mineral = obj_at(&world, "W5N8", 40, 40, "mineral");
+	{
+		let m = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&mineral).unwrap();
+		m.mineral_amount = Some(0);
+		m.density = 1;
+	}
+	empty_tick(&mut world, &mut movement);
+	let start = world.tick - 1;
+	assert_eq!(
+		world.rooms["W5N8"].objects[&mineral].next_regeneration_time,
+		Some(start + constants::MINERAL_REGEN_TIME),
+		"枯竭当 tick 挂 50000 计时"
+	);
+	// 快进: 把计时拨到下一 tick 到期
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&mineral).unwrap().next_regeneration_time = Some(world.tick + 1);
+	empty_tick(&mut world, &mut movement);
+	let m = &world.rooms["W5N8"].objects[&mineral];
+	assert_eq!(m.mineral_amount, Some(15_000), "按旧密度 DENSITY_LOW 回满 MINERAL_DENSITY[1]");
+	assert_eq!(m.next_regeneration_time, None);
+	assert_ne!(m.density, 1, "DENSITY_LOW 再生时必然换密度");
+	// 同 seed 可复现
+	let (mut w2, mut m2) = setup(INDUSTRY);
+	{
+		let m = w2.rooms.get_mut("W5N8").unwrap().objects.get_mut(&mineral).unwrap();
+		m.mineral_amount = Some(0);
+		m.density = 1;
+	}
+	empty_tick(&mut w2, &mut m2);
+	w2.rooms.get_mut("W5N8").unwrap().objects.get_mut(&mineral).unwrap().next_regeneration_time = Some(w2.tick + 1);
+	empty_tick(&mut w2, &mut m2);
+	assert_eq!(w2.rooms["W5N8"].objects[&mineral].density, world.rooms["W5N8"].objects[&mineral].density);
+}
+
+/// 强化: harvest (XUHO2 ×7) / build (XLH2O, 额外 (2-1)×5) / repair (LH, 额外 0.5×100) /
+/// upgradeController (XGH2O, 额外 1/件) —— 能量消耗均按未强化量
+#[test]
+fn boosts_work_actions() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let source = first_source(&world);
+	let h = add_boosted_creep(&mut world, "BH", 6, 6, &[("work", Some("XUHO2")), ("carry", None), ("move", None)]);
+	run(&mut world, &mut movement, &[intent_json(h, "harvest", &format!(r#"{{"id":"{source:024x}"}}"#))]);
+	assert_eq!(res_of(&world, h, "energy"), 14, "1 WORK × 2 × 7");
+
+	let b = add_boosted_creep(&mut world, "BB", 15, 15, &[("work", Some("XLH2O")), ("carry", None), ("move", None)]);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&b).unwrap().store.insert("energy".into(), 50);
+	let site = alloc_id(&mut world.next_id);
+	world.rooms.get_mut("W5N8").unwrap().objects.insert(site, objects::construction_site(site, "road", 16, 15, 300));
+	run(&mut world, &mut movement, &[intent_json(b, "build", &format!(r#"{{"id":"{site:024x}"}}"#))]);
+	assert_eq!(world.rooms["W5N8"].objects[&site].progress, 10, "BUILD_POWER 5 + (2-1)×5");
+	assert_eq!(res_of(&world, b, "energy"), 45, "能量只扣 5");
+
+	let r = add_boosted_creep(&mut world, "BR", 17, 17, &[("work", Some("LH")), ("carry", None), ("move", None)]);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&r).unwrap().store.insert("energy".into(), 50);
+	let wall = add_structure(&mut world, "W5N8", "constructedWall", 18, 17);
+	{
+		let w = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&wall).unwrap();
+		w.hits = 1000;
+		w.hits_max = 300_000_000;
+	}
+	run(&mut world, &mut movement, &[intent_json(r, "repair", &format!(r#"{{"id":"{wall:024x}"}}"#))]);
+	assert_eq!(hits_of(&world, wall), 1150, "REPAIR_POWER 100 + 0.5×100");
+	assert_eq!(res_of(&world, r, "energy"), 49, "能量按 ceil(100×0.01)=1 扣");
+
+	let u = add_boosted_creep(&mut world, "BU", 24, 24, &[("work", Some("XGH2O")), ("work", Some("XGH2O")), ("carry", None), ("move", None)]);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&u).unwrap().store.insert("energy".into(), 50);
+	let ctrl = world.rooms["W5N8"].controller().unwrap().id;
+	let gcl_before = world.gcl_progress;
+	run(&mut world, &mut movement, &[intent_json(u, "upgradeController", &format!(r#"{{"id":"{ctrl:024x}"}}"#))]);
+	assert_eq!(world.gcl_progress - gcl_before, 4, "2 WORK × 1 + 2 × (2-1)");
+	assert_eq!(res_of(&world, u, "energy"), 48, "能量只扣 2");
+}
+
+/// 强化: 战斗 (UH 近战 ×2 / KO 远程 ×2 / LO 治疗 ×2 / ZH 拆除 ×2) 与 TOUGH 减伤 (XGHO2 ×0.3)
+#[test]
+fn boosts_combat_and_tough() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let a = add_boosted_creep(&mut world, "A", 10, 10, &[("attack", Some("UH")), ("move", None)]);
+	let t = add_boosted_creep(&mut world, "T", 11, 10, &[("tough", Some("XGHO2")), ("move", None), ("move", None)]);
+	mark_enemy(&mut world, t);
+	run(&mut world, &mut movement, &[intent_json(a, "attack", &format!(r#"{{"id":"{t:024x}"}}"#))]);
+	// 60 伤害全部落在 TOUGH 上: 减免 round(60 × 0.7) = 42 → 实扣 18
+	assert_eq!(hits_of(&world, t), 300 - 18, "XGHO2 TOUGH 只承受 30% 伤害");
+
+	let ra = add_boosted_creep(&mut world, "RA", 20, 10, &[("ranged_attack", Some("KO")), ("move", None)]);
+	let victim = add_creep(&mut world, "V", 22, 10, &["move", "move", "move"]);
+	mark_enemy(&mut world, victim);
+	run(&mut world, &mut movement, &[intent_json(ra, "rangedAttack", &format!(r#"{{"id":"{victim:024x}"}}"#))]);
+	assert_eq!(hits_of(&world, victim), 300 - 20, "KO: 10 × 2");
+
+	let hl = add_boosted_creep(&mut world, "HL", 23, 10, &[("heal", Some("LO")), ("move", None)]);
+	run(&mut world, &mut movement, &[intent_json(hl, "heal", &format!(r#"{{"id":"{victim:024x}"}}"#))]);
+	assert_eq!(hits_of(&world, victim), 300 - 20 + 20, "LO: 12 × 2 (封顶 hitsMax)");
+
+	let d = add_boosted_creep(&mut world, "DM", 30, 12, &[("work", Some("ZH")), ("carry", None), ("move", None)]);
+	let wall = add_structure(&mut world, "W5N8", "constructedWall", 31, 12);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&wall).unwrap().hits = 10_000;
+	run(&mut world, &mut movement, &[intent_json(d, "dismantle", &format!(r#"{{"id":"{wall:024x}"}}"#))]);
+	assert_eq!(hits_of(&world, wall), 10_000 - 100, "ZH: 50 × 2");
+}
+
+/// 强化: KH CARRY 容量 ×2 (负重也按 100/件折算); ZO MOVE 疲劳恢复 ×2
+#[test]
+fn boosts_carry_capacity_and_move_fatigue() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let c = add_boosted_creep(&mut world, "C", 10, 15, &[("carry", Some("KH")), ("carry", None), ("work", None), ("move", Some("ZO"))]);
+	assert_eq!(world.rooms["W5N8"].objects[&c].store_capacity(), 150, "50×2 + 50");
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&c).unwrap().store.insert("energy".into(), 100);
+	// 负重: work 1 + 100 能量从尾部 CARRY 开始折算 (第 2 件 50, 第 1 件 KH 剩 50) = 3; 平原 ×2 = 6 疲劳
+	run(&mut world, &mut movement, &[intent_json(c, "move", r#"{"direction":3}"#)]);
+	assert_eq!(world.rooms["W5N8"].objects[&c].x, 11);
+	assert_eq!(world.rooms["W5N8"].objects[&c].fatigue, 6 - 4, "ZO MOVE 每 tick 回 2×2=4");
+}
+
+/// 死亡: 强化部件按 lifeRate 返还 LAB_BOOST_MINERAL 化合物 + LAB_BOOST_ENERGY 能量 (官方 _die.js)
+#[test]
+fn death_returns_boost_resources() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let c = add_boosted_creep(&mut world, "Die", 10, 20, &[("work", Some("UO")), ("work", Some("UO")), ("move", None)]);
+	run(&mut world, &mut movement, &[intent_json(c, "suicide", "{}")]);
+	let tomb = world.rooms["W5N8"].objects.values().find(|o| o.obj_type == "tombstone").unwrap();
+	// lifeRate = 0.2 × 1500/1500 = 0.2: UO = floor(2×30×0.2) = 12;
+	// energy = floor(2×20×0.2 + min(125, 100×0.2)×2 + min(125, 50×0.2)) = floor(8 + 40 + 10) = 58
+	assert_eq!(tomb.store.get("UO").copied(), Some(12));
+	assert_eq!(tomb.store.get("energy").copied(), Some(58));
+}
+
+/// renewCreep 清除全部强化 (官方 renew-creep.js)
+#[test]
+fn renew_removes_boosts() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let spawn = obj_at(&world, "W5N8", 10, 25, "spawn");
+	let c = add_boosted_creep(&mut world, "R", 11, 25, &[("carry", Some("KH")), ("move", None)]);
+	{
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&c).unwrap();
+		o.store.insert("energy".into(), 100);
+		o.age_time = Some(world.tick + 100);
+	}
+	run(&mut world, &mut movement, &[intent_json(spawn, "renewCreep", &format!(r#"{{"id":"{c:024x}"}}"#))]);
+	let o = &world.rooms["W5N8"].objects[&c];
+	assert!(o.body.iter().all(|p| p.boost.is_none()), "renew 后无强化");
+	assert_eq!(o.store_capacity(), 50);
+	assert_eq!(res_of(&world, c, "energy"), 50, "容量缩小, 装不下的 50 掉落");
+}
+
+/// runReaction: 两个试剂 lab 各扣 5, 产物 +5, 冷却 REACTION_TIME[OH]=20 (API cooldown 下一 tick 读到 19)
+#[test]
+fn lab_run_reaction_amounts_and_cooldown() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let l1 = obj_at(&world, "W5N8", 30, 30, "lab");
+	let l2 = obj_at(&world, "W5N8", 31, 30, "lab");
+	let out = obj_at(&world, "W5N8", 32, 31, "lab");
+	let react = intent_json(out, "runReaction", &format!(r#"{{"lab1":"{l1:024x}","lab2":"{l2:024x}"}}"#));
+	run(&mut world, &mut movement, &[react.clone()]);
+	assert_eq!((res_of(&world, l1, "H"), res_of(&world, l2, "O"), res_of(&world, out, "OH")), (95, 95, 5));
+	let start = world.tick - 1;
+	assert_eq!(world.rooms["W5N8"].objects[&out].cooldown_time, start + 20);
+	for _ in 0..19 {
+		run(&mut world, &mut movement, &[react.clone()]);
+	}
+	assert_eq!(res_of(&world, out, "OH"), 5, "冷却 20 tick 内不再反应");
+	run(&mut world, &mut movement, &[react]);
+	assert_eq!(res_of(&world, out, "OH"), 10, "第 20 tick 冷却结束");
+}
+
+/// reverseReaction: 产物 lab 扣 5, 两个 lab 各得 5 试剂 (按官方 getReactionVariants 匹配已有矿物)
+#[test]
+fn lab_reverse_reaction() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let l1 = obj_at(&world, "W5N8", 30, 30, "lab");
+	let l2 = obj_at(&world, "W5N8", 31, 30, "lab");
+	let out = obj_at(&world, "W5N8", 32, 31, "lab");
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&out).unwrap().store.insert("OH".into(), 50);
+	run(&mut world, &mut movement, &[intent_json(out, "reverseReaction", &format!(r#"{{"lab1":"{l1:024x}","lab2":"{l2:024x}"}}"#))]);
+	assert_eq!((res_of(&world, l1, "H"), res_of(&world, l2, "O"), res_of(&world, out, "OH")), (105, 105, 45));
+	assert_eq!(world.rooms["W5N8"].objects[&out].cooldown_time, world.tick - 1 + 20);
+}
+
+/// 已持有一种矿物的 lab 不接收另一种 (官方 capacityForResource 为 0); 能量照收
+#[test]
+fn lab_rejects_second_mineral() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let l1 = obj_at(&world, "W5N8", 30, 30, "lab");
+	let c = add_creep(&mut world, "Hauler", 29, 29, &["carry", "carry", "move"]);
+	{
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&c).unwrap();
+		o.store.insert("O".into(), 50);
+		o.store.insert("H".into(), 50);
+	}
+	run(&mut world, &mut movement, &[intent_json(c, "transfer", &format!(r#"{{"id":"{l1:024x}","resourceType":"O","amount":50}}"#))]);
+	assert_eq!(res_of(&world, l1, "O"), 0, "持有 H 的 lab 不收 O");
+	run(&mut world, &mut movement, &[intent_json(c, "transfer", &format!(r#"{{"id":"{l1:024x}","resourceType":"H","amount":50}}"#))]);
+	assert_eq!(res_of(&world, l1, "H"), 150, "同种矿物照收");
+}
+
+/// boostCreep: TOUGH 从头、其余从尾强化; bodyPartsCount 截断; 每件 30 化合物 + 20 能量
+#[test]
+fn lab_boost_creep_order_and_cost() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let lab = obj_at(&world, "W5N8", 32, 31, "lab");
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&lab).unwrap().store.insert("UO".into(), 1000);
+	let c = add_creep(&mut world, "W", 33, 32, &["work", "carry", "work", "move", "work"]);
+	run(&mut world, &mut movement, &[intent_json(lab, "boostCreep", &format!(r#"{{"id":"{c:024x}","bodyPartsCount":2}}"#))]);
+	let boosts: Vec<Option<String>> = world.rooms["W5N8"].objects[&c].body.iter().map(|p| p.boost.clone()).collect();
+	assert_eq!(boosts, vec![None, None, Some("UO".into()), None, Some("UO".into())], "非 TOUGH 从尾部开始");
+	assert_eq!((res_of(&world, lab, "UO"), res_of(&world, lab, "energy")), (940, 1960));
+
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&lab).unwrap().store.remove("UO");
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&lab).unwrap().store.insert("GO".into(), 30);
+	let t = add_creep(&mut world, "Tank", 31, 32, &["tough", "tough", "move"]);
+	run(&mut world, &mut movement, &[intent_json(lab, "boostCreep", &format!(r#"{{"id":"{t:024x}"}}"#))]);
+	let boosts: Vec<Option<String>> = world.rooms["W5N8"].objects[&t].body.iter().map(|p| p.boost.clone()).collect();
+	assert_eq!(boosts, vec![Some("GO".into()), None, None], "TOUGH 从头开始; 化合物只够 1 件");
+	assert_eq!(res_of(&world, lab, "GO"), 0);
+}
+
+/// unboostCreep: 每件返还 15 化合物 (落在 creep 脚下), lab 冷却 = 件数 × 反应链总时长 × 15 / 5
+#[test]
+fn lab_unboost_refunds_and_cooldown() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let lab = obj_at(&world, "W5N8", 32, 31, "lab");
+	let c = add_boosted_creep(&mut world, "U", 33, 32, &[("work", Some("XUHO2")), ("work", Some("XUHO2")), ("move", Some("ZO"))]);
+	run(&mut world, &mut movement, &[intent_json(lab, "unboostCreep", &format!(r#"{{"id":"{c:024x}"}}"#))]);
+	assert!(world.rooms["W5N8"].objects[&c].body.iter().all(|p| p.boost.is_none()));
+	let piles: Vec<(String, u32)> = world.rooms["W5N8"]
+		.objects
+		.values()
+		.filter(|o| o.obj_type == "energy")
+		.map(|o| (o.resource_type().to_string(), o.resource_amount()))
+		.collect();
+	// 按 RESOURCES_ALL 顺序: ZO 在 XUHO2 之前; 同 tick 已衰减 1
+	assert_eq!(piles, vec![("ZO".to_string(), 14), ("XUHO2".to_string(), 29)]);
+	// XUHO2 链: 60 + UHO2(5 + UO 10 + OH 20) = 95; ZO = 10
+	// 冷却 = 2×95×3 + 1×10×3 = 600
+	assert_eq!(constants::total_reactions_time("XUHO2"), 95);
+	assert_eq!(world.rooms["W5N8"].objects[&lab].cooldown_time, world.tick - 1 + 600);
+}
+
+/// terminal.send: 能量费 ceil(amount × (1 − e^(−距离/30))), tick 末执行, 冷却 10; 目标仓空间不足时截断
+#[test]
+fn terminal_send_cost_capacity_and_cooldown() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let from = obj_at(&world, "W5N8", 20, 20, "terminal");
+	let to = obj_at(&world, "W4N8", 20, 20, "terminal");
+	let send = intent_json(from, "send", r#"{"resourceType":"H","amount":1000,"targetRoomName":"W4N8","description":"x<y"}"#);
+	run(&mut world, &mut movement, &[send.clone()]);
+	assert_eq!(res_of(&world, to, "H"), 1000);
+	assert_eq!(res_of(&world, from, "H"), 4000);
+	assert_eq!(res_of(&world, from, "energy"), 10_000 - 33, "ceil(1000 × (1 − e^(−1/30))) = 33");
+	assert_eq!(world.rooms["W5N8"].objects[&from].cooldown_time, world.tick - 1 + 10);
+	assert_eq!(world.transactions.len(), 1);
+	assert_eq!(world.transactions[0].description.as_deref(), Some("x&lt;y"), "官方转义 <");
+	for _ in 0..9 {
+		run(&mut world, &mut movement, &[send.clone()]);
+	}
+	assert_eq!(res_of(&world, to, "H"), 1000, "冷却期内的 send 丢弃");
+	// 目标仓只剩 500 空间: 截断为 500, 能量费按 500 计
+	world.rooms.get_mut("W4N8").unwrap().objects.get_mut(&to).unwrap().store.insert("energy".into(), 300_000 - 1500);
+	run(&mut world, &mut movement, &[send]);
+	assert_eq!(res_of(&world, to, "H"), 1500);
+	assert_eq!(res_of(&world, from, "energy"), 10_000 - 33 - 17, "ceil(500 × (1 − e^(−1/30))) = 17");
+	assert_eq!(screeps_sim::engine::intents::terminal_energy_cost(1000, 10), 284);
+}
+
+/// observeRoom: 观察的房间在下一 tick 的快照中可见, 再下一 tick 恢复不可见
+#[test]
+fn observer_grants_visibility_next_tick() {
+	use screeps_sim::engine::snapshot::{build_snapshot_value, CpuView, SnapshotOptions};
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let obs = obj_at(&world, "W5N8", 21, 20, "observer");
+	let opts = SnapshotOptions {
+		cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
+		always_visible: false,
+		include_terrain: false,
+	};
+	assert!(build_snapshot_value(&world, &opts)["rooms"].get("W5N9").is_none(), "空房默认不可见");
+	run(&mut world, &mut movement, &[intent_json(obs, "observeRoom", r#"{"roomName":"W5N9"}"#)]);
+	assert!(build_snapshot_value(&world, &opts)["rooms"].get("W5N9").is_some(), "observeRoom 的下一 tick 可见");
+	empty_tick(&mut world, &mut movement);
+	assert!(build_snapshot_value(&world, &opts)["rooms"].get("W5N9").is_none(), "观察只持续一 tick");
+}
+
+/// processPower: 消耗 1 power + 50 能量, 累计到 GPL (level = floor(√(power/1000)))
+#[test]
+fn power_spawn_process_power_and_gpl() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let ps = obj_at(&world, "W5N8", 22, 20, "powerSpawn");
+	let p = intent_json(ps, "processPower", "{}");
+	run(&mut world, &mut movement, &[p.clone()]);
+	assert_eq!((res_of(&world, ps, "power"), res_of(&world, ps, "energy")), (1, 50));
+	assert_eq!(world.power_processed, 1);
+	assert_eq!(world.gpl(), (0, 1, 1000));
+	run(&mut world, &mut movement, &[p.clone()]);
+	run(&mut world, &mut movement, &[p]);
+	assert_eq!(world.power_processed, 2, "能量不足 50 时不处理");
+	world.power_processed = 1000;
+	assert_eq!(world.gpl(), (1, 0, 3000), "GPL1: 起点 1000, 下一级 (1+1)²×1000 = 4000");
+}
+
+/// factory.produce: 0 级商品不需要工厂等级 (utrium_bar: 500 U + 200 能量 → 100, 冷却 20); 有等级商品需要 PWR 效果
+#[test]
+fn factory_produce_commodities() {
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let f = obj_at(&world, "W5N8", 23, 20, "factory");
+	run(&mut world, &mut movement, &[intent_json(f, "produce", r#"{"resourceType":"utrium_bar"}"#)]);
+	assert_eq!((res_of(&world, f, "U"), res_of(&world, f, "energy"), res_of(&world, f, "utrium_bar")), (500, 800, 100));
+	assert_eq!(world.rooms["W5N8"].objects[&f].cooldown_time, world.tick - 1 + 20);
+	{
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&f).unwrap();
+		o.cooldown_time = 0;
+		o.store.insert("zynthium_bar".into(), 100);
+		o.level = 1;
+	}
+	run(&mut world, &mut movement, &[intent_json(f, "produce", r#"{"resourceType":"composite"}"#)]);
+	assert_eq!(res_of(&world, f, "composite"), 0, "1 级商品需要 PWR_OPERATE_FACTORY 效果, 无 power creep 时恒失败");
+}
+
+/// 工业字段 (强化部件 / 矿物密度与再生计时 / lab/terminal/factory/extractor 冷却 / 非能量资源堆 /
+/// 观察可见 / gpl / 转账记录) 在直接序列化器与 Value 版之间保持一致
+#[test]
+fn snapshot_parity_with_industry_fields() {
+	use screeps_sim::engine::snapshot::{build_snapshot, build_snapshot_value, CpuView, SnapshotOptions};
+	let (mut world, mut movement) = setup(INDUSTRY);
+	let (miner, _, _) = find_creep(&world, "Miner");
+	let mineral = obj_at(&world, "W5N8", 40, 40, "mineral");
+	let l1 = obj_at(&world, "W5N8", 30, 30, "lab");
+	let l2 = obj_at(&world, "W5N8", 31, 30, "lab");
+	let out = obj_at(&world, "W5N8", 32, 31, "lab");
+	let term = obj_at(&world, "W5N8", 20, 20, "terminal");
+	let obs = obj_at(&world, "W5N8", 21, 20, "observer");
+	let ps = obj_at(&world, "W5N8", 22, 20, "powerSpawn");
+	let f = obj_at(&world, "W5N8", 23, 20, "factory");
+	let b = add_boosted_creep(&mut world, "Boosted", 12, 12, &[("tough", Some("GO")), ("carry", Some("KH")), ("move", None)]);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&b).unwrap().store.insert("K".into(), 30);
+	world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&mineral).unwrap().mineral_amount = Some(3);
+	run(
+		&mut world,
+		&mut movement,
+		&[
+			intent_json(miner, "harvest", &format!(r#"{{"id":"{mineral:024x}"}}"#)),
+			intent_json(out, "runReaction", &format!(r#"{{"lab1":"{l1:024x}","lab2":"{l2:024x}"}}"#)),
+			intent_json(term, "send", r#"{"resourceType":"H","amount":100,"targetRoomName":"W4N8"}"#),
+			intent_json(obs, "observeRoom", r#"{"roomName":"W5N9"}"#),
+			intent_json(ps, "processPower", "{}"),
+			intent_json(f, "produce", r#"{"resourceType":"utrium_bar"}"#),
+			intent_json(b, "drop", r#"{"resourceType":"K","amount":30}"#),
+		],
+	);
+	for always_visible in [false, true] {
+		let opts = SnapshotOptions {
+			cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
+			always_visible,
+			include_terrain: false,
+		};
+		let direct: serde_json::Value = serde_json::from_str(&build_snapshot(&world, &opts)).unwrap();
+		let reference = build_snapshot_value(&world, &opts);
+		assert_eq!(direct, reference, "直接序列化器与 Value 版不一致 (always_visible={always_visible})");
+		let objs = reference["rooms"]["W5N8"]["objects"].as_array().unwrap();
+		let by_id = |id: u64| objs.iter().find(|o| o["id"] == format!("{id:024x}")).unwrap().clone();
+		// 官方 cooldown = cooldownTime - Game.time: 下一 tick 读到 REACTION_TIME - 1 等
+		assert_eq!(by_id(out)["cooldown"], 19);
+		assert_eq!(by_id(term)["cooldown"], 9);
+		assert_eq!(by_id(f)["cooldown"], 19);
+		assert_eq!(by_id(mineral)["mineralAmount"], 0);
+		assert_eq!(by_id(mineral)["density"], 2);
+		assert_eq!(by_id(mineral)["ticksToRegeneration"], 50_000 - 1);
+		assert_eq!(by_id(b)["body"][0]["boost"], "GO");
+		assert_eq!(by_id(b)["storeCapacity"], 100);
+		let pile = objs.iter().find(|o| o["type"] == "energy" && o["resourceType"] == "K").unwrap();
+		assert_eq!(pile["amount"], 29);
+		assert!(pile.get("energy").is_none(), "非能量堆没有 energy 字段");
+		assert!(reference["rooms"].get("W5N9").is_some(), "observer 观察的房间可见");
+		assert_eq!(reference["gpl"]["progress"], 1);
+		assert_eq!(reference["transactions"][0]["amount"], 100);
+	}
 }
 
 /// 保留: 可以连续续保留; 不再续则到期清除 (官方 controllers/tick.js:10);

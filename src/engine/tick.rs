@@ -22,11 +22,15 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
     // 每 tick 重置: 控制器升级计数 / extension 容量 / 事件日志 / spawn 停用标记
     for room in world.rooms.values_mut() {
         room.refresh_extension_capacity();
-        room.refresh_spawn_off();
+        room.refresh_structure_activity();
         room.events.clear();
         for o in room.objects.values_mut() {
             if o.obj_type == "controller" {
                 o.upgraded_this_tick = 0;
+            }
+            // 官方 processor.js: 每 tick 开始清空 observer.observeRoom (观察只持续一 tick)
+            if o.obj_type == "observer" {
+                o.observe_room = None;
             }
         }
     }
@@ -67,14 +71,18 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
         // 先按类型分层处理 (engine 逐对象 tick, 对象类型互不交叠, 分层等价且借用友好)
         tick_dropped_energy(world, room_name);
         tick_sources(world, room_name);
+        tick_minerals(world, room_name);
         moved_count += tick_creeps(world, room_name, &mut movement, &mut deaths, &mut pending_crossings);
         tick_spawns(world, room_name, &mut movement);
         tick_controllers(world, room_name);
         tick_decay_structures(world, room_name);
         tick_cooldowns(world, room_name);
+        tick_store_capacity(world, room_name);
         tick_tombstones(world, room_name);
     }
     apply_crossings(world, &mut pending_crossings);
+    // 全局阶段 (官方 global-intents/market.js): 房间结算全部完成后执行终端转账
+    intents::execute_terminal_sends(world, &effects.sends);
 
     let _ = tick;
     world.tick += 1;
@@ -94,7 +102,7 @@ fn apply_suicides(world: &mut World, effects: &TickEffects) {
     }
 }
 
-/// 掉落能量: 每 tick ceil(amount / 1000) 衰减
+/// 掉落资源: 每 tick ceil(amount / 1000) 衰减 (官方 energy/tick.js, 对任意 resourceType)
 fn tick_dropped_energy(world: &mut World, room_name: &str) {
     let ids: Vec<u64> = world.rooms[room_name]
         .objects
@@ -105,15 +113,62 @@ fn tick_dropped_energy(world: &mut World, room_name: &str) {
     for id in ids {
         let room = world.rooms.get_mut(room_name).unwrap();
         if let Some(obj) = room.objects.get_mut(&id) {
-            let amount = obj.store.get("energy").copied().unwrap_or(0);
+            let resource = obj.resource_type().to_string();
+            let amount = obj.resource_amount();
             let decay = (amount + constants::ENERGY_DECAY - 1) / constants::ENERGY_DECAY;
             let left = amount.saturating_sub(decay);
             if left == 0 {
                 room.objects.remove(&id);
             } else {
-                obj.store.insert("energy".into(), left);
+                obj.store.insert(resource, left);
             }
         }
+    }
+}
+
+/// 矿物再生 (官方 minerals/tick.js): 储量归零起挂 MINERAL_REGEN_TIME 计时, 到点按密度回满;
+/// DENSITY_LOW/ULTRA 必然、其余以 MINERAL_DENSITY_CHANGE 概率重新抽取 (且不同于旧) 密度。
+/// 官方用 Math.random, 这里用场景 seed 播种的引擎随机数 (可复现)。
+fn tick_minerals(world: &mut World, room_name: &str) {
+    let tick = world.tick;
+    let ids: Vec<u64> = world.rooms[room_name]
+        .objects
+        .values()
+        .filter(|o| o.obj_type == "mineral" && o.mineral_amount.unwrap_or(0) == 0)
+        .map(|o| o.id)
+        .collect();
+    for id in ids {
+        let (next, density) = {
+            let obj = world.rooms.get_mut(room_name).unwrap().objects.get_mut(&id).unwrap();
+            if obj.next_regeneration_time.is_none() {
+                obj.next_regeneration_time = Some(tick + constants::MINERAL_REGEN_TIME);
+            }
+            (obj.next_regeneration_time.unwrap(), obj.density)
+        };
+        if tick < next.saturating_sub(1) {
+            continue;
+        }
+        let mut new_density = density;
+        let change = density == constants::DENSITY_LOW || density == constants::DENSITY_ULTRA || world.random() < constants::MINERAL_DENSITY_CHANGE;
+        if change {
+            loop {
+                let r = world.random();
+                for (d, p) in constants::MINERAL_DENSITY_PROBABILITY {
+                    if r <= *p {
+                        new_density = *d;
+                        break;
+                    }
+                }
+                if new_density != density {
+                    break;
+                }
+            }
+        }
+        let obj = world.rooms.get_mut(room_name).unwrap().objects.get_mut(&id).unwrap();
+        // 官方: mineralAmount 取旧密度的储量, density 字段再更新为新密度
+        obj.mineral_amount = Some(constants::mineral_density_amount(density));
+        obj.next_regeneration_time = None;
+        obj.density = new_density;
     }
 }
 
@@ -209,7 +264,8 @@ fn tick_creeps(
         }
 
         // 疲劳恢复 (官方 creeps/tick.js: -2 × MOVE, 经 _add-fatigue 先抵自己、剩余交给拉人者)
-        let moves = obj.live_parts("move") as i64;
+        // 官方 creeps/tick.js: calcBodyEffectiveness(MOVE, 'fatigue', 1) —— ZO/ZHO2/XZHO2 强化 ×2/×3/×4
+        let moves = obj.calc_body_effectiveness("move", "fatigue", 1) as i64;
         if moves > 0 {
             movement.add_fatigue(room, id, -2 * moves);
         }
@@ -217,10 +273,11 @@ fn tick_creeps(
 
         // 伤害/治疗统一应用 (官方 processor/intents/creeps/tick.js: 在 creep tick 末尾)
         let old_hits = obj.hits;
-        // 官方: hits -= damage; hits += heal; 截到 hitsMax; <= 0 才死 —— 先扣后加用有符号数,
-        // 同 tick 的治疗救不回已打穿的 (例: 100 血吃 300 伤害 + 150 治疗 → 死)
+        // 官方 creeps/tick.js: hits -= _applyDamage(damage) (强化 TOUGH 按倍率折减); hits += heal;
+        // 截到 hitsMax; <= 0 才死 —— 先扣后加用有符号数, 同 tick 的治疗救不回已打穿的
         if obj.damage_to_apply > 0 || obj.heal_to_apply > 0 {
-            let h = obj.hits as i64 - obj.damage_to_apply as i64 + obj.heal_to_apply as i64;
+            let dmg = if obj.damage_to_apply > 0 { obj.effective_damage(obj.damage_to_apply) } else { 0 };
+            let h = obj.hits as i64 - dmg as i64 + obj.heal_to_apply as i64;
             obj.hits = h.clamp(0, obj.hits_max as i64) as u32;
             obj.damage_to_apply = 0;
             obj.heal_to_apply = 0;
@@ -462,13 +519,39 @@ fn tick_decay_structures(world: &mut World, room_name: &str) {
     }
 }
 
-/// link 冷却: 每 tick 减 1 (官方 links/tick.js, 在意图结算之后执行)
+/// 冷却: 每 tick 减 1 (官方 links/tick.js / extractors/tick.js, 在意图结算之后执行);
+/// extractor 本 tick 采矿登记的 `_cooldown` 在递减之后写入。
+/// (lab / terminal / factory 用绝对到期 tick `cooldown_time`, 无需递减)
 fn tick_cooldowns(world: &mut World, room_name: &str) {
     let room = world.rooms.get_mut(room_name).unwrap();
     for o in room.objects.values_mut() {
         if o.cooldown > 0 {
             o.cooldown -= 1;
         }
+        if o.pending_cooldown > 0 {
+            o.cooldown = o.pending_cooldown;
+            o.pending_cooldown = 0;
+        }
+    }
+}
+
+/// 官方 terminals/tick.js / factories/tick.js: 房间归属且 RCL 允许该结构时容量为
+/// TERMINAL_CAPACITY / FACTORY_CAPACITY, 否则为 0
+fn tick_store_capacity(world: &mut World, room_name: &str) {
+    let room = world.rooms.get_mut(room_name).unwrap();
+    let (owned, level) = room
+        .controller()
+        .map(|c| (c.mine && c.level > 0, c.level))
+        .unwrap_or((false, 0));
+    let Some(_) = room.controller() else { return };
+    for o in room.objects.values_mut() {
+        let full = match o.obj_type.as_str() {
+            "terminal" => constants::TERMINAL_CAPACITY,
+            "factory" => constants::FACTORY_CAPACITY,
+            _ => continue,
+        };
+        let allowed = owned && o.mine && constants::controller_structure_limit(&o.obj_type, level) > 0;
+        o.energy_capacity = if allowed { full } else { 0 };
     }
 }
 

@@ -94,6 +94,9 @@ pub struct MineralSpec {
     pub mineral_type: String,
     #[serde(default = "default_mineral_amount")]
     pub amount: u32,
+    /// 官方 density (1..4, 默认 DENSITY_MODERATE): 枯竭再生时的储量 MINERAL_DENSITY[density]
+    #[serde(default)]
+    pub density: Option<u8>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -106,12 +109,48 @@ pub struct StructureSpec {
     /// 敌方结构 (mine=false, enemy=true)
     #[serde(default)]
     pub enemy: bool,
+    /// 预置仓储 (如 {"energy": 1000, "H": 3000}): 中后期场景直接起步。
+    /// 与 `energy` 同时给出时以 store 里的 energy 为准。
+    #[serde(default)]
+    pub store: BTreeMap<String, u32>,
+    /// 工厂等级 (官方 factory.level, 仅 factory 有意义)
+    #[serde(default)]
+    pub level: Option<u8>,
+}
+
+/// 身体部件: 字符串 "work" 或带强化的对象 {"type": "work", "boost": "UO"}
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum BodyPartSpec {
+    Plain(String),
+    Boosted {
+        #[serde(rename = "type")]
+        part_type: String,
+        #[serde(default)]
+        boost: Option<String>,
+    },
+}
+
+impl BodyPartSpec {
+    pub fn part_type(&self) -> &str {
+        match self {
+            BodyPartSpec::Plain(t) => t,
+            BodyPartSpec::Boosted { part_type, .. } => part_type,
+        }
+    }
+
+    pub fn boost(&self) -> Option<&str> {
+        match self {
+            BodyPartSpec::Plain(_) => None,
+            BodyPartSpec::Boosted { boost, .. } => boost.as_deref(),
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct CreepSpec {
     pub name: String,
-    pub body: Vec<String>,
+    pub body: Vec<BodyPartSpec>,
     pub pos: [u8; 2],
     pub ttl: Option<u64>,
     #[serde(default)]
@@ -262,6 +301,11 @@ impl Scenario {
             }
             if let Some(m) = &room.mineral {
                 check_pos(&room.name, "mineral", m.pos)?;
+                if let Some(d) = m.density {
+                    if !(1..=4).contains(&d) {
+                        return Err(format!("{} mineral.density {} 超出 1..4", room.name, d));
+                    }
+                }
             }
             let mut creeps = std::collections::BTreeSet::new();
             for cr in &room.creeps {
@@ -279,8 +323,19 @@ impl Scenario {
                     ));
                 }
                 for part in &cr.body {
-                    if !constants::is_known_bodypart(part) {
-                        return Err(format!("{} 单位 {} 含未知部件 {:?}", room.name, cr.name, part));
+                    if !constants::is_known_bodypart(part.part_type()) {
+                        return Err(format!("{} 单位 {} 含未知部件 {:?}", room.name, cr.name, part.part_type()));
+                    }
+                    if let Some(b) = part.boost() {
+                        if !constants::boost_applies(part.part_type(), b) {
+                            return Err(format!(
+                                "{} 单位 {} 的 {} 部件不能用 {:?} 强化 (见官方 BOOSTS)",
+                                room.name,
+                                cr.name,
+                                part.part_type(),
+                                b
+                            ));
+                        }
                     }
                 }
                 if !creeps.insert(cr.name.clone()) {
@@ -373,6 +428,7 @@ fn is_valid_room_name(name: &str) -> bool {
 pub fn build_world(scenario: &Scenario) -> Result<World, String> {
     let seed = scenario.seed.unwrap_or(1);
     let mut world = World::new();
+    world.seed_rng(seed);
     for spec in &scenario.rooms {
         let terrain = build_terrain(spec, seed)?;
         let mut room = crate::engine::world::Room::new(&spec.name, terrain);
@@ -445,8 +501,11 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
         // Mineral
         if let Some(m) = &spec.mineral {
             let id = world.alloc_id();
-            room.objects
-                .insert(id, objects::mineral(id, m.pos[0], m.pos[1], &m.mineral_type, m.amount));
+            let mut obj = objects::mineral(id, m.pos[0], m.pos[1], &m.mineral_type, m.amount);
+            if let Some(d) = m.density {
+                obj.density = d;
+            }
+            room.objects.insert(id, obj);
             clear_walls_around(&mut room, m.pos[0], m.pos[1], keep_terrain);
         }
 
@@ -464,6 +523,16 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
             if let Some(e) = st.energy {
                 obj.store.insert("energy".into(), e);
             }
+            for (res, amount) in &st.store {
+                if *amount > 0 {
+                    obj.store.insert(res.clone(), *amount);
+                } else {
+                    obj.store.remove(res);
+                }
+            }
+            if let Some(l) = st.level {
+                obj.level = l;
+            }
             if let Some(h) = st.hits {
                 obj.hits = h;
             }
@@ -471,18 +540,12 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
                 obj.mine = false;
                 obj.enemy = true;
             }
-            match st.structure_type.as_str() {
-                "spawn" => {
-                    obj.energy_capacity = constants::SPAWN_ENERGY_CAPACITY;
-                    spawn_index += 1;
-                    obj.name = Some(format!("Spawn{spawn_index}"));
-                }
-                "storage" => obj.energy_capacity = constants::STORAGE_CAPACITY,
-                "container" => obj.energy_capacity = constants::CONTAINER_CAPACITY,
-                "tower" => obj.energy_capacity = constants::TOWER_CAPACITY,
-                "terminal" => obj.energy_capacity = constants::TERMINAL_CAPACITY,
-                "link" => obj.energy_capacity = constants::LINK_CAPACITY,
-                _ => {}
+            if st.structure_type != "extension" {
+                obj.energy_capacity = constants::structure_energy_capacity(&st.structure_type, 0);
+            }
+            if st.structure_type == "spawn" {
+                spawn_index += 1;
+                obj.name = Some(format!("Spawn{spawn_index}"));
             }
             room.objects.insert(id, obj);
         }
@@ -493,7 +556,11 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
             let body: Vec<BodyPart> = cr
                 .body
                 .iter()
-                .map(|p| BodyPart { part_type: p.clone(), hits: 100 })
+                .map(|p| BodyPart {
+                    part_type: p.part_type().to_string(),
+                    hits: 100,
+                    boost: p.boost().map(str::to_string),
+                })
                 .collect();
             let mut obj = objects::creep_obj(id, &cr.name, cr.pos[0], cr.pos[1], body);
             obj.store = cr.store.clone();
