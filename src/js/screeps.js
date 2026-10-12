@@ -563,6 +563,8 @@ let __intents = [];
 let __consoleLines = [];
 /** 本 tick 已创建的 creep 名 (官方 createdCreepNames), 每 tick 重建 */
 let __createdCreepNames = new Set();
+/** 本 tick 最后一次 activateSafeMode 的控制器 id (官方 lastActivateSafeMode) */
+let __lastActivateSafeMode = null;
 /** 本 tick 已创建的工地数 (官方把同 tick 新建计入 100 上限) */
 let __createdSiteCount = 0;
 
@@ -1378,6 +1380,36 @@ function getReactionVariants(compound) {
 	for (const r1 in C.REACTIONS) for (const r2 in C.REACTIONS[r1]) if (C.REACTIONS[r1][r2] === compound) result.push([r1, r2]);
 	return result;
 }
+/**
+ * 官方 utils.checkStructureAgainstController: 结构在当前 RCL 下是否可用。
+ * 无主对象恒为 true; 控制器缺失 / 等级 < 1 / 与结构归属不同 → false;
+ * 否则数同类型、同归属且距控制器更近的结构 (同距离时迭代序在前者算更近), 超过 CONTROLLER_STRUCTURES 上限即不可用。
+ */
+function checkStructureAgainstController(obj) {
+	if (obj.my === undefined) return true;
+	const room = Game.rooms[obj.pos.roomName];
+	const ctrl = room && room.controller;
+	if (!ctrl || !(ctrl.level >= 1) || ctrl.my !== obj.my) return false;
+	const table = C.CONTROLLER_STRUCTURES[obj.structureType];
+	if (!table) return true;
+	let allowed = table[ctrl.level];
+	if (!allowed) return false;
+	if (table[8] === 1) return true;
+	const dist = (o) => Math.max(Math.abs(o.pos.x - ctrl.pos.x), Math.abs(o.pos.y - ctrl.pos.y));
+	const own = dist(obj);
+	let foundSelf = false;
+	for (const o of room.__byType[obj.structureType] || []) {
+		if (o.my !== obj.my) continue;
+		const d = dist(o);
+		if (d < own) {
+			if (--allowed === 0) return false;
+		} else if (!foundSelf && d === own) {
+			if (o === obj || o.id === obj.id) foundSelf = true;
+			else if (--allowed === 0) return false;
+		}
+	}
+	return true;
+}
 
 class Structure extends RoomObject {
 	constructor(raw) {
@@ -1398,16 +1430,30 @@ class Structure extends RoomObject {
 		}
 		return this.__storeObj;
 	}
-	/** 官方 isActive(): 超出 RCL 上限被停用的 spawn/extension 返回 false */
+	/** 官方 E/game/structures.js:108-119: 无主或不受 CONTROLLER_STRUCTURES 约束 → true, 否则按 checkStructureAgainstController */
 	isActive() {
-		return !this.__off;
+		if (!this.owner) return true;
+		if (!C.CONTROLLER_STRUCTURES[this.structureType]) return true;
+		if (!this.room || !this.room.controller) return false;
+		return checkStructureAgainstController(this);
 	}
+	/** 官方 E/game/structures.js:72-86: 看房间控制器归属而不是结构归属; 房内有敌方单位 → ERR_BUSY */
 	destroy() {
-		if (!this.my) return C.ERR_NOT_OWNER;
-		intent("room", "destroyStructure", { id: this.id, room: this.pos.roomName });
+		const room = this.room;
+		if (!room) return C.ERR_INVALID_TARGET;
+		if (!room.controller || !room.controller.my) return C.ERR_NOT_OWNER;
+		if (room.find(C.FIND_HOSTILE_CREEPS).length > 0 || room.find(C.FIND_HOSTILE_POWER_CREEPS).length > 0) {
+			return C.ERR_BUSY;
+		}
+		intent("room", "destroyStructure", { id: this.id, room: room.name });
 		return C.OK;
 	}
-	notifyWhenAttacked() {
+	/** 官方 E/game/structures.js:89-106 (模拟器没有被攻击通知, 只校验参数不发意图) */
+	notifyWhenAttacked(enabled) {
+		if (!this.room) return C.ERR_INVALID_TARGET;
+		const ctrl = this.room.controller;
+		if (this.my === false || (ctrl && ctrl.owner && !ctrl.my)) return C.ERR_NOT_OWNER;
+		if (typeof enabled !== "boolean") return C.ERR_INVALID_ARGS;
 		return C.OK;
 	}
 	toString() {
@@ -1422,11 +1468,71 @@ class OwnedStructure extends Structure {
 		this.owner = this.my ? { username: "Nexus" } : undefined;
 	}
 }
+/** 官方 E/game/structures.js:1050-1059: energyStructures 中未停用的 spawn/extension 的能量合计 */
+function calcEnergyAvailable(ids) {
+	let sum = 0;
+	for (const id of ids) {
+		const o = id === undefined || id === null ? null : byId.get(id);
+		if (o && !o.__off && (o.structureType === "spawn" || o.structureType === "extension") && o.store) {
+			sum += o.store.energy || 0;
+		}
+	}
+	return sum;
+}
+
+/** 官方 createCreep 的随机名字 (names.getUniqueName 的精简名单) */
+const CREEP_NAMES = [
+	"Jackson", "Aiden", "Liam", "Lucas", "Noah", "Mason", "Ethan", "Jacob", "Logan", "Caleb", "Henry", "Carter",
+	"Sophia", "Emma", "Olivia", "Isabella", "Mia", "Ava", "Lily", "Zoe", "Emily", "Chloe", "Layla", "Madison",
+];
+function uniqueCreepName() {
+	let name;
+	let c = 0;
+	do {
+		name = CREEP_NAMES[Math.floor(Math.random() * CREEP_NAMES.length)];
+		if (c > 3) name += CREEP_NAMES[Math.floor(Math.random() * CREEP_NAMES.length)];
+		c++;
+	} while (Game.creeps[name] || __createdCreepNames.has(name));
+	return name;
+}
+
+/**
+ * 官方 E/game/structures.js:983-1047 / 1143-1213: spawnCreep/createCreep 成功后立刻把占位 Creep 放进
+ * Game.creeps (spawning:true, ticksToLive=CREEP_LIFE_TIME, 空 store, 满血, 位于 spawn 格)
+ */
+function placeholderCreep(spawn, name, body) {
+	const carry = body.reduce((n, t) => n + (t === C.CARRY ? C.CARRY_CAPACITY : 0), 0);
+	const creep = new Creep({
+		id: undefined,
+		x: spawn.pos.x,
+		y: spawn.pos.y,
+		roomName: spawn.pos.roomName,
+		name,
+		my: true,
+		body: body.map((type) => ({ type, hits: 100 })),
+		fatigue: 0,
+		spawning: true,
+		ticksToLive: C.CREEP_LIFE_TIME,
+		hits: body.length * 100,
+		hitsMax: body.length * 100,
+		store: {},
+		storeCapacity: carry,
+	});
+	Game.creeps[name] = creep;
+	return creep;
+}
+
+/** 官方方向校验: 去重后的数字数组, 每个都是 1..8 的整数 */
+function validDirections(directions) {
+	return directions.every((d) => d >= 1 && d <= 8 && d === (d | 0));
+}
+
 class StructureSpawn extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
 		this.name = raw.name;
-		this.spawning = raw.spawning || null;
+		// 官方: spawning 为 StructureSpawn.Spawning 实例 (含 setDirections / cancel)
+		this.spawning = raw.spawning ? new Spawning(this, raw.spawning) : null;
 		this.energy = raw.store ? raw.store.energy || 0 : 0;
 		this.energyCapacity = raw.energyCapacity;
 	}
@@ -1439,48 +1545,92 @@ class StructureSpawn extends OwnedStructure {
 		if (!Memory.spawns) Memory.spawns = {};
 		Memory.spawns[this.name] = v;
 	}
-	/** 官方 E/game/structures.js:1073-1128 */
-	spawnCreep(body, name, opts) {
-		opts = opts || {};
-		if (this.spawning) return C.ERR_BUSY;
-		if (typeof name !== "string" || !name || name.length > 100) return C.ERR_INVALID_ARGS;
+	/** 官方 E/game/structures.js:1063-1218 (检查顺序逐条照搬) */
+	spawnCreep(body, name, options = {}) {
+		if (!name || !_.isObject(options)) return C.ERR_INVALID_ARGS;
+		name = name.toString();
+		if (name.length > 100) return C.ERR_INVALID_ARGS;
 		if (Game.creeps[name] || __createdCreepNames.has(name)) return C.ERR_NAME_EXISTS;
-		if (!Array.isArray(body) || body.length === 0) return C.ERR_INVALID_ARGS;
-		// 官方: 超过 50 个部件返回 ERR_INVALID_ARGS (不再静默截断)
-		if (body.length > C.MAX_CREEP_SIZE) return C.ERR_INVALID_ARGS;
-		let cost = 0;
-		for (const p of body) {
-			if (!C.BODYPART_COST[p]) return C.ERR_INVALID_ARGS;
-			cost += C.BODYPART_COST[p];
+		const energyStructures = options.energyStructures && _.uniq(_.map(options.energyStructures, "id"));
+		let directions = options.directions;
+		if (directions !== undefined) {
+			if (!Array.isArray(directions)) return C.ERR_INVALID_ARGS;
+			directions = _.uniq(directions.map((d) => +d));
+			if (directions.length === 0 || !validDirections(directions)) return C.ERR_INVALID_ARGS;
 		}
-		if (cost > this.room.energyAvailable) return C.ERR_NOT_ENOUGH_ENERGY;
-		// dryRun: 副作用 (意图/Memory) 之前返回
-		if (opts.dryRun) return C.OK;
-		if (!Memory.creeps) Memory.creeps = {};
-		// 官方总是创建 Memory.creeps[name], 未传 opts.memory 时为 {}
-		Memory.creeps[name] = opts.memory || {};
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (this.__off) return C.ERR_RCL_NOT_ENOUGH;
+		if (!body || !Array.isArray(body) || body.length === 0 || body.length > C.MAX_CREEP_SIZE) return C.ERR_INVALID_ARGS;
+		for (const p of body) {
+			if (!C.BODYPARTS_ALL.includes(p)) return C.ERR_INVALID_ARGS;
+		}
+		const cost = body.reduce((n, p) => n + C.BODYPART_COST[p], 0);
+		const energyAvailable = energyStructures ? calcEnergyAvailable(energyStructures) : this.room.energyAvailable;
+		if (energyAvailable < cost) return C.ERR_NOT_ENOUGH_ENERGY;
+		// dryRun: 副作用 (意图/Memory/占位 creep) 之前返回
+		if (options.dryRun) return C.OK;
 		__createdCreepNames.add(name);
-		const data = { body, name };
-		if (opts.directions) data.directions = opts.directions;
-		if (opts.energyStructures) data.energyStructures = opts.energyStructures.map((s) => s.id || s);
+		if (Memory.creeps === undefined) Memory.creeps = {};
+		if (_.isObject(Memory.creeps)) Memory.creeps[name] = options.memory || Memory.creeps[name] || {};
+		placeholderCreep(this, name, body);
+		const data = { name, body };
+		if (energyStructures) data.energyStructures = energyStructures;
+		if (directions) data.directions = directions;
 		intent(this.id, "spawnCreep", data);
 		return C.OK;
 	}
-	/** 官方 StructureSpawn.setDirections: 覆盖正在孵化单位的出生方向 */
-	setDirections(name, directions) {
-		if (this.spawning && this.spawning.name === name) {
-			intent(this.id, "setDirections", { name, directions });
-			return C.OK;
+	/** 官方 E/game/structures.js:897-931 (旧 API, 检查顺序与 spawnCreep 不同) */
+	canCreateCreep(body, name) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.spawning) return C.ERR_BUSY;
+		if (!body || !Array.isArray(body) || body.length === 0 || body.length > C.MAX_CREEP_SIZE) return C.ERR_INVALID_ARGS;
+		for (const p of body) {
+			if (!C.BODYPARTS_ALL.includes(p)) return C.ERR_INVALID_ARGS;
 		}
-		return C.ERR_NOT_FOUND;
+		if (this.room.energyAvailable < creepCost(body.map((type) => ({ type })))) {
+			return C.ERR_NOT_ENOUGH_ENERGY;
+		}
+		if (this.__off) return C.ERR_RCL_NOT_ENOUGH;
+		if (name) {
+			name = name.toString();
+			if (Game.creeps[name] || __createdCreepNames.has(name)) return C.ERR_NAME_EXISTS;
+			if (name.length > 100) return C.ERR_INVALID_ARGS;
+		}
+		return C.OK;
 	}
-	canCreateCreep() {
-		return this.spawning ? C.ERR_BUSY : C.OK;
+	/** 官方 E/game/structures.js:933-1047: 成功返回名字 (未给名字时随机生成), 失败返回错误码 */
+	createCreep(body, name, creepMemory) {
+		if (_.isObject(name) && creepMemory === undefined) {
+			creepMemory = name;
+			name = undefined;
+		}
+		const code = this.canCreateCreep(body, name);
+		if (code !== C.OK) return code;
+		name = name ? name.toString() : uniqueCreepName();
+		__createdCreepNames.add(name);
+		if (Memory.creeps === undefined) Memory.creeps = {};
+		if (_.isObject(Memory.creeps)) {
+			if (creepMemory !== undefined) Memory.creeps[name] = creepMemory;
+			else Memory.creeps[name] = Memory.creeps[name] || {};
+		}
+		placeholderCreep(this, name, body);
+		intent(this.id, "spawnCreep", { name, body });
+		return name;
+	}
+	/** 官方 E/game/structures.js:1220-1235: spawn 版本只校验归属与参数类型 */
+	notifyWhenAttacked(enabled) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (typeof enabled !== "boolean") return C.ERR_INVALID_ARGS;
+		return C.OK;
 	}
 	/** 官方 E/game/structures.js:1237-1266 */
 	renewCreep(target) {
 		if (this.spawning) return C.ERR_BUSY;
-		if (!target || !target.id || !(target instanceof Creep) || target.spawning) return C.ERR_INVALID_TARGET;
+		// 官方: 带 CLAIM 部件的 creep 不能续命 → ERR_INVALID_TARGET
+		if (!target || !target.id || !(target instanceof Creep) || target.spawning || target.body.some((p) => p.type === C.CLAIM)) {
+			return C.ERR_INVALID_TARGET;
+		}
 		if (!this.my || !target.my) return C.ERR_NOT_OWNER;
 		if (this.__off) return C.ERR_RCL_NOT_ENOUGH;
 		if (!this.pos.isNearTo(target.pos)) return C.ERR_NOT_IN_RANGE;
@@ -1506,24 +1656,77 @@ class StructureSpawn extends OwnedStructure {
 		return `[spawn ${this.name}]`;
 	}
 }
+
+/** 官方 E/game/structures.js:1293-1335: StructureSpawn.Spawning (spawn 为不可枚举属性) */
+class Spawning {
+	constructor(spawn, raw) {
+		Object.defineProperty(this, "spawn", { enumerable: false, value: spawn });
+		this.name = raw.name;
+		this.needTime = raw.needTime;
+		this.remainingTime = raw.remainingTime;
+		this.directions = raw.directions === null ? undefined : raw.directions;
+	}
+	setDirections(directions) {
+		if (!this.spawn.my) return C.ERR_NOT_OWNER;
+		if (Array.isArray(directions) && directions.length > 0) {
+			directions = _.uniq(directions.map((d) => +d));
+			if (validDirections(directions)) {
+				intent(this.spawn.id, "setSpawnDirections", { directions });
+				return C.OK;
+			}
+		}
+		return C.ERR_INVALID_ARGS;
+	}
+	cancel() {
+		if (!this.spawn.my) return C.ERR_NOT_OWNER;
+		intent(this.spawn.id, "cancelSpawning", {});
+		return C.OK;
+	}
+}
+StructureSpawn.Spawning = Spawning;
 class StructureController extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
+		// 官方 E/game/structures.js:174-196 的 getter 语义
 		this.level = raw.level;
-		this.progress = raw.progress;
-		this.progressTotal = raw.progressTotal;
-		this.ticksToDowngrade = raw.ticksToDowngrade;
+		this.progress = raw.level > 0 ? raw.progress : undefined;
+		this.progressTotal = raw.level > 0 && raw.level < 8 ? C.CONTROLLER_LEVELS[raw.level] : undefined;
+		this.ticksToDowngrade = raw.ticksToDowngrade == null ? undefined : raw.ticksToDowngrade;
 		this.safeModeAvailable = raw.safeModeAvailable || 0;
-		this.safeMode = raw.safeMode || null;
-		this.safeModeCooldown = null;
-		this.upgradeBlocked = raw.upgradeBlocked || 0;
+		this.safeMode = raw.safeMode || undefined;
+		this.safeModeCooldown = raw.safeModeCooldown || undefined;
+		this.upgradeBlocked = raw.upgradeBlocked || undefined;
 		// 官方 structures.js: 没有保留时为 undefined; 字段名 ticksToEnd
 		this.reservation = raw.reservation || undefined;
-		this.sign = raw.sign || null;
+		this.sign = raw.sign || undefined;
 		this.isPowerEnabled = false;
 	}
-	activateSafeMode() { return C.ERR_INVALID_ARGS; }
-	unclaim() { return C.OK; }
+	/** 官方 E/game/structures.js:211-237 */
+	activateSafeMode() {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.safeModeAvailable <= 0) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (
+			this.safeModeCooldown ||
+			this.upgradeBlocked > 0 ||
+			this.ticksToDowngrade < C.CONTROLLER_DOWNGRADE[this.level] / 2 - C.CONTROLLER_DOWNGRADE_SAFEMODE_THRESHOLD
+		) {
+			return C.ERR_TIRED;
+		}
+		if (_.any(Game.structures, (i) => i.structureType === "controller" && i.my && i.safeMode)) return C.ERR_BUSY;
+		// 官方: 同 tick 只保留最后一次 activateSafeMode
+		if (__lastActivateSafeMode) {
+			__intents = __intents.filter((e) => !(e.o === __lastActivateSafeMode && e.n === "activateSafeMode"));
+		}
+		__lastActivateSafeMode = this.id;
+		intent(this.id, "activateSafeMode", {});
+		return C.OK;
+	}
+	/** 官方 E/game/structures.js:201-209 */
+	unclaim() {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		intent(this.id, "unclaim", {});
+		return C.OK;
+	}
 	toString() {
 		return `[controller ${this.pos.roomName}]`;
 	}
@@ -1559,7 +1762,7 @@ class StructureTerminal extends OwnedStructure {
 	}
 	send(resourceType, amount, targetRoomName, description) {
 		if (!this.my) return C.ERR_NOT_OWNER;
-		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		if (!/^(W|E)\d+(N|S)\d+$/.test(targetRoomName)) return C.ERR_INVALID_ARGS;
 		if (!C.RESOURCES_ALL.includes(resourceType)) return C.ERR_INVALID_ARGS;
 		const store = this.__raw.store || {};
@@ -1587,6 +1790,7 @@ class StructureTower extends OwnedStructure {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (!target || !target.id || !(target instanceof Creep) && !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
 		if (!this.store || this.store.energy < C.TOWER_ENERGY_COST) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		intent(this.id, "attack", { id: target.id });
 		return C.OK;
 	}
@@ -1595,6 +1799,7 @@ class StructureTower extends OwnedStructure {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (!target || !target.id || !(target instanceof Creep)) return C.ERR_INVALID_TARGET;
 		if (!this.store || this.store.energy < C.TOWER_ENERGY_COST) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		intent(this.id, "heal", { id: target.id });
 		return C.OK;
 	}
@@ -1603,6 +1808,7 @@ class StructureTower extends OwnedStructure {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (!target || !target.id || !(target instanceof Structure)) return C.ERR_INVALID_TARGET;
 		if (!this.store || this.store.energy < C.TOWER_ENERGY_COST) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		intent(this.id, "repair", { id: target.id });
 		return C.OK;
 	}
@@ -1614,18 +1820,28 @@ class StructureLink extends OwnedStructure {
 		this.energyCapacity = raw.energyCapacity;
 		this.cooldown = raw.cooldown || 0;
 	}
-	/** 官方 E/game/structures.js:488-540 */
+	/** 官方 E/game/structures.js:488-537 (检查顺序逐条照搬) */
 	transferEnergy(target, amount) {
 		if (amount < 0) return C.ERR_INVALID_ARGS;
 		if (!target || !target.id || !(target instanceof Structure) || target === this || target.structureType !== C.STRUCTURE_LINK) {
 			return C.ERR_INVALID_TARGET;
 		}
 		if (!target.my) return C.ERR_NOT_OWNER;
+		if (this.my === false && this.room.lookForAt(C.LOOK_STRUCTURES, this.pos).some((s) => s.structureType === C.STRUCTURE_RAMPART)) {
+			return C.ERR_NOT_OWNER;
+		}
 		if (this.cooldown > 0) return C.ERR_TIRED;
 		if (!this.room.controller) return C.ERR_RCL_NOT_ENOUGH;
-		if (!this.store || !this.store.energy) return C.ERR_NOT_ENOUGH_ENERGY;
-		if (!amount) amount = Math.min(this.store.energy, (target.energyCapacity || 0) - (target.energy || 0));
-		if (this.store.energy < amount) return C.ERR_NOT_ENOUGH_ENERGY;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
+		const energy = this.store ? this.store.energy : 0;
+		if (!energy) return C.ERR_NOT_ENOUGH_ENERGY;
+		const targetCap = target.energyCapacity || 0;
+		const targetEnergy = target.store ? target.store.energy : 0;
+		if (!amount) amount = Math.min(energy, targetCap ? targetCap - targetEnergy : 0);
+		if (this.energy < amount) return C.ERR_NOT_ENOUGH_ENERGY;
+		// 显式 amount 超过目标剩余容量 → ERR_FULL (官方不会替你截断)
+		if (!targetCap || targetEnergy + amount > targetCap) return C.ERR_FULL;
+		if (target.pos.roomName !== this.pos.roomName) return C.ERR_NOT_IN_RANGE;
 		intent(this.id, "transferEnergy", { id: target.id, amount });
 		return C.OK;
 	}
@@ -1644,7 +1860,7 @@ class StructureLab extends OwnedStructure {
 	runReaction(lab1, lab2) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.cooldown > 0) return C.ERR_TIRED;
-		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		if (!lab1 || !lab1.id || !(lab1 instanceof Structure) || lab1.structureType !== C.STRUCTURE_LAB || lab1.id === this.id) return C.ERR_INVALID_TARGET;
 		if (!lab2 || !lab2.id || !(lab2 instanceof Structure) || lab2.structureType !== C.STRUCTURE_LAB || lab2.id === this.id) return C.ERR_INVALID_TARGET;
 		if (this.pos.getRangeTo(lab1) > 2 || this.pos.getRangeTo(lab2) > 2) return C.ERR_NOT_IN_RANGE;
@@ -1661,7 +1877,7 @@ class StructureLab extends OwnedStructure {
 	reverseReaction(lab1, lab2) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.cooldown > 0) return C.ERR_TIRED;
-		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		if (!lab1 || !lab1.id || !(lab1 instanceof Structure) || lab1.structureType !== C.STRUCTURE_LAB || lab1.id === this.id) return C.ERR_INVALID_TARGET;
 		if (!lab2 || !lab2.id || !(lab2 instanceof Structure) || lab2.structureType !== C.STRUCTURE_LAB || lab2.id === this.id) return C.ERR_INVALID_TARGET;
 		if (this.pos.getRangeTo(lab1) > 2 || this.pos.getRangeTo(lab2) > 2) return C.ERR_NOT_IN_RANGE;
@@ -1677,7 +1893,7 @@ class StructureLab extends OwnedStructure {
 	}
 	boostCreep(target, bodyPartsCount) {
 		if (!this.my) return C.ERR_NOT_OWNER;
-		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		if (!target || !target.id || !(target instanceof Creep) || target.spawning) return C.ERR_INVALID_TARGET;
 		if (!this.pos.isNearTo(target)) return C.ERR_NOT_IN_RANGE;
 		if (this.energy < C.LAB_BOOST_ENERGY) return C.ERR_NOT_ENOUGH_RESOURCES;
@@ -1692,7 +1908,7 @@ class StructureLab extends OwnedStructure {
 	unboostCreep(target) {
 		if (!target || !target.id || !(target instanceof Creep)) return C.ERR_INVALID_TARGET;
 		if (!this.my || !target.my) return C.ERR_NOT_OWNER;
-		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		if (this.cooldown > 0) return C.ERR_TIRED;
 		if (!target.body.some((p) => !!p.boost)) return C.ERR_NOT_FOUND;
 		if (!this.pos.isNearTo(target)) return C.ERR_NOT_IN_RANGE;
@@ -1706,7 +1922,7 @@ class StructureObserver extends OwnedStructure {
 	observeRoom(roomName) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (typeof roomName !== "string" || !/^(W|E)\d+(S|N)\d+$/.test(roomName)) return C.ERR_INVALID_ARGS;
-		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		const [tx, ty] = roomNameToXY(roomName);
 		const [x, y] = roomNameToXY(this.pos.roomName);
 		if (Math.abs(tx - x) > C.OBSERVER_RANGE || Math.abs(ty - y) > C.OBSERVER_RANGE) return C.ERR_NOT_IN_RANGE;
@@ -1725,7 +1941,7 @@ class StructurePowerSpawn extends OwnedStructure {
 	}
 	processPower() {
 		if (!this.my) return C.ERR_NOT_OWNER;
-		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		const amount = 1;
 		if (this.power < amount || this.energy < amount * C.POWER_SPAWN_ENERGY_RATIO) return C.ERR_NOT_ENOUGH_RESOURCES;
 		intent(this.id, "processPower", {});
@@ -1754,7 +1970,7 @@ class StructureFactory extends OwnedStructure {
 		if (!recipe) return C.ERR_INVALID_ARGS;
 		const level = this.__raw.level || 0;
 		if (!!recipe.level && recipe.level !== level) return C.ERR_INVALID_TARGET;
-		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!checkStructureAgainstController(this)) return C.ERR_RCL_NOT_ENOUGH;
 		// 有等级的商品需要 PWR_OPERATE_FACTORY 效果; 本模拟器没有 power creep, 恒为 ERR_BUSY
 		if (!!recipe.level && level > 0) return C.ERR_BUSY;
 		const store = this.__raw.store || {};
@@ -1770,15 +1986,62 @@ class StructureFactory extends OwnedStructure {
 		return C.OK;
 	}
 }
-class StructureRoad extends Structure { constructor(raw) { super(raw); this.ticksToDecay = undefined; this.owner = undefined; this.my = undefined; } }
+class StructureRoad extends Structure { constructor(raw) { super(raw); this.ticksToDecay = raw.ticksToDecay; this.owner = undefined; this.my = undefined; } }
 class StructureWall extends Structure { constructor(raw) { super(raw); this.owner = undefined; this.my = undefined; } }
+/** 官方 E/game/structures.js:279-291: 永远 my=false, owner 为 Source Keeper */
+class StructureKeeperLair extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.my = false;
+		this.owner = { username: "Source Keeper" };
+		this.ticksToSpawn = raw.ticksToSpawn == null ? undefined : raw.ticksToSpawn;
+	}
+}
+/** 官方 E/game/structures.js:579-592 */
+class StructurePowerBank extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.my = false;
+		this.owner = { username: "Power Bank" };
+		this.power = raw.store ? raw.store.power || 0 : 0;
+		this.ticksToDecay = raw.ticksToDecay == null ? undefined : raw.ticksToDecay;
+	}
+}
+/** 官方 E/game/structures.js:1398-1419: 无主结构, destination 为 RoomPosition 或 {shard, room} */
+class StructurePortal extends Structure {
+	constructor(raw) {
+		super(raw);
+		this.owner = undefined;
+		this.my = undefined;
+		const d = raw.destination;
+		this.destination = !d ? undefined : d.shard ? { shard: d.shard, room: d.room } : new RoomPosition(d.x, d.y, d.room);
+		this.ticksToDecay = raw.ticksToDecay == null ? undefined : raw.ticksToDecay;
+	}
+}
+/** 官方 E/game/structures.js:1474-1490 */
+class StructureInvaderCore extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.level = raw.level || 0;
+		this.spawning = null;
+		this.ticksToDeploy = raw.ticksToDeploy == null ? undefined : raw.ticksToDeploy;
+	}
+	toString() {
+		return `[invaderCore #${this.id}]`;
+	}
+}
 class StructureRampart extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
-		this.isPublic = false;
+		this.isPublic = !!raw.isPublic;
 		this.ticksToDecay = raw.ticksToDecay;
 	}
-	setPublic() { return C.OK; }
+	/** 官方 E/game/structures.js:651-657 */
+	setPublic(isPublic) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		intent(this.id, "setPublic", { isPublic: !!isPublic });
+		return C.OK;
+	}
 }
 
 const STRUCTURE_CLASSES = {
@@ -1787,14 +2050,14 @@ const STRUCTURE_CLASSES = {
 	road: StructureRoad,
 	constructedWall: StructureWall,
 	rampart: StructureRampart,
-	keeperLair: Structure,
-	portal: Structure,
+	keeperLair: StructureKeeperLair,
+	portal: StructurePortal,
 	controller: StructureController,
 	link: StructureLink,
 	storage: StructureStorage,
 	tower: StructureTower,
 	observer: StructureObserver,
-	powerBank: Structure,
+	powerBank: StructurePowerBank,
 	powerSpawn: StructurePowerSpawn,
 	extractor: StructureExtractor,
 	lab: StructureLab,
@@ -1802,7 +2065,7 @@ const STRUCTURE_CLASSES = {
 	container: StructureContainer,
 	nuker: StructureNuker,
 	factory: StructureFactory,
-	invaderCore: Structure,
+	invaderCore: StructureInvaderCore,
 };
 
 class Flag extends RoomObject {
@@ -2623,6 +2886,7 @@ function __installLazyMemory() {
 function buildGame() {
 	byId = new Map();
 	__createdCreepNames = new Set();
+	__lastActivateSafeMode = null;
 	__createdSiteCount = 0;
 	Game = {
 		time: __W.time,
@@ -2927,12 +3191,35 @@ class Deposit extends RoomObject {
 		this.ticksToDecay = raw.ticksToDecay;
 	}
 }
+/** 官方 E/game/ruins.js: 结构被摧毁后留下的废墟 */
 class Ruin extends RoomObject {
 	constructor(raw) {
 		super(raw);
-		this.store = makeStore(raw.store, Infinity, null);
-		this.structure = raw.structureType ? { structureType: raw.structureType } : undefined;
+		// 官方 ruin 对象没有 structureType 字段 (getter 恒为 undefined), 原类型在 structure.structureType
+		this.structureType = undefined;
+		this.destroyTime = raw.destroyTime;
 		this.ticksToDecay = raw.ticksToDecay;
+		// 官方 new Store(o): 无 storeCapacity → getCapacity() 为 null
+		this.store = makeStore(raw.store, null, null);
+		const st = raw.structure || {};
+		// 官方: 原结构有主 → OwnedStructure 实例 (带 owner/my), 否则 Structure 实例; 都没有 pos/room
+		const structure = Object.create(st.my === undefined ? Structure.prototype : OwnedStructure.prototype);
+		Object.defineProperties(structure, {
+			id: { enumerable: true, value: st.id },
+			hits: { enumerable: true, value: st.hits || 0 },
+			hitsMax: { enumerable: true, value: st.hitsMax },
+			structureType: { enumerable: true, value: st.type },
+		});
+		if (st.my !== undefined) {
+			Object.defineProperties(structure, {
+				owner: { enumerable: true, value: { username: st.my ? "Nexus" : "Invader" } },
+				my: { enumerable: true, value: !!st.my },
+			});
+		}
+		this.structure = structure;
+	}
+	toString() {
+		return `[ruin (${this.structure.structureType}) #${this.id}]`;
 	}
 }
 class Nuke extends RoomObject {
@@ -2963,11 +3250,14 @@ const GLOBAL_CLASSES = {
 	StructureContainer, StructureTerminal, StructureTower, StructureLink, StructureLab,
 	StructureNuker, StructureObserver, StructurePowerSpawn, StructureExtractor,
 	StructureFactory, StructureRoad, StructureWall, StructureRampart,
+	StructureKeeperLair, StructurePortal, StructurePowerBank, StructureInvaderCore,
 	Ruin, Mineral, Deposit, Nuke, PowerCreep,
 };
 for (const [name, cls] of Object.entries(GLOBAL_CLASSES)) {
 	globalThis[name] = cls;
 }
+// 官方 E/game/structures.js:1293: 旧别名 Spawn === StructureSpawn
+globalThis.Spawn = StructureSpawn;
 // PathFinder 命名空间 + CostMatrix 全局
 globalThis.PathFinder = PathFinder;
 globalThis.CostMatrix = CostMatrix;

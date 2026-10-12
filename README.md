@@ -21,7 +21,7 @@
 
 - **结算引擎** (`src/engine/`)：纯 Rust，不依赖 JS。数值与结算顺序对齐官方引擎
   （常量来自 docs.screeps.com，结算逻辑对照 `screeps/engine` 源码移植）：
-  疲劳移动与碰撞仲裁、采集/搬运/建造/维修/升级、孵化（`3t × 部件数`、就近扣能、出生落位）、
+  疲劳移动与碰撞仲裁、采集/搬运/建造/维修/升级、孵化（`3t × 部件数`、就近扣能、出生落位，四周全堵时按官方 spawnstomp 踩死敌方 creep）、
   Source 再生（低于容量起 300t 计时）、RCL 升降级、道路/容器/rampart 衰减、掉落能量 `⌈n/1000⌉` 衰减、
   墓碑、GCL、出口格即时越房、spawn 自动回能（<300 时 +1/t）、`renewCreep`/`recycleCreep`、
   `tower` 攻击/治疗/维修（按距离衰减功率）与 `link` 传输（3% 损耗 + 1t 冷却）。
@@ -40,7 +40,9 @@
   目标仓空间截断、能量费 `⌈amount × (1 − e^(−距离/30))⌉`、冷却 10；`Game.market.calcTransactionCost` 与
   `incoming/outgoingTransactions`）、观察者（`observeRoom` 的房间下一 tick 可见）、`PowerSpawn.processPower`
   （累计 power → `Game.gpl`）、`Factory.produce`（官方 `COMMODITIES` 配方）。所有自有结构按官方
-  `checkStructureAgainstController` 判定激活（离控制器近者优先占名额），terminal/factory 容量随 RCL；
+  `checkStructureAgainstController` 判定激活（离控制器近者优先占名额，API `isActive()` 与处理器同一规则，
+  归属不同的结构按官方判为未激活）；spawn/extension 另按 `_calc_spawns` 每 tick 写 `off` 标记（决定
+  `energyAvailable`、孵化扣能与 spawn API 的 `ERR_RCL_NOT_ENOUGH`），terminal/factory 容量随 RCL；
   掉落资源按 `resourceType` 分堆（`LOOK_RESOURCES` / `FIND_DROPPED_RESOURCES` 返回任意资源）。
   同 tick 的多个意图按官方 `creepActions` 顺序结算（drop → transfer → withdraw → pickup →
   heal → rangedHeal → dismantle → attack → harvest → move → repair → build → rangedMassAttack →
@@ -62,7 +64,9 @@
   运行时致命错误会计入错误统计并以退出码 1 结束（不再"带着错误通过断言"）。
 - **JS shim** (`src/js/screeps.js`)：官方 runtime 语义的 API 层 —— 全局常量（对齐官方
   `constants.js`，含 `CONTROLLER_STRUCTURES` / `EVENT_*` / `TOWER_*` / `ROAD_*` 等）、
-  类体系（可被 `Creep.prototype.move` 等原型补丁正常包装）、意图提交与返回码校验、
+  类体系（可被 `Creep.prototype.move` 等原型补丁正常包装；含 `StructureKeeperLair`/`StructurePortal`/
+  `StructurePowerBank`/`StructureInvaderCore` 与旧别名 `Spawn`）、意图提交与返回码校验
+  （含旧 API `createCreep`/`canCreateCreep`，检查顺序按官方与 `spawnCreep` 不同）、
   `Store`（Proxy 实现，只枚举非零资源、缺失资源返回 0）、
   `PathFinder`（多房 A*，CostMatrix 列优先 `x*50+y` / clamp 0..255 / `serialize` 与官方一致）、
   `moveTo`/`findPath`（reusePath=5 缓存、plainCost 2 / swampCost 10 + 结构成本矩阵）、
@@ -82,8 +86,7 @@
 | 工业的 Power 效果 | 不模拟任何 `PWR_*` 效果（`PWR_OPERATE_LAB/TERMINAL/FACTORY/POWER`、`PWR_REGEN_MINERAL` 等）；因此**有等级的工厂商品**（`COMMODITIES[x].level > 0`）恒失败（API 返回 `ERR_BUSY`/`ERR_INVALID_TARGET`，与官方无效果时一致），只有 0 级商品可生产；工厂等级只能由场景 `structures[].level` 给定 |
 | 矿物换密度的随机数 | 官方处理器用 `Math.random`；这里用场景 `seed` 播种的引擎随机数（splitmix64），概率分布一致、序列不同，同 seed 可复现 |
 | 转账记录 | 单玩家：发往自己终端的转账同时出现在 `incomingTransactions` 与 `outgoingTransactions`；只保留最近 100 条，`sender/recipient` 的 username 固定为 `Nexus`（敌方终端无 recipient） |
-| 敌方结构的激活 | 结构 `isActive()`（RCL 名额）只对我方结构计算，场景放置的敌方结构恒为激活 |
-| 战斗（近似完成） | 近战/远程/群体攻击、治疗、拆除、claim/reserve/sign/attackController 已对齐官方语义（含 hit-back、rampart 重定向、部件从头损坏、伤害 tick 末统一应用、意图互斥表）；未覆盖：Power 效果（`PWR_FORTIFY` 等护盾）、safeMode 拦截、nuker |
+| 战斗（近似完成） | 近战/远程/群体攻击、治疗、拆除、claim/reserve/sign/attackController 已对齐官方语义（含 hit-back、rampart 重定向、部件从头损坏、伤害 tick 末统一应用、意图互斥表）；未覆盖：Power 效果（`PWR_FORTIFY` 等护盾）、safeMode 拦截（`activateSafeMode` 的次数/冷却/持续时间已按官方结算，但安全模式期间不阻止敌方行动）、nuker；新手区不建模（安全模式冷却总是生效） |
 | 地形生成 | `generated` 为噪声近似，不复刻官方地形算法；可用 `rows`/`raw` 显式给定真实地形 |
 | 事件日志结构 | 已实现 `EVENT_HARVEST/BUILD/REPAIR/UPGRADE_CONTROLLER/TRANSFER/OBJECT_DESTROYED/EXIT/ATTACK/HEAL/ATTACK_CONTROLLER/RESERVE_CONTROLLER`；`objectId` 取发起动作的对象，目标 id 放在 `data.targetId`/`data.sourceId`（采能量用 `sourceId`，采矿按官方用 `targetId`、`amount` 为未截断的采集功率）；lab/terminal/factory/observer/powerSpawn 不产生事件（官方只写 actionLog） |
 | CPU 墙钟耗时 | `usedTime` 只计 `loop()` 墙钟 + 意图计价，不含 Memory 解析/序列化；跨机器不可复现（P95 断言请留足余量）。bot 按 `getUsed()` 做决策时每次运行结果会不同，需要逐位复现（A/B 对比）时打开 `cpu.deterministic` |
@@ -335,7 +338,7 @@ cargo build --release
     "name": "W5N8",
     "terrain": { "kind": "flat" },            // flat | generated{seed} | rows | raw
     "sources": { "count": 2, "energy": 3000 },
-    "controller": { "level": 1, "pos": [28, 27] },
+    "controller": { "level": 1, "pos": [28, 27], "safeModeAvailable": 0 },  // safeModeAvailable 可省略; 每次升级 +1
     "mineral": { "pos": [38, 38], "mineral_type": "H", "amount": 30000, "density": 2 },
     "structures": [
       { "type": "spawn", "pos": [25, 25], "energy": 300 },
