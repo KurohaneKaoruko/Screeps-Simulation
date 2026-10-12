@@ -950,13 +950,26 @@ class Creep extends RoomObject {
 		if (path.length === 0) return C.ERR_NO_PATH;
 		return this.move(path[0].direction);
 	}
+	/** 官方 E/game/creeps.js:335-400 (Source / Mineral 两个分支) */
 	harvest(target) {
 		if (!this.my) return C.ERR_NOT_OWNER;
 		if (this.spawning) return C.ERR_BUSY;
 		if (!this.getActiveBodyparts("work")) return C.ERR_NO_BODYPART;
-		if (!target || !target.id || !(target instanceof Source)) return C.ERR_INVALID_TARGET;
-		if (!target.energy) return C.ERR_NOT_ENOUGH_RESOURCES;
-		if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		if (!target || !target.id) return C.ERR_INVALID_TARGET;
+		if (target instanceof Source) {
+			if (!target.energy) return C.ERR_NOT_ENOUGH_RESOURCES;
+			if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+		} else if (target instanceof Mineral) {
+			if (!target.mineralAmount) return C.ERR_NOT_ENOUGH_RESOURCES;
+			if (!target.pos.isNearTo(this.pos)) return C.ERR_NOT_IN_RANGE;
+			const extractor = target.pos.lookFor(C.LOOK_STRUCTURES).find((s) => s.structureType === C.STRUCTURE_EXTRACTOR);
+			if (!extractor) return C.ERR_NOT_FOUND;
+			if (extractor.owner && !extractor.my) return C.ERR_NOT_OWNER;
+			if (!extractor.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+			if (extractor.cooldown) return C.ERR_TIRED;
+		} else {
+			return C.ERR_INVALID_TARGET;
+		}
 		intent(this.id, "harvest", { id: target.id });
 		return C.OK;
 	}
@@ -1203,11 +1216,16 @@ class Source extends RoomObject {
 	}
 }
 
+/** 官方 E/game/resources.js: 每堆一种 resourceType; `energy` 只在能量堆上有值 */
 class Resource extends RoomObject {
 	constructor(raw) {
 		super(raw);
-		this.resourceType = "energy";
-		this.amount = raw.energy;
+		this.resourceType = raw.resourceType || C.RESOURCE_ENERGY;
+		this.amount = raw.amount !== undefined ? raw.amount : raw.energy;
+		this.energy = raw.energy;
+	}
+	toString() {
+		return `[resource (${this.resourceType}) #${this.id}]`;
 	}
 }
 
@@ -1244,15 +1262,20 @@ class Tombstone extends RoomObject {
  * 官方各建筑的 store 形状 (storeCapacity / storeCapacityResource), 决定 getCapacity()/getFreeCapacity() 的语义:
  * 只存能量的建筑是专用仓 (不传资源时 getCapacity() 为 null), container/storage/terminal/factory 是通用仓。
  */
-function structureStoreShape(type, cap) {
+function structureStoreShape(type, cap, raw) {
 	switch (type) {
 		case "spawn":
 		case "extension":
 		case "tower":
 		case "link":
 			return [null, { energy: cap }];
-		case "lab":
+		case "lab": {
+			// 官方: 持有矿物时 storeCapacityResource = {energy: 2000, [矿物]: 3000}, storeCapacity = null;
+			// 空 lab 为 storeCapacity 5000 + {energy: 2000} —— 已有矿物时放入其他矿物的容量为 0
+			const mineral = labMineralType(raw);
+			if (mineral) return [null, { energy: C.LAB_ENERGY_CAPACITY, [mineral]: C.LAB_MINERAL_CAPACITY }];
 			return [C.LAB_MINERAL_CAPACITY + C.LAB_ENERGY_CAPACITY, { energy: C.LAB_ENERGY_CAPACITY }];
+		}
 		case "powerSpawn":
 			return [null, { energy: C.POWER_SPAWN_ENERGY_CAPACITY, power: C.POWER_SPAWN_POWER_CAPACITY }];
 		case "nuker":
@@ -1260,6 +1283,40 @@ function structureStoreShape(type, cap) {
 		default:
 			return [cap, null];
 	}
+}
+
+/** 官方 lab.mineralType: store 中第一个非能量且数量 > 0 的资源 */
+function labMineralType(raw) {
+	if (!raw) return undefined;
+	for (const k of Object.keys(raw)) if (k !== C.RESOURCE_ENERGY && raw[k] > 0) return k;
+	return undefined;
+}
+/** 官方 lab.mineralAmount: store 总量 - 能量 */
+function labMineralAmount(raw) {
+	let sum = 0;
+	for (const k of Object.keys(raw || {})) if (k !== C.RESOURCE_ENERGY) sum += +raw[k] || 0;
+	return sum;
+}
+/** 官方 utils.calcRoomsDistance(room1, room2, continuous=true) */
+function calcRoomsDistance(room1, room2) {
+	const [x1, y1] = roomNameToXY(room1);
+	const [x2, y2] = roomNameToXY(room2);
+	let dx = Math.abs(x2 - x1);
+	let dy = Math.abs(y2 - y1);
+	const worldSize = Game.map && Game.map.getWorldSize ? Game.map.getWorldSize() : 50;
+	dx = Math.min(worldSize - dx, dx);
+	dy = Math.min(worldSize - dy, dy);
+	return Math.max(dx, dy);
+}
+/** 官方 utils.calcTerminalEnergyCost */
+function calcTerminalEnergyCost(amount, range) {
+	return Math.ceil(amount * (1 - Math.exp(-range / 30)));
+}
+/** 官方 utils.getReactionVariants */
+function getReactionVariants(compound) {
+	const result = [];
+	for (const r1 in C.REACTIONS) for (const r2 in C.REACTIONS[r1]) if (C.REACTIONS[r1][r2] === compound) result.push([r1, r2]);
+	return result;
 }
 
 class Structure extends RoomObject {
@@ -1276,7 +1333,7 @@ class Structure extends RoomObject {
 	}
 	get store() {
 		if (!this.__storeObj && this.__storeRaw) {
-			const [cap, caps] = structureStoreShape(this.structureType, this.__storeCap);
+			const [cap, caps] = structureStoreShape(this.structureType, this.__storeCap, this.__storeRaw);
 			this.__storeObj = makeStore(this.__storeRaw, cap, caps);
 		}
 		return this.__storeObj;
@@ -1432,7 +1489,32 @@ class StructureContainer extends Structure {
 		this.my = undefined;
 	}
 }
-class StructureTerminal extends OwnedStructure { }
+/** 官方 E/game/structures.js:698-747 */
+class StructureTerminal extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.storeCapacity = raw.storeCapacity;
+		this.cooldown = raw.cooldown || 0;
+	}
+	send(resourceType, amount, targetRoomName, description) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!/^(W|E)\d+(N|S)\d+$/.test(targetRoomName)) return C.ERR_INVALID_ARGS;
+		if (!C.RESOURCES_ALL.includes(resourceType)) return C.ERR_INVALID_ARGS;
+		const store = this.__raw.store || {};
+		if (!store[resourceType] || store[resourceType] < amount) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		const range = calcRoomsDistance(this.pos.roomName, targetRoomName);
+		const cost = calcTerminalEnergyCost(amount, range);
+		const energy = store.energy || 0;
+		if (resourceType !== C.RESOURCE_ENERGY && energy < cost || resourceType === C.RESOURCE_ENERGY && energy < amount + cost) {
+			return C.ERR_NOT_ENOUGH_RESOURCES;
+		}
+		if (description && (typeof description !== "string" || description.length > 100)) return C.ERR_INVALID_ARGS;
+		intent(this.id, "send", { resourceType, amount, targetRoomName, description });
+		return C.OK;
+	}
+}
 class StructureTower extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
@@ -1487,12 +1569,146 @@ class StructureLink extends OwnedStructure {
 		return C.OK;
 	}
 }
-class StructureLab extends OwnedStructure { }
+/** 官方 E/game/structures.js:294-468 (StructureLab) */
+class StructureLab extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.cooldown = raw.cooldown || 0;
+		this.mineralType = labMineralType(raw.store);
+		this.mineralAmount = labMineralAmount(raw.store);
+		this.mineralCapacity = C.LAB_MINERAL_CAPACITY;
+		this.energy = raw.store ? raw.store.energy || 0 : 0;
+		this.energyCapacity = C.LAB_ENERGY_CAPACITY;
+	}
+	runReaction(lab1, lab2) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!lab1 || !lab1.id || !(lab1 instanceof Structure) || lab1.structureType !== C.STRUCTURE_LAB || lab1.id === this.id) return C.ERR_INVALID_TARGET;
+		if (!lab2 || !lab2.id || !(lab2 instanceof Structure) || lab2.structureType !== C.STRUCTURE_LAB || lab2.id === this.id) return C.ERR_INVALID_TARGET;
+		if (this.pos.getRangeTo(lab1) > 2 || this.pos.getRangeTo(lab2) > 2) return C.ERR_NOT_IN_RANGE;
+		const reactionAmount = C.LAB_REACTION_AMOUNT;
+		if (this.mineralAmount > this.mineralCapacity - reactionAmount) return C.ERR_FULL;
+		if (lab1.mineralAmount < reactionAmount || lab2.mineralAmount < reactionAmount) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (!(lab1.mineralType in C.REACTIONS) || !C.REACTIONS[lab1.mineralType][lab2.mineralType] ||
+			this.mineralType && this.mineralType !== C.REACTIONS[lab1.mineralType][lab2.mineralType]) {
+			return C.ERR_INVALID_ARGS;
+		}
+		intent(this.id, "runReaction", { lab1: lab1.id, lab2: lab2.id });
+		return C.OK;
+	}
+	reverseReaction(lab1, lab2) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!lab1 || !lab1.id || !(lab1 instanceof Structure) || lab1.structureType !== C.STRUCTURE_LAB || lab1.id === this.id) return C.ERR_INVALID_TARGET;
+		if (!lab2 || !lab2.id || !(lab2 instanceof Structure) || lab2.structureType !== C.STRUCTURE_LAB || lab2.id === this.id) return C.ERR_INVALID_TARGET;
+		if (this.pos.getRangeTo(lab1) > 2 || this.pos.getRangeTo(lab2) > 2) return C.ERR_NOT_IN_RANGE;
+		if (lab1 === lab2 || lab1.id === lab2.id) return C.ERR_INVALID_ARGS;
+		const reactionAmount = C.LAB_REACTION_AMOUNT;
+		if (!this.mineralType || this.mineralAmount < reactionAmount) return C.ERR_NOT_ENOUGH_RESOURCES;
+		const variant = getReactionVariants(this.mineralType).find((v) =>
+			(!lab1.mineralType || lab1.mineralType === v[0]) && (!lab2.mineralType || lab2.mineralType === v[1]));
+		if (!variant) return C.ERR_INVALID_ARGS;
+		if (lab1.mineralAmount + reactionAmount > lab1.mineralCapacity || lab2.mineralAmount + reactionAmount > lab2.mineralCapacity) return C.ERR_FULL;
+		intent(this.id, "reverseReaction", { lab1: lab1.id, lab2: lab2.id });
+		return C.OK;
+	}
+	boostCreep(target, bodyPartsCount) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!target || !target.id || !(target instanceof Creep) || target.spawning) return C.ERR_INVALID_TARGET;
+		if (!this.pos.isNearTo(target)) return C.ERR_NOT_IN_RANGE;
+		if (this.energy < C.LAB_BOOST_ENERGY) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (this.mineralAmount < C.LAB_BOOST_MINERAL) return C.ERR_NOT_ENOUGH_RESOURCES;
+		bodyPartsCount = bodyPartsCount || 0;
+		const mineral = this.mineralType;
+		const nonBoostedParts = target.body.filter((i) => !i.boost && C.BOOSTS[i.type] && C.BOOSTS[i.type][mineral]).length;
+		if (!nonBoostedParts || bodyPartsCount && bodyPartsCount > nonBoostedParts) return C.ERR_NOT_FOUND;
+		intent(this.id, "boostCreep", { id: target.id, bodyPartsCount });
+		return C.OK;
+	}
+	unboostCreep(target) {
+		if (!target || !target.id || !(target instanceof Creep)) return C.ERR_INVALID_TARGET;
+		if (!this.my || !target.my) return C.ERR_NOT_OWNER;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		if (!target.body.some((p) => !!p.boost)) return C.ERR_NOT_FOUND;
+		if (!this.pos.isNearTo(target)) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "unboostCreep", { id: target.id });
+		return C.OK;
+	}
+}
 class StructureNuker extends OwnedStructure { }
-class StructureObserver extends OwnedStructure { observeRoom() { return C.ERR_INVALID_ARGS; } }
-class StructurePowerSpawn extends OwnedStructure { processPower() { return C.ERR_NOT_ENOUGH_RESOURCES; } }
-class StructureExtractor extends OwnedStructure { constructor(raw) { super(raw); this.cooldown = 0; } }
-class StructureFactory extends OwnedStructure { constructor(raw) { super(raw); this.cooldown = 0; this.level = 0; } produce() { return C.ERR_INVALID_ARGS; } }
+/** 官方 E/game/structures.js:538-572 */
+class StructureObserver extends OwnedStructure {
+	observeRoom(roomName) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (typeof roomName !== "string" || !/^(W|E)\d+(S|N)\d+$/.test(roomName)) return C.ERR_INVALID_ARGS;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		const [tx, ty] = roomNameToXY(roomName);
+		const [x, y] = roomNameToXY(this.pos.roomName);
+		if (Math.abs(tx - x) > C.OBSERVER_RANGE || Math.abs(ty - y) > C.OBSERVER_RANGE) return C.ERR_NOT_IN_RANGE;
+		intent(this.id, "observeRoom", { roomName });
+		return C.OK;
+	}
+}
+/** 官方 E/game/structures.js:595-633 */
+class StructurePowerSpawn extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.energy = raw.store ? raw.store.energy || 0 : 0;
+		this.energyCapacity = C.POWER_SPAWN_ENERGY_CAPACITY;
+		this.power = raw.store ? raw.store.power || 0 : 0;
+		this.powerCapacity = C.POWER_SPAWN_POWER_CAPACITY;
+	}
+	processPower() {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		const amount = 1;
+		if (this.power < amount || this.energy < amount * C.POWER_SPAWN_ENERGY_RATIO) return C.ERR_NOT_ENOUGH_RESOURCES;
+		intent(this.id, "processPower", {});
+		return C.OK;
+	}
+}
+/** 官方 E/game/structures.js:258-272 */
+class StructureExtractor extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.cooldown = raw.cooldown || 0;
+	}
+}
+/** 官方 E/game/structures.js:1421-1468 */
+class StructureFactory extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.cooldown = raw.cooldown || 0;
+		this.level = raw.level || undefined;
+		this.storeCapacity = raw.storeCapacity;
+	}
+	produce(resourceType) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		const recipe = C.COMMODITIES[resourceType];
+		if (!recipe) return C.ERR_INVALID_ARGS;
+		const level = this.__raw.level || 0;
+		if (!!recipe.level && recipe.level !== level) return C.ERR_INVALID_TARGET;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		// 有等级的商品需要 PWR_OPERATE_FACTORY 效果; 本模拟器没有 power creep, 恒为 ERR_BUSY
+		if (!!recipe.level && level > 0) return C.ERR_BUSY;
+		const store = this.__raw.store || {};
+		for (const p of Object.keys(recipe.components)) {
+			if ((store[p] || 0) < recipe.components[p]) return C.ERR_NOT_ENOUGH_RESOURCES;
+		}
+		let total = 0;
+		for (const k of Object.keys(store)) total += store[k];
+		let componentsTotal = 0;
+		for (const k of Object.keys(recipe.components)) componentsTotal += recipe.components[k];
+		if (!this.storeCapacity || total - componentsTotal + (recipe.amount || 1) > this.storeCapacity) return C.ERR_FULL;
+		intent(this.id, "produce", { resourceType });
+		return C.OK;
+	}
+}
 class StructureRoad extends Structure { constructor(raw) { super(raw); this.ticksToDecay = undefined; this.owner = undefined; this.my = undefined; } }
 class StructureWall extends Structure { constructor(raw) { super(raw); this.owner = undefined; this.my = undefined; } }
 class StructureRampart extends OwnedStructure {
@@ -1640,7 +1856,10 @@ class Room {
 		const cell = this.__occupied.get(`${x},${y}`) || [];
 		switch (type) {
 			case C.LOOK_CREEPS: return cell.filter((o) => o instanceof Creep);
-			case C.LOOK_ENERGY: return cell.filter((o) => o instanceof Resource);
+			// 官方 LOOK_ENERGY 与 LOOK_RESOURCES 指向同一个掉落资源登记表 (任意 resourceType)
+			case C.LOOK_ENERGY:
+			case C.LOOK_RESOURCES: return cell.filter((o) => o instanceof Resource);
+			case C.LOOK_MINERALS: return cell.filter((o) => o instanceof Mineral);
 			case C.LOOK_SOURCES: return cell.filter((o) => o instanceof Source);
 			case C.LOOK_STRUCTURES: return cell.filter((o) => o instanceof Structure);
 			case C.LOOK_CONSTRUCTION_SITES: return cell.filter((o) => o instanceof ConstructionSite);
@@ -1656,7 +1875,8 @@ class Room {
 	lookAt(x, y) {
 		if (typeof x === "object") { y = x.y; x = x.x; }
 		const out = [];
-		for (const type of ["creep", "energy", "source", "structure", "constructionSite", "tombstone", "terrain"]) {
+		// 官方 rooms.js lookAt 的类型顺序 (无对象的类型自然为空)
+		for (const type of ["creep", "energy", "resource", "source", "mineral", "structure", "flag", "constructionSite", "terrain", "tombstone"]) {
 			for (const v of this.lookForAt(type, x, y)) out.push({ type, [type]: v });
 		}
 		return out;
@@ -2339,11 +2559,19 @@ function buildGame() {
 		resources: {},
 		cpu: makeCpu(__W.cpu),
 		gcl: __W.gcl,
-		gpl: { level: 0, progress: 0, progressTotal: 0 },
+		// 官方 game.js:133-167: GPL 由账户累计 processPower 推导 (引擎侧计算后经快照下发)
+		gpl: __W.gpl || { level: 0, progress: 0, progressTotal: 1000 },
 		shard: { name: "shard0", type: "world", ptr: false },
 		market: {
-			credits: 0, incomingTransactions: [], outgoingTransactions: [], orders: {},
-			calcTransactionCost() { return Infinity; }, createOrder() { return C.ERR_INVALID_ARGS; },
+			credits: 0, orders: {},
+			// 官方 market.js: 终端转账记录 (单玩家: 发往自己终端的转账同时出现在两侧)
+			incomingTransactions: (__W.transactions || []).filter((t) => t.recipient).map((t) => ({ ...t })),
+			outgoingTransactions: (__W.transactions || []).map((t) => ({ ...t })),
+			/** 官方 market.js:31-34 */
+			calcTransactionCost(amount, roomName1, roomName2) {
+				return calcTerminalEnergyCost(amount, calcRoomsDistance(roomName1, roomName2));
+			},
+			createOrder() { return C.ERR_INVALID_ARGS; },
 			deal() { return C.ERR_INVALID_ARGS; }, cancelOrder() { return C.OK; }, changeOrderPrice() { return C.OK; },
 			extendOrder() { return C.OK; }, getAllOrders() { return []; }, getHistory() { return []; }, getOrderById() { return null; },
 		},

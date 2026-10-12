@@ -173,7 +173,9 @@ impl Movement {
                                 .copied()
                                 .unwrap_or(0) as u32
                         };
-                        let rate4 = obj.live_parts("move") as f64 / move_weight(obj).max(1) as f64;
+                        // 官方 movement.js:118: calcBodyEffectiveness(MOVE, 'fatigue', 1) / 负重
+                        let rate4 = obj.calc_body_effectiveness("move", "fatigue", 1) as f64
+                            / move_weight(obj).max(1) as f64;
                         let rate2 = self.pulled.contains_key(&id) as u32;
                         let rate3 = self.pull.contains_key(&id) as u32;
                         (rate1, rate2, rate3, rate4, id)
@@ -322,16 +324,22 @@ fn move_weight(obj: &Obj) -> u32 {
         if part.part_type != "carry" || part.hits == 0 {
             continue;
         }
-        let take = remaining.min(constants::CARRY_CAPACITY);
+        // 官方 calcResourcesWeight: 强化 CARRY 一件可承载 50 × capacity 倍率
+        let boost = part
+            .boost
+            .as_deref()
+            .and_then(|b| constants::boost_effect("carry", b, "capacity"))
+            .unwrap_or(1.0);
+        let take = remaining.min((constants::CARRY_CAPACITY as f64 * boost) as u32);
         remaining -= take;
         weight += 1;
     }
     weight
 }
 
-/// 每 tick 疲劳恢复: 2 × 活跃 MOVE
+/// 每 tick 疲劳恢复: 2 × 活跃 MOVE (含 boost 倍率)
 pub fn recover_fatigue(obj: &mut Obj) {
-    let moves = obj.live_parts("move") as u32;
+    let moves = obj.calc_body_effectiveness("move", "fatigue", 1);
     if moves > 0 {
         obj.fatigue = obj.fatigue.saturating_sub(2 * moves);
     }

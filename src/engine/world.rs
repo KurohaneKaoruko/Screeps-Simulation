@@ -76,41 +76,54 @@ impl Room {
             .sum()
     }
 
-    /// 官方 _calc_spawns: 按到控制器的距离, 把超出 RCL 上限的 spawn/extension 标记为 off。
-    /// 距离越远越先停用; 距离相同时按 id 序稳定。
-    pub fn refresh_spawn_off(&mut self) {
-        let rcl = self.rcl();
-        let spawn_limit = constants::controller_structure_limit("spawn", rcl) as usize;
-        let ext_limit = constants::controller_structure_limit("extension", rcl) as usize;
-        let ctrl = self.controller().map(|c| (c.x as i32, c.y as i32));
-        // (id, 是 spawn, 到控制器距离)
-        let mut items: Vec<(u64, bool, i32)> = self
-            .objects
-            .values()
-            .filter(|o| o.mine && (o.obj_type == "spawn" || o.obj_type == "extension"))
-            .map(|o| {
-                let dist = ctrl
-                    .map(|(cx, cy)| {
-                        (o.x as i32 - cx).abs().max((o.y as i32 - cy).abs())
-                    })
-                    .unwrap_or(0);
-                (o.id, o.obj_type == "spawn", dist)
-            })
-            .collect();
-        items.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
-        let mut spawn_left = spawn_limit;
-        let mut ext_left = ext_limit;
-        let mut off_ids: Vec<u64> = Vec::new();
-        for (id, is_spawn, _) in items {
-            let slot = if is_spawn { &mut spawn_left } else { &mut ext_left };
-            if *slot > 0 {
-                *slot -= 1;
-            } else {
-                off_ids.push(id);
+    /// 官方 `utils.checkStructureAgainstController` + `_calc_spawns`: 每类自有结构按到控制器的
+    /// 切比雪夫距离由近到远占用 CONTROLLER_STRUCTURES 名额, 超出的标记 off (isActive() = false)。
+    /// 距离相同按 id 序 (官方 roomObjects 键序) 先到先得; 全服上限为 1 的类型 (storage/terminal/
+    /// extractor/observer/powerSpawn/nuker/factory) 只要当前 RCL 名额非 0 就全部激活 (官方特例)。
+    /// 无主结构 (路/容器/墙) 恒为激活; 控制器不参与。
+    pub fn refresh_structure_activity(&mut self) {
+        let ctrl = self
+            .controller()
+            .filter(|c| c.mine && c.level > 0)
+            .map(|c| (c.x as i32, c.y as i32, c.level));
+        let mut types: Vec<String> = Vec::new();
+        for o in self.objects.values() {
+            if o.mine && o.obj_type != "controller" && constants::is_owned_structure(&o.obj_type) && !types.contains(&o.obj_type) {
+                types.push(o.obj_type.clone());
             }
         }
+        let mut off_ids: Vec<u64> = Vec::new();
+        for t in &types {
+            let ids: Vec<(u64, i32)> = self
+                .objects
+                .values()
+                .filter(|o| o.mine && &o.obj_type == t)
+                .map(|o| {
+                    let dist = ctrl
+                        .map(|(cx, cy, _)| (o.x as i32 - cx).abs().max((o.y as i32 - cy).abs()))
+                        .unwrap_or(0);
+                    (o.id, dist)
+                })
+                .collect();
+            let Some((_, _, level)) = ctrl else {
+                off_ids.extend(ids.iter().map(|(id, _)| *id));
+                continue;
+            };
+            let allowed = constants::controller_structure_limit(t, level) as usize;
+            if allowed == 0 {
+                off_ids.extend(ids.iter().map(|(id, _)| *id));
+                continue;
+            }
+            if constants::controller_structure_limit(t, 8) == 1 {
+                continue;
+            }
+            let mut sorted = ids.clone();
+            // 稳定排序: 距离升序, 同距离保持 id 序
+            sorted.sort_by_key(|(_, d)| *d);
+            off_ids.extend(sorted.iter().skip(allowed).map(|(id, _)| *id));
+        }
         for o in self.objects.values_mut() {
-            if o.obj_type == "spawn" || o.obj_type == "extension" {
+            if o.mine && o.obj_type != "controller" && constants::is_owned_structure(&o.obj_type) {
                 o.off = off_ids.contains(&o.id);
             }
         }
@@ -190,7 +203,30 @@ pub struct World {
     pub energy_spawned: u64,
     /// 各 RCL 首次达到的 tick (1 基, 索引即等级)
     pub rcl_timeline: BTreeMap<u8, u64>,
+    /// 账户累计 processPower 的 power (官方 users.power, GPL 由此推导)
+    pub power_processed: u64,
+    /// 引擎侧确定性随机数状态 (矿物密度变化等官方用 Math.random 的地方), 由场景 seed 播种
+    pub rng_state: u64,
+    /// 最近的终端转账记录 (新→旧, 最多 TRANSACTIONS_KEEP 条), 供 Game.market.*Transactions
+    pub transactions: Vec<Transaction>,
 }
+
+/// 终端转账记录 (官方 transactions 集合的字段子集)
+#[derive(Clone, Debug)]
+pub struct Transaction {
+    pub id: u64,
+    pub time: u64,
+    pub resource_type: String,
+    pub amount: u32,
+    pub from: String,
+    pub to: String,
+    pub description: Option<String>,
+    /// 接收终端是否属于玩家 (单玩家模拟器: 自己发往自己的终端时出现在 incoming 与 outgoing 两侧)
+    pub recipient_mine: bool,
+}
+
+/// 保留的最近转账条数 (官方 API 返回最近 100 条)
+pub const TRANSACTIONS_KEEP: usize = 100;
 
 impl World {
     pub fn new() -> World {
@@ -206,7 +242,60 @@ impl World {
             energy_control: 0,
             energy_spawned: 0,
             rcl_timeline: BTreeMap::new(),
+            power_processed: 0,
+            rng_state: 0x9E37_79B9_7F4A_7C15,
+            transactions: Vec::new(),
         }
+    }
+
+    /// 用场景 seed 播种引擎随机数
+    pub fn seed_rng(&mut self, seed: u64) {
+        self.rng_state = seed ^ 0x9E37_79B9_7F4A_7C15;
+    }
+
+    /// splitmix64 → [0, 1) 均匀分布 (替代官方处理器里的 Math.random, 保证可复现)
+    pub fn random(&mut self) -> f64 {
+        self.rng_state = self.rng_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.rng_state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// 官方 GPL (game.js): level = floor((power / 1000)^(1/2)), progress 相对本级起点
+    pub fn gpl(&self) -> (u32, u64, u64) {
+        let power = self.power_processed as f64;
+        let level = (power / constants::POWER_LEVEL_MULTIPLY).powf(1.0 / constants::POWER_LEVEL_POW).floor();
+        let base = level.powf(constants::POWER_LEVEL_POW) * constants::POWER_LEVEL_MULTIPLY;
+        let total = (level + 1.0).powf(2.0) * 1000.0 - base;
+        (level as u32, (power - base) as u64, total as u64)
+    }
+
+    /// 官方 driver.getWorldSize (与 shim 的 Game.map.getWorldSize 一致: 多房间 200, 单房间 50)
+    pub fn world_size(&self) -> i64 {
+        if self.rooms.len() > 1 {
+            200
+        } else {
+            50
+        }
+    }
+
+    /// 本 tick 被我方 observer 观察的房间 (官方 observeRoom: 下一 tick 对玩家可见)
+    pub fn observed_rooms(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for room in self.rooms.values() {
+            for o in room.objects.values() {
+                if o.obj_type == "observer" && o.mine {
+                    if let Some(r) = &o.observe_room {
+                        if !out.contains(r) {
+                            out.push(r.clone());
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     pub fn alloc_id(&mut self) -> u64 {
@@ -279,6 +368,9 @@ impl World {
         mix_u64(&mut h, self.energy_built);
         mix_u64(&mut h, self.energy_control);
         mix_u64(&mut h, self.energy_spawned);
+        if self.power_processed > 0 {
+            mix_u64(&mut h, self.power_processed);
+        }
         for (level, t) in &self.rcl_timeline {
             mix_u64(&mut h, *level as u64);
             mix_u64(&mut h, *t);
@@ -316,6 +408,21 @@ impl World {
                 for part in &obj.body {
                     mix_str(&mut h, &part.part_type);
                     mix_u64(&mut h, part.hits as u64);
+                    if let Some(b) = &part.boost {
+                        mix_str(&mut h, b);
+                    }
+                }
+                // 工业字段: 只在非默认值时混入 (旧场景的黄金哈希保持不变)
+                if let Some(a) = obj.mineral_amount {
+                    if obj.obj_type == "mineral" {
+                        mix_u64(&mut h, a as u64);
+                    }
+                }
+                if obj.cooldown_time > 0 {
+                    mix_u64(&mut h, obj.cooldown_time);
+                }
+                if obj.pending_cooldown > 0 {
+                    mix_u64(&mut h, obj.pending_cooldown as u64);
                 }
             }
         }
@@ -402,6 +509,9 @@ pub fn prime_world(world: &mut World) {
                 "link" => {
                     o.energy_capacity = constants::LINK_CAPACITY;
                 }
+                "lab" | "powerSpawn" | "nuker" | "factory" => {
+                    o.energy_capacity = constants::structure_energy_capacity(&o.obj_type, rcl);
+                }
                 _ => {}
             }
         }
@@ -417,7 +527,7 @@ pub fn prime_world(world: &mut World) {
     }
     // 超 RCL 上限的 spawn/extension 停用 (官方 _calc_spawns)
     for room in world.rooms.values_mut() {
-        room.refresh_spawn_off();
+        room.refresh_structure_activity();
     }
 }
 
@@ -437,16 +547,8 @@ pub fn place_structure(
     if let Some(h) = hits {
         obj.hits = h;
     }
-    match structure_type {
-        "spawn" => obj.energy_capacity = constants::SPAWN_ENERGY_CAPACITY,
-        "storage" => obj.energy_capacity = constants::STORAGE_CAPACITY,
-        "container" => obj.energy_capacity = constants::CONTAINER_CAPACITY,
-        "tower" => obj.energy_capacity = constants::TOWER_CAPACITY,
-        "terminal" => obj.energy_capacity = constants::TERMINAL_CAPACITY,
-        "link" => obj.energy_capacity = constants::LINK_CAPACITY,
-        _ => {}
-    }
     let room = world.rooms.get_mut(room_name).expect("room exists");
+    obj.energy_capacity = constants::structure_energy_capacity(structure_type, room.rcl());
     room.objects.insert(id, obj);
     id
 }
