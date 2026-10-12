@@ -68,13 +68,29 @@
   `StructurePowerBank`/`StructureInvaderCore` 与旧别名 `Spawn`）、意图提交与返回码校验
   （含旧 API `createCreep`/`canCreateCreep`，检查顺序按官方与 `spawnCreep` 不同）、
   `Store`（Proxy 实现，只枚举非零资源、缺失资源返回 0）、
-  `PathFinder`（多房 A*，CostMatrix 列优先 `x*50+y` / clamp 0..255 / `serialize` 与官方一致）、
+  `PathFinder`（多房 A*，CostMatrix 内部字段 `_bits` 列优先 `x*50+y` / clamp 0..255 / `serialize` 与官方一致；
+  选项按 native clamp：plainCost/swampCost 1..254、maxRooms ≤ 64、heuristicWeight 1..9；
+  flee 启发值为各目标 `max(0, range − 切比雪夫距离)` 的最大值，降到 0 即完整；路径不会沿房间边界格横走）、
+  `Room.createConstructionSite`/`createFlag`/`lookAt`/`lookForAt` 与 `RoomPosition` 的 `(x, y)` / 对象重载
+  （官方 `fetchXYArguments`），工地校验逐条照搬 `utils.checkConstructionSite` + `checkControllerAvailability`
+  （无自有控制器按 RCL 0；spawn 工地名查重、未给名时自动 `Spawn`+N、名字随工地建成成为 spawn 名），
+  `look*` 支持全部 `LOOK_*`（未知类型 `ERR_INVALID_ARGS`、越界抛错、顺序同官方），
+  `findInRange`/`findClosestByRange`/`findClosestByPath` 数组形式同样应用 `opts.filter`，
+  `findClosestByPath` 照搬官方 `_findClosestByPath2`，`opts.costCallback` 作用于 `findPath`/`findPathTo`/
+  `findClosestByPath`/`moveTo`，`Room.Terrain`/`Game.map.getRoomTerrain` 对未知房间抛错，
+  `Game.map.getRoomStatus`（世界外 `closed`、非法房名 `undefined`）/`describeExits`（按出口格）/
+  `getRoomLinearDistance(continuous)`，无视野房间上的 `RoomPosition` 方法按官方抛 `Could not access room`
+  （`lookFor(LOOK_TERRAIN)` 例外），`Game.notify` 每 tick 前 20 条 `OK` 之后 `ERR_FULL`、
+  `console.log` 参数格式同官方、
   `moveTo`/`findPath`（reusePath=5 缓存、plainCost 2 / swampCost 10 + 结构成本矩阵）、
   路径序列化 `"XXYY" + 方向字符`、`Room.serializePath`/`deserializePath`、
   完整 lodash 3.10.1 作为全局 `_`（见 `src/js/lodash.js`）、no-op RoomVisual。
 - **快照模型**：与真实游戏一致 —— 每 tick 重建 `Game`，bot 读到的永远是 tick 开始时的快照，
   动作结果下一 tick 才可见。可见性由「带 `user` 的对象」决定（仅 creep / controller /
-  OwnedStructure / 自己的工地使房间可见），`Game.structures` 只含自己的 OwnedStructure。
+  OwnedStructure 使房间可见；工地不提供视野，但无视野房间里自己的工地仍在 `Game.constructionSites` /
+  `getObjectById` 中，`.room` 为 `undefined`），`Game.structures` 只含自己的 OwnedStructure。
+  旗由引擎持久化（`createFlag`/`remove`/`setColor`/`setPosition` 经意图结算，名字全局唯一、上限
+  `FLAGS_LIMIT`），可放在无视野房间，全部出现在 `Game.flags`。rampart / 敌方结构的 `my`/`owner` 来自引擎。
 
 ## 已知近似（与官方的差异）
 
@@ -376,8 +392,8 @@ cargo test --release   # 推荐: 同时覆盖 release 优化后的代码生成 (
 
 | 测试文件 | 覆盖 |
 |---|---|
-| `tests/engine_rules.rs` | 用受控意图直接驱动引擎（不经 V8）：掉落衰减、Source 再生时序、疲劳步频、出口格越房与弹回、RCL 升级/降级数值、能量转移容量、容器承接掉落、部分拾取、意图顺序与互斥、`off` 停用、GCL 公式、事件日志；以及多房间移动隔离、交换对象优先、可见性判定、墙上路造价 ×150、容器首次衰减 +100、rampart 衰减与 hitsMax、建造障碍、拆除工地掉落、`renewCreep`/`recycleCreep`、`tower.repair`、`link.transferEnergy`；工业：结构激活取近、掉落资源分堆、采矿与 extractor 冷却、矿物再生、各类强化数值与 TOUGH 减伤、lab 反应/逆反应/boost/unboost、终端费用/截断/冷却、observer 可见性、processPower 与 GPL、工厂配方、工业字段快照对拍 |
-| `tests/shim_apis.rs` | 微型 bundle 驱动 V8：PathFinder 跨房、地图 API、`moveTo` 端到端闭环（含 Memory 往返与 `_move` 缓存）；工业 API（`industry_apis_via_js`）的返回码与下一 tick 结果 |
+| `tests/engine_rules.rs` | 用受控意图直接驱动引擎（不经 V8）：掉落衰减、Source 再生时序、疲劳步频、出口格越房与弹回、RCL 升级/降级数值、能量转移容量、容器承接掉落、部分拾取、意图顺序与互斥、`off` 停用、GCL 公式、事件日志；以及多房间移动隔离、交换对象优先、可见性判定、墙上路造价 ×150、容器首次衰减 +100、rampart 衰减与 hitsMax、建造障碍、拆除工地掉落、`renewCreep`/`recycleCreep`、`tower.repair`、`link.transferEnergy`；工地同格规则 / RCL0 / extractor、spawn 工地名、旗意图；工业：结构激活取近、掉落资源分堆、采矿与 extractor 冷却、矿物再生、各类强化数值与 TOUGH 减伤、lab 反应/逆反应/boost/unboost、终端费用/截断/冷却、observer 可见性、processPower 与 GPL、工厂配方、工业字段快照对拍 |
+| `tests/shim_apis.rs` | 微型 bundle 驱动 V8：PathFinder 跨房、地图 API、`moveTo` 端到端闭环（含 Memory 往返与 `_move` 缓存）；官方 API 保真回归（fetchXYArguments 重载、RoomPosition 构造校验、工地校验与 spawn 命名、FIND_*/LOOK_* 语义、findClosestByPath/costCallback、PathFinder flee/边界/clamp、旗持久化、Room.Terrain/Game.map、归属/Store/notify/console）；工业 API（`industry_apis_via_js`）的返回码与下一 tick 结果 |
 | `tests/cpu_watchdog.rs` | CPU 看门狗中断与 isolate 恢复、超时 tick 的丢弃语义、未超时不误报、意图计价 0.2 CPU/组合 |
 | `tests/memory_segments.rs` | `RawMemory` 段跨 tick 持久、需每 tick 重新激活、ID/数量/类型/长度校验、`RawMemory.set` 语义 |
 | `tests/framework.rs` | 全局重置（全局变量丢失、Memory 与段保留）、场景加载校验的正/反用例、同场景同 seed 重放一致性（确定性） |

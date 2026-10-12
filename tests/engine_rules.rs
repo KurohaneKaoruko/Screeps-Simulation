@@ -2380,6 +2380,136 @@ fn suicide_frees_tile_same_tick() {
 	assert_eq!(world.creeps_lost, 1);
 }
 
+fn sites_at(world: &World, x: u8, y: u8) -> Vec<String> {
+	world.rooms["W5N8"]
+		.objects
+		.values()
+		.filter(|o| o.obj_type == "constructionSite" && o.x == x && o.y == y)
+		.map(|o| o.structure_type.clone().unwrap_or_default())
+		.collect()
+}
+
+/// 审计 #2: 引擎侧 checkConstructionSite —— 路上不能再建路、路上可建 rampart、
+/// 容器同样不能与其他可建造结构同格; 同 tick 第二个工地落在已有工地格上被拒
+#[test]
+fn engine_construction_site_checks_match_official() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 7;
+	add_structure(&mut world, "W5N8", "road", 10, 10);
+	add_structure(&mut world, "W5N8", "extension", 12, 12);
+	add_structure(&mut world, "W5N8", "rampart", 14, 14);
+	let json = r#"[
+		{"o":"room","n":"createConstructionSite","d":{"room":"W5N8","x":10,"y":10,"structureType":"road"}},
+		{"o":"room","n":"createConstructionSite","d":{"room":"W5N8","x":10,"y":10,"structureType":"rampart"}},
+		{"o":"room","n":"createConstructionSite","d":{"room":"W5N8","x":12,"y":12,"structureType":"container"}},
+		{"o":"room","n":"createConstructionSite","d":{"room":"W5N8","x":14,"y":14,"structureType":"rampart"}},
+		{"o":"room","n":"createConstructionSite","d":{"room":"W5N8","x":14,"y":14,"structureType":"tower"}},
+		{"o":"room","n":"createConstructionSite","d":{"room":"W5N8","x":16,"y":16,"structureType":"tower"}},
+		{"o":"room","n":"createConstructionSite","d":{"room":"W5N8","x":16,"y":16,"structureType":"road"}}
+	]"#;
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(json));
+	assert_eq!(sites_at(&world, 10, 10), vec!["rampart"], "路上不能再建路, 但可建 rampart");
+	assert!(sites_at(&world, 12, 12).is_empty(), "容器不能与 extension 同格");
+	assert_eq!(sites_at(&world, 14, 14), vec!["tower"], "rampart 上不能再建 rampart, 可建 tower");
+	assert_eq!(sites_at(&world, 16, 16), vec!["tower"], "同格已有工地 → 后一个被拒");
+}
+
+/// 审计 #2: 无自有控制器的房间按 RCL 0 计 (只能建路/容器), extractor 必须在矿上
+#[test]
+fn engine_site_rcl0_and_extractor_rules() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let json = r#"[
+		{"o":"room","n":"createConstructionSite","d":{"room":"W4N8","x":10,"y":10,"structureType":"extension"}},
+		{"o":"room","n":"createConstructionSite","d":{"room":"W4N8","x":11,"y":11,"structureType":"road"}},
+		{"o":"room","n":"createConstructionSite","d":{"room":"W4N8","x":12,"y":12,"structureType":"container"}}
+	]"#;
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(json));
+	let types: Vec<String> = world.rooms["W4N8"]
+		.objects
+		.values()
+		.filter(|o| o.obj_type == "constructionSite")
+		.map(|o| o.structure_type.clone().unwrap_or_default())
+		.collect();
+	assert_eq!(types.len(), 2, "RCL0: 只能路 + 容器: {types:?}");
+	assert!(!types.contains(&"extension".to_string()));
+
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 6;
+	let json = r#"[{"o":"room","n":"createConstructionSite","d":{"room":"W5N8","x":30,"y":30,"structureType":"extractor"}}]"#;
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(json));
+	assert!(sites_at(&world, 30, 30).is_empty(), "没有矿的格子不能建 extractor");
+}
+
+/// 审计 #2: spawn 工地记录名字, 建成后成为 spawn 名; 无名字时自动 Spawn+N
+#[test]
+fn spawn_site_name_carries_to_spawn() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	world.rooms.get_mut("W5N8").unwrap().controller_mut().unwrap().level = 8;
+	let json = r#"[
+		{"o":"room","n":"createConstructionSite","d":{"room":"W5N8","x":10,"y":10,"structureType":"spawn","name":"Home"}}
+	]"#;
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(json));
+	let site_id = world.rooms["W5N8"]
+		.objects
+		.values()
+		.find(|o| o.obj_type == "constructionSite")
+		.map(|o| {
+			assert_eq!(o.name.as_deref(), Some("Home"));
+			o.id
+		})
+		.expect("spawn 工地");
+	// 场景直接放置、没有名字的 spawn 工地
+	let bare_id = alloc_id(&mut world.next_id);
+	world
+		.rooms
+		.get_mut("W5N8")
+		.unwrap()
+		.objects
+		.insert(bare_id, objects::construction_site(bare_id, "spawn", 14, 10, 15000));
+	for (id, x) in [(site_id, 10u8), (bare_id, 14u8)] {
+		let o = world.rooms.get_mut("W5N8").unwrap().objects.get_mut(&id).unwrap();
+		o.progress = o.progress_total - 1;
+		let c = add_creep_in(&mut world, "W5N8", &format!("B{x}"), x, 11, &["work", "carry"]);
+		set_store(&mut world, c, 50);
+		let json = format!(r#"[{{"o":"{:024x}","n":"build","d":{{"id":"{:024x}"}}}}]"#, c, id);
+		tick::run_tick(&mut world, &mut movement, &IntentList::parse(&json));
+	}
+	let mut names: Vec<String> = world.rooms["W5N8"]
+		.objects
+		.values()
+		.filter(|o| o.obj_type == "spawn")
+		.filter_map(|o| o.name.clone())
+		.collect();
+	names.sort();
+	assert_eq!(names.len(), 3, "{names:?}");
+	assert!(names.contains(&"Home".to_string()), "工地名成为 spawn 名: {names:?}");
+	assert!(names.iter().any(|n| n.starts_with("Spawn")), "{names:?}");
+}
+
+/// 审计 #9: 旗意图 —— 无视野房间也能放旗, 名字全局唯一, 颜色 1..10, removeFlag 先于 createFlag
+#[test]
+fn flag_intents_persist_in_world() {
+	let (mut world, mut movement) = setup(TWO_ROOMS);
+	let json = r#"[
+		{"o":"room","n":"createFlag","d":{"room":"W4N8","x":5,"y":6,"name":"F1","color":1,"secondaryColor":3}},
+		{"o":"room","n":"createFlag","d":{"room":"W5N8","x":5,"y":6,"name":"F1","color":2,"secondaryColor":2}},
+		{"o":"room","n":"createFlag","d":{"room":"W5N8","x":7,"y":7,"name":"Bad","color":11,"secondaryColor":1}}
+	]"#;
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(json));
+	assert_eq!(world.flags.len(), 1, "重名 / 非法颜色被拒");
+	assert_eq!((world.flags[0].room.as_str(), world.flags[0].x, world.flags[0].color), ("W4N8", 5, 1));
+	// setColor = removeFlag + createFlag (同 tick, 移除先处理)
+	let json = r#"[
+		{"o":"room","n":"createFlag","d":{"room":"W4N8","x":5,"y":6,"name":"F1","color":5,"secondaryColor":5}},
+		{"o":"room","n":"removeFlag","d":{"room":"W4N8","name":"F1"}}
+	]"#;
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(json));
+	assert_eq!(world.flags.len(), 1);
+	assert_eq!(world.flags[0].color, 5);
+	let json = r#"[{"o":"room","n":"removeFlag","d":{"room":"W4N8","name":"F1"}}]"#;
+	tick::run_tick(&mut world, &mut movement, &IntentList::parse(json));
+	assert!(world.flags.is_empty());
+}
+
 // ═════════════════════════ 控制器: activateSafeMode / unclaim (官方 controllers/*.js) ═════════════════════════
 
 fn ctrl_intent(world: &World, name: &str) -> IntentList {

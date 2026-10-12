@@ -92,6 +92,7 @@ const C = {
 
 	COLOR_RED: 1, COLOR_PURPLE: 2, COLOR_BLUE: 3, COLOR_CYAN: 4, COLOR_GREEN: 5,
 	COLOR_YELLOW: 6, COLOR_ORANGE: 7, COLOR_BROWN: 8, COLOR_GREY: 9, COLOR_WHITE: 10,
+	COLORS_ALL: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
 
 	CREEP_LIFE_TIME: 1500,
 	CREEP_CLAIM_LIFE_TIME: 600,
@@ -567,6 +568,18 @@ let __createdCreepNames = new Set();
 let __lastActivateSafeMode = null;
 /** 本 tick 已创建的工地数 (官方把同 tick 新建计入 100 上限) */
 let __createdSiteCount = 0;
+/** 本 tick 已创建的 spawn 工地名 / 旗名 (官方 createdSpawnNames / createdFlagNames) */
+let __createdSpawnNames = [];
+let __createdFlagNames = [];
+/** 快照里已有的旗名 (官方 register.flags) */
+let __flagNames = new Set();
+/** 所有可见 spawn 与已登记工地 (官方 register.spawns / register.constructionSites), spawn 名查重用 */
+let __allSpawns = [];
+let __allSites = [];
+/** 世界房间名集合 (寻路/地形查询) */
+let __roomNameSet = new Set();
+/** 本 tick Game.notify 次数 (官方每 tick 上限 20) */
+let __notifyCount = 0;
 
 /** 意图的 CPU 计价 (官方 driver lib/runtime/runtime.js: intentCpu = 0.2) */
 const INTENT_CPU = 0.2;
@@ -605,6 +618,7 @@ function creepCost(body) {
 
 // ═══════════════════════════ 基础工具 ═══════════════════════════
 
+/** 官方 utils.getDirection: dx=dy=0 时落空返回 undefined (此前误返回 TOP) */
 function getDirection(dx, dy) {
 	const adx = Math.abs(dx), ady = Math.abs(dy);
 	if (adx > ady * 2) return dx > 0 ? C.RIGHT : C.LEFT;
@@ -613,10 +627,14 @@ function getDirection(dx, dy) {
 	if (dx > 0 && dy < 0) return C.TOP_RIGHT;
 	if (dx < 0 && dy > 0) return C.BOTTOM_LEFT;
 	if (dx < 0 && dy < 0) return C.TOP_LEFT;
-	return C.TOP;
+	return undefined;
 }
 
 const OFFSETS = [, [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]];
+
+/** 我方 / 敌方玩家名 (单玩家模拟器: 敌方对象统一归属一个虚拟玩家) */
+const MY_USERNAME = "Nexus";
+const HOSTILE_USERNAME = "Invader";
 
 /** 房名 ⇄ 世界房坐标 (对齐官方 roomNameToXY) */
 function roomNameToXY(name) {
@@ -634,84 +652,180 @@ function xyToRoomName(x, y) {
 	const [hy, yy] = y < 0 ? ["N", -y - 1] : ["S", y];
 	return `${hx}${xx}${hy}${yy}`;
 }
-function validRoomName(name) {
-	return /^([WE])(\d+)([NS])(\d+)$/.test(name) && (__W ? __W.roomNames.includes(name) : true);
+
+/**
+ * 官方 utils.fetchXYArguments: (x, y) 数字形式, 或 RoomPosition / 带 .pos 的对象。
+ * 普通 {x, y} 对象不被接受 (返回 undefined 坐标), NaN 视为 undefined。
+ */
+function fetchXYArguments(firstArg, secondArg) {
+	let x, y, roomName;
+	if (secondArg === undefined || typeof secondArg !== "number") {
+		if (!_.isObject(firstArg)) return [undefined, undefined, undefined];
+		if (firstArg instanceof RoomPosition) {
+			x = firstArg.x;
+			y = firstArg.y;
+			roomName = firstArg.roomName;
+		}
+		if (firstArg.pos && firstArg.pos instanceof RoomPosition) {
+			x = firstArg.pos.x;
+			y = firstArg.pos.y;
+			roomName = firstArg.pos.roomName;
+		}
+	} else {
+		x = firstArg;
+		y = secondArg;
+	}
+	if (_.isNaN(x)) x = undefined;
+	if (_.isNaN(y)) y = undefined;
+	return [x, y, roomName];
+}
+
+/** 无视野时官方 RoomPosition 方法抛出的错误 */
+function roomOrThrow(roomName) {
+	const room = Game.rooms[roomName];
+	if (!room) throw new Error(`Could not access room ${roomName}`);
+	return room;
 }
 
 // ═══════════════════════════ RoomPosition ═══════════════════════════
 
+/** 房名 → 规范化房名 (官方由 packed 坐标还原, "w5n8" 会变成 "W5N8"); 非法返回 null */
+const roomNameCanon = new Map([["sim", "sim"]]);
+function canonicalRoomName(roomName) {
+	let canon = roomNameCanon.get(roomName);
+	if (canon !== undefined) return canon;
+	canon = null;
+	if (typeof roomName === "string") {
+		const [rx, ry] = roomNameToXY(roomName);
+		// 官方 kMaxWorldSize = 256: 世界坐标 +128 后须在 [0, 256]
+		if (rx === rx && ry === ry && rx + 128 >= 0 && rx + 128 <= 256 && ry + 128 >= 0 && ry + 128 <= 256) {
+			canon = xyToRoomName(rx, ry);
+		}
+	}
+	if (roomNameCanon.size > 10000) roomNameCanon.clear();
+	roomNameCanon.set(roomName, canon);
+	return canon;
+}
+
 class RoomPosition {
+	/**
+	 * 官方 E/game/rooms.js:1247-1262: 坐标越界 / NaN / 非法房名抛 'Invalid arguments in RoomPosition constructor';
+	 * 坐标按 packed 存储 (位运算截断为整数, "5" → 5)。
+	 */
 	constructor(x, y, roomName) {
-		this.x = x;
-		this.y = y;
-		this.roomName = roomName;
+		const canon = canonicalRoomName(roomName);
+		if (canon === null || x < 0 || x > 49 || x !== x || y < 0 || y > 49 || y !== y) {
+			throw new Error("Invalid arguments in RoomPosition constructor");
+		}
+		this.x = x | 0;
+		this.y = y | 0;
+		this.roomName = canon;
 	}
-	/** 官方 E/game/rooms.js:1586-1592: 跨房恒为 Infinity; 支持 (x, y) 重载 */
-	getRangeTo(target, y) {
-		const pos = arguments.length >= 2
-			? { x: target, y, roomName: this.roomName }
-			: (target && target.pos ? target.pos : target);
-		if (!pos || pos.x === undefined) return NaN;
-		if (pos.roomName && pos.roomName !== this.roomName) return Infinity;
-		return Math.max(Math.abs(this.x - pos.x), Math.abs(this.y - pos.y));
+	/** 官方 E/game/rooms.js:1586-1592: 跨房恒为 Infinity; 参数经 fetchXYArguments */
+	getRangeTo(firstArg, secondArg) {
+		const [x, y, roomName] = fetchXYArguments(firstArg, secondArg);
+		if (roomName && roomName !== this.roomName) return Infinity;
+		return Math.max(Math.abs(this.x - x), Math.abs(this.y - y));
 	}
-	inRangeTo(target, y, range) {
-		if (arguments.length >= 3) return this.getRangeTo(target, y) <= range;
-		return this.getRangeTo(target) <= y;
+	/** 官方 E/game/rooms.js:1362-1376: (target, range) 或 (x, y, range) */
+	inRangeTo(firstArg, secondArg, thirdArg) {
+		let x = firstArg, y = secondArg, range = thirdArg, roomName = this.roomName;
+		if (thirdArg === undefined) {
+			let pos = firstArg;
+			if (pos.pos) pos = pos.pos;
+			x = pos.x;
+			y = pos.y;
+			roomName = pos.roomName;
+			range = secondArg;
+		}
+		return Math.abs(x - this.x) <= range && Math.abs(y - this.y) <= range && roomName == this.roomName;
 	}
-	isEqualTo(target, y) {
-		const pos = typeof y === "number" ? { x: target, y, roomName: this.roomName } : (target && target.pos ? target.pos : target);
-		if (!pos) return false;
-		return this.x === pos.x && this.y === pos.y && (!pos.roomName || this.roomName === pos.roomName);
+	/** 官方 E/game/rooms.js:1578-1584 */
+	isEqualTo(firstArg, secondArg) {
+		if (firstArg instanceof RoomPosition) {
+			return firstArg.x === this.x && firstArg.y === this.y && firstArg.roomName === this.roomName;
+		}
+		const [x, y, roomName] = fetchXYArguments(firstArg, secondArg);
+		return x == this.x && y == this.y && (!roomName || roomName == this.roomName);
 	}
-	/** 官方 E/game/rooms.js:1378-1381: `<= 1` (站在目标格上也算 near) */
-	isNearTo(target) {
-		return this.getRangeTo(target) <= 1;
+	/** 官方 E/game/rooms.js:1378-1381: `<= 1` (站在目标格上也算 near); 支持 (x, y) */
+	isNearTo(firstArg, secondArg) {
+		const [x, y, roomName] = fetchXYArguments(firstArg, secondArg);
+		return Math.abs(x - this.x) <= 1 && Math.abs(y - this.y) <= 1 && (!roomName || roomName == this.roomName);
 	}
-	/** 官方 E/game/rooms.js:1383-1394: 用世界坐标判定方向 (跨房也正确) */
-	getDirectionTo(target, y) {
-		const pos = arguments.length >= 2
-			? { x: target, y, roomName: this.roomName }
-			: (target && target.pos ? target.pos : target);
+	/** 官方 E/game/rooms.js:1383-1394: 跨房用世界坐标判定方向 */
+	getDirectionTo(firstArg, secondArg) {
+		const [x, y, roomName] = fetchXYArguments(firstArg, secondArg);
+		if (!roomName || roomName == this.roomName) return getDirection(x - this.x, y - this.y);
 		const [ax, ay] = roomNameToXY(this.roomName);
-		const [bx, by] = roomNameToXY(pos.roomName || this.roomName);
-		return getDirection(bx * 50 + pos.x - (ax * 50 + this.x), by * 50 + pos.y - (ay * 50 + this.y));
+		const [bx, by] = roomNameToXY(roomName);
+		return getDirection(bx * 50 + x - ax * 50 - this.x, by * 50 + y - ay * 50 - this.y);
 	}
+	/** 官方 E/game/rooms.js:1602-1620: LOOK_TERRAIN 不需要视野, 其余无视野抛错 */
 	lookFor(type) {
-		const room = Game.rooms[this.roomName];
-		if (!room) return [];
-		return room.lookForAt(type, this.x, this.y);
+		if (type == "terrain") {
+			const t = terrainOf(this.roomName)[this.y * 50 + this.x];
+			if (t & C.TERRAIN_MASK_WALL) return ["wall"];
+			if (t & C.TERRAIN_MASK_SWAMP) return ["swamp"];
+			return ["plain"];
+		}
+		return roomOrThrow(this.roomName).lookForAt(type, this);
 	}
 	look() {
-		const room = Game.rooms[this.roomName];
-		if (!room) return [];
-		return room.lookAt(this.x, this.y);
+		return roomOrThrow(this.roomName).lookAt(this);
 	}
 	createConstructionSite(structureType, name) {
-		const room = Game.rooms[this.roomName];
-		if (!room) return C.ERR_INVALID_ARGS;
-		return room.createConstructionSite(this.x, this.y, structureType, name);
+		return roomOrThrow(this.roomName).createConstructionSite(this.x, this.y, structureType, name);
 	}
 	createFlag(name, color, secondaryColor) {
-		const room = Game.rooms[this.roomName];
-		if (!room) return C.ERR_INVALID_ARGS;
-		return room.createFlag(this.x, this.y, name, color, secondaryColor);
+		return roomOrThrow(this.roomName).createFlag(this, name, color, secondaryColor);
 	}
+	/** 官方 E/game/rooms.js:1546-1576: 数组形式同样应用 opts.filter */
 	findClosestByRange(type, opts) {
-		return findClosestImpl(this, type, opts, "range");
+		const room = roomOrThrow(this.roomName);
+		opts = _.clone(opts || {});
+		let objects = [];
+		if (_.isNumber(type)) objects = room.find(type, opts);
+		if (_.isArray(type)) objects = opts.filter ? _.filter(type, opts.filter) : type;
+		let closest = null, minRange = Infinity;
+		for (const i of objects) {
+			const range = this.getRangeTo(i);
+			if (range < minRange) {
+				minRange = range;
+				closest = i;
+			}
+		}
+		return closest;
 	}
+	/** 官方 E/game/rooms.js:1429-1438 + _findClosestByPath2 */
 	findClosestByPath(type, opts) {
-		return findClosestImpl(this, type, opts, "path");
+		opts = _.clone(opts || {});
+		roomOrThrow(this.roomName);
+		if (type === undefined) return null;
+		return findClosestByPath2(this, type, opts);
 	}
+	/** 官方 E/game/rooms.js:1518-1544: 数组形式 (此前恒返回 []) 与 opts.filter */
 	findInRange(type, range, opts) {
-		const objects = collectFind(this.roomName, type, opts);
-		return objects.filter((o) => this.getRangeTo(o.pos || o) <= range);
+		const room = roomOrThrow(this.roomName);
+		opts = _.clone(opts || {});
+		let objects = [];
+		if (_.isNumber(type)) objects = room.find(type, opts);
+		if (_.isArray(type)) objects = opts.filter ? _.filter(type, opts.filter) : type;
+		const result = [];
+		for (const i of objects) {
+			if (this.inRangeTo(i, range)) result.push(i);
+		}
+		return result;
 	}
-	findPathTo(x, y, opts) {
-		let target = x;
-		if (typeof y === "number") target = new RoomPosition(x, y, this.roomName);
-		else if (y && typeof y === "object" && !opts) opts = y;
-		return roomFindPathImpl(this.roomName, this, target.pos || target, opts);
+	/** 官方 E/game/rooms.js:1396-1427 (新寻路器分支): 无视野抛错 */
+	findPathTo(firstArg, secondArg, opts) {
+		let [x, y, roomName] = fetchXYArguments(firstArg, secondArg);
+		const room = Game.rooms[this.roomName];
+		if (_.isObject(secondArg)) opts = _.clone(secondArg);
+		opts = opts || {};
+		roomName = roomName || this.roomName;
+		if (!room) throw new Error(`Could not access room ${this.roomName}`);
+		return room.findPath(this, new RoomPosition(x, y, roomName), opts);
 	}
 	toString() {
 		return `[room ${this.roomName} pos ${this.x},${this.y}]`;
@@ -779,16 +893,15 @@ const storeHandler = {
 				return (resource) => storeFreeOf(target, resource);
 			case "toJSON":
 				return () => Object.assign({}, target);
+			case "toString":
+				// 官方 E/game/store.js:80-84
+				return () => "[store]";
 			default:
 				break;
 		}
 		if (typeof prop === "string" && prop in target) return target[prop];
 		if (typeof prop === "string" && RESOURCES_ALL_SET.has(prop)) return 0;
 		return Reflect.get(target, prop, receiver);
-	},
-	has(target, prop) {
-		if (typeof prop === "string" && RESOURCES_ALL_SET.has(prop)) return true;
-		return Reflect.has(target, prop);
 	},
 	set(target, prop, value) {
 		if (typeof prop === "string" && RESOURCES_ALL_SET.has(prop)) {
@@ -821,7 +934,7 @@ function makeStore(raw, storeCapacity, capacities) {
 
 class RoomObject {
 	constructor(raw) {
-		this.id = raw.id;
+		if (raw.id !== undefined) this.id = raw.id;
 		this.pos = new RoomPosition(raw.x, raw.y, raw.roomName);
 		this.__raw = raw;
 	}
@@ -839,7 +952,7 @@ class Creep extends RoomObject {
 		this.name = raw.name;
 		this.my = raw.my !== false;
 		// 敌方 creep 的 owner 来自场景 (默认 Invader); 此前恒为 Nexus, 按 owner 过滤敌人的 bot 会把敌人当自己
-		this.owner = { username: this.my ? "Nexus" : raw.owner || "Invader" };
+		this.owner = { username: this.my ? MY_USERNAME : raw.owner || HOSTILE_USERNAME };
 		this.body = raw.body;
 		this.fatigue = raw.fatigue;
 		this.spawning = !!raw.spawning;
@@ -937,14 +1050,10 @@ class Creep extends RoomObject {
 		if (this.fatigue > 0 && !opts.visualizePathStyle) return C.ERR_TIRED;
 		if (!this.getActiveBodyparts("move")) return C.ERR_NO_BODYPART;
 
-		let x, y, roomName;
-		if (typeof secondArg === "number") [x, y] = [firstArg, secondArg];
-		else {
-			const pos = firstArg && firstArg.pos ? firstArg.pos : firstArg;
-			if (!(pos instanceof RoomPosition)) return C.ERR_INVALID_TARGET;
-			x = pos.x; y = pos.y; roomName = pos.roomName;
-		}
+		// 官方 E/game/creeps.js:180-187: fetchXYArguments
+		let [x, y, roomName] = fetchXYArguments(firstArg, secondArg);
 		roomName = roomName || this.pos.roomName;
+		if (x === undefined || y === undefined) return C.ERR_INVALID_TARGET;
 		const targetPos = new RoomPosition(x, y, roomName);
 		if (this.pos.x === x && this.pos.y === y && this.pos.roomName === roomName) return C.OK;
 		if (opts.reusePath === undefined) opts.reusePath = 5;
@@ -1297,23 +1406,27 @@ class ConstructionSite extends RoomObject {
 		this.structureType = raw.structureType;
 		this.progress = raw.progress;
 		this.progressTotal = raw.progressTotal;
+		// 官方 construction-sites.js:40: spawn 工地带 name (建成后成为 spawn 名)
+		this.name = raw.name;
 		this.my = raw.my !== false;
-		this.owner = { username: "Nexus" };
+		this.owner = { username: this.my ? MY_USERNAME : HOSTILE_USERNAME };
 	}
+	/** 官方 construction-sites.js:51-58: 自己的工地, 或自己控制器房间里的工地 */
 	remove() {
-		if (!this.my) return C.ERR_NOT_OWNER;
-		intent("room", "removeConstructionSite", { id: this.id, room: this.pos.roomName });
+		if (!this.my && !(this.room && this.room.controller && this.room.controller.my)) return C.ERR_NOT_OWNER;
+		intent("room", "removeConstructionSite", { id: this.id, room: this.pos.roomName, roomName: this.pos.roomName });
 		return C.OK;
 	}
 	toString() {
-		return `[constructionSite ${this.structureType} ${this.pos.x},${this.pos.y}]`;
+		return `[construction site (${this.structureType}) #${this.id}]`;
 	}
 }
 
 class Tombstone extends RoomObject {
 	constructor(raw) {
 		super(raw);
-		this.store = makeStore(raw.store, Infinity, null);
+		// 官方墓碑没有 storeCapacity: getCapacity()/getFreeCapacity() 为 null
+		this.store = makeStore(raw.store, null, null);
 		this.ticksToDecay = raw.ticksToDecay;
 		this.creep = raw.creepName ? { name: raw.creepName } : null;
 		this.deathTime = 0;
@@ -1398,7 +1511,8 @@ function checkStructureAgainstController(obj) {
 	const dist = (o) => Math.max(Math.abs(o.pos.x - ctrl.pos.x), Math.abs(o.pos.y - ctrl.pos.y));
 	const own = dist(obj);
 	let foundSelf = false;
-	for (const o of room.__byType[obj.structureType] || []) {
+	for (const o of room.__reg.structure) {
+		if (o.structureType !== obj.structureType) continue;
 		if (o.my !== obj.my) continue;
 		const d = dist(o);
 		if (d < own) {
@@ -1417,7 +1531,6 @@ class Structure extends RoomObject {
 		this.structureType = raw.structureType;
 		this.hits = raw.hits;
 		this.hitsMax = raw.hitsMax;
-		this.my = raw.my !== false;
 		this.__storeRaw = raw.store;
 		this.__storeCap = raw.storeCapacity;
 		this.__energyCapacity = raw.energyCapacity;
@@ -1464,8 +1577,11 @@ class Structure extends RoomObject {
 class OwnedStructure extends Structure {
 	constructor(raw) {
 		super(raw);
-		// 官方 E/game/structures.js:135-140: OwnedStructure 有 owner: {username}
-		this.owner = this.my ? { username: "Nexus" } : undefined;
+		// 官方 E/game/structures.js:135-140: 有 user 时 owner = {username}, my = (user == 我);
+		// 无 user (中立控制器) 时两者都是 undefined。快照 my=false 的自有类结构即敌方所有。
+		const owned = raw.type === "controller" ? raw.my === true || raw.level > 0 : true;
+		this.my = owned ? raw.my !== false : undefined;
+		this.owner = owned ? { username: this.my ? MY_USERNAME : HOSTILE_USERNAME } : undefined;
 	}
 }
 /** 官方 E/game/structures.js:1050-1059: energyStructures 中未停用的 spawn/extension 的能量合计 */
@@ -2069,24 +2185,35 @@ const STRUCTURE_CLASSES = {
 };
 
 class Flag extends RoomObject {
+	/** 官方 E/game/flags.js:21-27: 无 id 字段 (Game.getObjectById('flag_' + name) 仍可取到) */
 	constructor(name, color, secondaryColor, roomName, x, y) {
-		super({ id: `flag_${name}`, x, y, roomName });
+		super({ x: Number(x), y: Number(y), roomName });
 		this.name = name;
-		this.color = color;
-		this.secondaryColor = secondaryColor;
+		this.color = Number(color);
+		this.secondaryColor = Number(secondaryColor || color);
 	}
+	/** 官方 flags.js:57-61: 只提交意图, 本 tick 的 Game.flags 不变 */
 	remove() {
-		delete Game.flags[this.name];
+		intent("room", "removeFlag", { room: this.pos.roomName, roomName: this.pos.roomName, name: this.name });
 		return C.OK;
 	}
+	/** 官方 flags.js:63-74 */
+	setPosition(firstArg, secondArg) {
+		let [x, y, roomName] = fetchXYArguments(firstArg, secondArg);
+		roomName = roomName || this.pos.roomName;
+		if (x === undefined || y === undefined) return C.ERR_INVALID_TARGET;
+		intent("room", "removeFlag", { room: this.pos.roomName, roomName: this.pos.roomName, name: this.name });
+		intent("room", "createFlag", { room: roomName, roomName, x, y, name: this.name, color: this.color, secondaryColor: this.secondaryColor });
+		return C.OK;
+	}
+	/** 官方 flags.js:76-91 */
 	setColor(color, secondaryColor) {
-		this.color = color;
-		this.secondaryColor = secondaryColor || color;
-		return C.OK;
-	}
-	setPosition(x, y) {
-		const pos = typeof x === "object" ? x : { x, y };
-		this.pos = new RoomPosition(pos.x, pos.y, this.pos.roomName);
+		if (!_.contains(C.COLORS_ALL, color)) return C.ERR_INVALID_ARGS;
+		secondaryColor = secondaryColor || color;
+		if (!_.contains(C.COLORS_ALL, secondaryColor)) return C.ERR_INVALID_ARGS;
+		const roomName = this.pos.roomName;
+		intent("room", "removeFlag", { room: roomName, roomName, name: this.name });
+		intent("room", "createFlag", { room: roomName, roomName, x: this.pos.x, y: this.pos.y, name: this.name, color, secondaryColor });
 		return C.OK;
 	}
 	/** 官方 E/game/flags.js:31: flag 也有 memory (自动建对象 + setter) */
@@ -2099,53 +2226,125 @@ class Flag extends RoomObject {
 		if (!Memory.flags) Memory.flags = {};
 		Memory.flags[this.name] = v;
 	}
+	toString() {
+		return `[flag ${this.name}]`;
+	}
 }
 
 // ═══════════════════════════ Terrain / Room ═══════════════════════════
 
+/** 场景世界里是否有该房间的地形 (官方 runtimeData.staticTerrainData) */
+function hasTerrain(roomName) {
+	return terrainCache.has(roomName) || (__W && __W.roomNames.includes(roomName));
+}
+
+/** 官方 E/game/rooms.js:1219-1238 (Room.Terrain) */
 class Terrain {
 	constructor(roomName) {
-		this.__roomName = roomName;
-		this.__data = null;
+		roomName = "" + roomName;
+		if (!hasTerrain(roomName)) throw new Error(`Could not access room ${roomName}`);
+		this.__array = terrainOf(roomName);
 	}
-	get data() {
-		if (!this.__data) this.__data = terrainOf(this.__roomName);
-		return this.__data;
-	}
+	/** 不做越界检查: 越界下标读到 undefined → 0 (与官方一致) */
 	get(x, y) {
-		return this.data[y * 50 + x];
+		const value = this.__array[y * 50 + x];
+		return (value & C.TERRAIN_MASK_WALL) || (value & C.TERRAIN_MASK_SWAMP) || 0;
 	}
-	getRawBuffer() {
-		const copy = new Uint8Array(2500);
-		copy.set(this.data);
-		return copy;
+	/** 传入目标数组时写入并返回它, 否则返回副本 */
+	getRawBuffer(destinationArray) {
+		if (destinationArray) {
+			Uint8Array.prototype.set.call(destinationArray, this.__array);
+			return destinationArray;
+		}
+		return new Uint8Array(this.__array);
 	}
 }
+
+/** 官方 lookTypeRegisters: LOOK_RESOURCES 与 LOOK_ENERGY 共用掉落资源登记表 */
+const LOOK_REGISTER = {
+	creep: "creep", energy: "energy", resource: "energy", source: "source", mineral: "mineral",
+	deposit: "deposit", structure: "structure", flag: "flag", constructionSite: "constructionSite",
+	tombstone: "tombstone", ruin: "ruin", nuke: "nuke", powerCreep: "powerCreep",
+};
+/** 官方 Room.lookAt / lookAtArea 的类型顺序 (rooms.js:771-784) */
+const LOOK_ORDER = [
+	"creep", "energy", "resource", "source", "mineral", "deposit", "structure", "flag",
+	"constructionSite", "terrain", "nuke", "tombstone", "ruin", "powerCreep",
+];
+
+/** 对象 → 登记表名 */
+function registerKeyOf(obj) {
+	if (obj instanceof Creep) return "creep";
+	if (obj instanceof Resource) return "energy";
+	if (obj instanceof Source) return "source";
+	if (obj instanceof Mineral) return "mineral";
+	if (obj instanceof Deposit) return "deposit";
+	if (obj instanceof Structure) return "structure";
+	if (obj instanceof ConstructionSite) return "constructionSite";
+	if (obj instanceof Tombstone) return "tombstone";
+	if (obj instanceof Ruin) return "ruin";
+	if (obj instanceof Nuke) return "nuke";
+	if (obj instanceof PowerCreep) return "powerCreep";
+	if (obj instanceof Flag) return "flag";
+	return null;
+}
+
+/** 官方 game.js:15-28 findCacheFn + 各类型登记 (FIND_* → 登记表与过滤) */
+const FIND_SOURCES_DEF = {
+	[C.FIND_CREEPS]: ["creep", (i) => !i.spawning],
+	[C.FIND_MY_CREEPS]: ["creep", (i) => !i.spawning && i.my],
+	[C.FIND_HOSTILE_CREEPS]: ["creep", (i) => !i.spawning && !i.my],
+	[C.FIND_POWER_CREEPS]: ["powerCreep", null],
+	[C.FIND_MY_POWER_CREEPS]: ["powerCreep", (i) => i.my],
+	[C.FIND_HOSTILE_POWER_CREEPS]: ["powerCreep", (i) => !i.my],
+	[C.FIND_SOURCES]: ["source", null],
+	[C.FIND_SOURCES_ACTIVE]: ["source", (i) => i.energy > 0],
+	[C.FIND_MINERALS]: ["mineral", null],
+	[C.FIND_DEPOSITS]: ["deposit", null],
+	[C.FIND_DROPPED_RESOURCES]: ["energy", null],
+	[C.FIND_STRUCTURES]: ["structure", null],
+	[C.FIND_MY_STRUCTURES]: ["structure", (i) => i.my === true],
+	[C.FIND_HOSTILE_STRUCTURES]: ["structure", (i) => i.my === false && i.owner],
+	[C.FIND_MY_SPAWNS]: ["structure", (i) => i.structureType === "spawn" && i.my === true],
+	[C.FIND_HOSTILE_SPAWNS]: ["structure", (i) => i.structureType === "spawn" && i.my === false],
+	[C.FIND_FLAGS]: ["flag", null],
+	[C.FIND_CONSTRUCTION_SITES]: ["constructionSite", null],
+	[C.FIND_MY_CONSTRUCTION_SITES]: ["constructionSite", (i) => i.my],
+	[C.FIND_HOSTILE_CONSTRUCTION_SITES]: ["constructionSite", (i) => i.my === false],
+	[C.FIND_NUKES]: ["nuke", null],
+	[C.FIND_TOMBSTONES]: ["tombstone", null],
+	[C.FIND_RUINS]: ["ruin", null],
+};
 
 class Room {
 	constructor(name, raw) {
 		this.name = name;
 		this.__raw = raw;
 		this.mode = "world";
-		this.controller = null;
-		this.storage = null;
-		this.terminal = null;
+		this.controller = undefined;
+		this.storage = undefined;
+		this.terminal = undefined;
 		this.visual = new RoomVisual(name);
-		// 分类索引
+		// 登记表 (官方 register.byRoom): 对象列表 + 空间索引 (x*50+y)
 		this.__objects = [];
-		this.__byType = { creep: [], source: [], mineral: [], energy: [], constructionSite: [], tombstone: [], flag: [], powerCreep: [] };
-		for (const st of Object.keys(STRUCTURE_CLASSES)) this.__byType[st] = [];
-		this.__occupied = new Map(); // "x,y" → objects[]
+		this.__reg = {};
+		this.__spatial = {};
+		for (const k of new Set(Object.values(LOOK_REGISTER))) {
+			this.__reg[k] = [];
+			this.__spatial[k] = new Map();
+		}
+		this.__findCache = {};
+		this.__pfGrid = {};
+		this.__occupied = new Map(); // "x,y" → objects[] (不含旗)
 		for (const rawObj of raw.objects) {
-			const obj = wrapObject(this, rawObj);
+			const obj = wrapObject(name, rawObj);
 			if (!obj) continue;
 			this.__objects.push(obj);
 			const key = `${rawObj.x},${rawObj.y}`;
 			let cell = this.__occupied.get(key);
 			if (!cell) this.__occupied.set(key, (cell = []));
 			cell.push(obj);
-			if (obj instanceof Structure) this.__byType[obj.structureType].push(obj);
-			else if (this.__byType[rawObj.type]) this.__byType[rawObj.type].push(obj);
+			this.__register(obj);
 			// 官方 E/game/structures.js:45-55: 任何控制器/storage/terminal 都挂到房间上 (不限归属)
 			if (obj instanceof StructureController) this.controller = obj;
 			if (obj instanceof StructureStorage) this.storage = obj;
@@ -2153,6 +2352,17 @@ class Room {
 		}
 		this.energyAvailable = raw.energyAvailable;
 		this.energyCapacityAvailable = raw.energyCapacityAvailable;
+	}
+	/** 对象 (含旗) 进入登记表与空间索引 */
+	__register(obj) {
+		const k = registerKeyOf(obj);
+		if (!k) return;
+		this.__reg[k].push(obj);
+		const idx = obj.pos.x * 50 + obj.pos.y;
+		const sp = this.__spatial[k];
+		const cell = sp.get(idx);
+		if (cell) cell.push(obj);
+		else sp.set(idx, [obj]);
 	}
 	get memory() {
 		if (!Memory.rooms) Memory.rooms = {};
@@ -2164,138 +2374,231 @@ class Room {
 		Memory.rooms[this.name] = v;
 	}
 	getTerrain() {
-		return new Terrain(this.name);
+		return new Room.Terrain(this.name);
 	}
 	getPositionAt(x, y) {
 		if (x < 0 || x > 49 || y < 0 || y > 49) return null;
 		return new RoomPosition(x, y, this.name);
 	}
-	/** 官方 E/game/rooms.js:648-650: `_.filter(result, opts.filter)` (函数/对象/字符串均可) */
+	/** 官方 FIND 缓存: 有对象的类型才建缓存, 其余落到出口 switch / 空数组 */
+	__findCached(type) {
+		if (type in this.__findCache) return this.__findCache[type];
+		const def = FIND_SOURCES_DEF[type];
+		let list;
+		if (def) {
+			const src = this.__reg[def[0]];
+			list = def[1] ? src.filter(def[1]) : src.slice();
+			if (!list.length) list = undefined;
+		}
+		this.__findCache[type] = list;
+		return list;
+	}
+	/** 官方 E/game/rooms.js:584-655: `_.filter(result, opts.filter)` 或浅拷贝 */
 	find(type, opts) {
-		return collectFind(this.name, type, opts);
-	}
-	lookForAt(type, x, y) {
-		if (typeof x === "object") { y = x.y; x = x.x; }
-		if (x < 0 || x > 49 || y < 0 || y > 49) return [];
-		const cell = this.__occupied.get(`${x},${y}`) || [];
-		switch (type) {
-			case C.LOOK_CREEPS: return cell.filter((o) => o instanceof Creep);
-			// 官方 LOOK_ENERGY 与 LOOK_RESOURCES 指向同一个掉落资源登记表 (任意 resourceType)
-			case C.LOOK_ENERGY:
-			case C.LOOK_RESOURCES: return cell.filter((o) => o instanceof Resource);
-			case C.LOOK_MINERALS: return cell.filter((o) => o instanceof Mineral);
-			case C.LOOK_SOURCES: return cell.filter((o) => o instanceof Source);
-			case C.LOOK_STRUCTURES: return cell.filter((o) => o instanceof Structure);
-			case C.LOOK_CONSTRUCTION_SITES: return cell.filter((o) => o instanceof ConstructionSite);
-			case C.LOOK_TOMBSTONES: return cell.filter((o) => o instanceof Tombstone);
-			case C.LOOK_FLAGS: return cell.filter((o) => o instanceof Flag);
-			case C.LOOK_TERRAIN: {
-				const t = terrainOf(this.name)[y * 50 + x];
-				return [t & C.TERRAIN_MASK_WALL ? "wall" : t & C.TERRAIN_MASK_SWAMP ? "swamp" : "plain"];
+		let result = [];
+		opts = opts || {};
+		const cached = this.__findCached(type);
+		if (cached) {
+			result = cached;
+		} else {
+			switch (type) {
+				case C.FIND_EXIT:
+					// 官方顺序 TOP, BOTTOM, RIGHT, LEFT; 子查询已应用 filter, 结果(含 filter)写入缓存
+					this.__findCache[type] = this.find(C.FIND_EXIT_TOP, opts)
+						.concat(this.find(C.FIND_EXIT_BOTTOM, opts))
+						.concat(this.find(C.FIND_EXIT_RIGHT, opts))
+						.concat(this.find(C.FIND_EXIT_LEFT, opts));
+					return _.clone(this.__findCache[type]);
+				case C.FIND_EXIT_TOP:
+				case C.FIND_EXIT_RIGHT:
+				case C.FIND_EXIT_BOTTOM:
+				case C.FIND_EXIT_LEFT: {
+					const terrain = terrainOf(this.name);
+					result = [];
+					for (let i = 0; i < 50; i++) {
+						const [x, y] = type === C.FIND_EXIT_TOP ? [i, 0] : type === C.FIND_EXIT_BOTTOM ? [i, 49] : type === C.FIND_EXIT_RIGHT ? [49, i] : [0, i];
+						if (!(terrain[y * 50 + x] & C.TERRAIN_MASK_WALL)) result.push(this.getPositionAt(x, y));
+					}
+					this.__findCache[type] = result;
+					break;
+				}
 			}
-			default: return [];
+		}
+		if (opts.filter) result = _.filter(result, opts.filter);
+		else result = _.clone(result);
+		return result;
+	}
+	/** 官方 _lookSpatialRegister: 地形不做越界检查, 其他类型越界抛错 */
+	__lookSpatial(type, x, y, outArray, withCoords) {
+		let item;
+		if (type == "terrain") {
+			const code = terrainOf(this.name)[y * 50 + x];
+			let result = "plain";
+			if (code & C.TERRAIN_MASK_SWAMP) result = "swamp";
+			if (code & C.TERRAIN_MASK_WALL) result = "wall";
+			if (outArray) {
+				item = { type: "terrain", terrain: result };
+				if (withCoords) {
+					item.x = x;
+					item.y = y;
+				}
+				outArray.push(item);
+				return;
+			}
+			return [result];
+		}
+		if (x < 0 || y < 0 || x > 49 || y > 49) throw new Error("look coords are out of bounds");
+		const typeResult = this.__spatial[LOOK_REGISTER[type]].get(x * 50 + y);
+		if (typeResult) {
+			if (outArray) {
+				for (const i of typeResult) {
+					item = { type };
+					item[type] = i;
+					if (withCoords) {
+						item.x = x;
+						item.y = y;
+					}
+					outArray.push(item);
+				}
+				return;
+			}
+			return typeResult.slice();
+		}
+		return [];
+	}
+	/** 官方 _lookAreaMixedRegister: 对象数少于格数时按对象遍历, 否则逐格 */
+	__lookArea(type, top, left, bottom, right, withType, asArray, result) {
+		const reg = type == "terrain" ? null : this.__reg[LOOK_REGISTER[type]];
+		if (type != "terrain" && reg.length < (bottom - top + 1) * (right - left + 1)) {
+			for (const obj of reg) {
+				const p = obj.pos;
+				if (p.roomName != this.name || p.y < top || p.y > bottom || p.x < left || p.x > right) continue;
+				if (withType) {
+					if (asArray) result.push({ x: p.x, y: p.y, type, [type]: obj });
+					else result[p.y][p.x].push({ type, [type]: obj });
+				} else if (asArray) {
+					result.push({ x: p.x, y: p.y, [type]: obj });
+				} else {
+					result[p.y][p.x] = result[p.y][p.x] || [];
+					result[p.y][p.x].push(obj);
+				}
+			}
+		} else {
+			for (let y = top; y <= bottom; y++) {
+				for (let x = left; x <= right; x++) {
+					if (asArray) this.__lookSpatial(type, x, y, result, true);
+					else if (result[y][x]) this.__lookSpatial(type, x, y, result[y][x]);
+					else result[y][x] = this.__lookSpatial(type, x, y);
+				}
+			}
 		}
 	}
-	lookAt(x, y) {
-		if (typeof x === "object") { y = x.y; x = x.x; }
-		const out = [];
-		// 官方 rooms.js lookAt 的类型顺序 (无对象的类型自然为空)
-		for (const type of ["creep", "energy", "resource", "source", "mineral", "structure", "flag", "constructionSite", "terrain", "tombstone"]) {
-			for (const v of this.lookForAt(type, x, y)) out.push({ type, [type]: v });
-		}
-		return out;
+	/** 官方 E/game/rooms.js:798-806: 未知类型 ERR_INVALID_ARGS */
+	lookForAt(type, firstArg, secondArg) {
+		const [x, y] = fetchXYArguments(firstArg, secondArg);
+		if (type != "terrain" && !Object.prototype.hasOwnProperty.call(LOOK_REGISTER, type)) return C.ERR_INVALID_ARGS;
+		return this.__lookSpatial(type, x, y);
+	}
+	/** 官方 E/game/rooms.js:768-796 (energy 与 resource 两个类型都会列出同一堆掉落资源) */
+	lookAt(firstArg, secondArg) {
+		const [x, y] = fetchXYArguments(firstArg, secondArg);
+		const result = [];
+		for (const type of LOOK_ORDER) this.__lookSpatial(type, x, y, result);
+		return result;
 	}
 	/** 官方 Room.lookAtArea(top, left, bottom, right, [asArray]) */
 	lookAtArea(top, left, bottom, right, asArray) {
-		const out = asArray ? [] : {};
-		for (let y = top; y <= bottom; y++) {
-			for (let x = left; x <= right; x++) {
-				const entries = this.lookAt(x, y);
-				if (asArray) {
-					for (const e of entries) out.push({ x, y, ...e });
-				} else {
-					if (!out[y]) out[y] = {};
-					out[y][x] = entries;
-				}
+		const result = asArray ? [] : {};
+		if (!asArray) {
+			for (let y = top; y <= bottom; y++) {
+				result[y] = {};
+				for (let x = left; x <= right; x++) result[y][x] = [];
 			}
 		}
-		return out;
+		for (const type of LOOK_ORDER) this.__lookArea(type, top, left, bottom, right, true, asArray, result);
+		return result;
 	}
 	/** 官方 Room.lookForAtArea(type, top, left, bottom, right, [asArray]) */
 	lookForAtArea(type, top, left, bottom, right, asArray) {
-		const out = asArray ? [] : {};
-		for (let y = top; y <= bottom; y++) {
-			for (let x = left; x <= right; x++) {
-				const entries = this.lookForAt(type, x, y);
-				if (asArray) {
-					for (const e of entries) out.push({ x, y, [type]: e });
-				} else {
-					if (!out[y]) out[y] = {};
-					out[y][x] = entries;
-				}
-			}
+		const result = asArray ? [] : {};
+		if (!asArray) {
+			for (let y = top; y <= bottom; y++) result[y] = {};
 		}
-		return out;
+		this.__lookArea(type, top, left, bottom, right, false, asArray, result);
+		return result;
 	}
+	/** 官方 E/game/rooms.js:1029-1097 (校验顺序逐条照搬) */
 	createConstructionSite(firstArg, secondArg, structureType, name) {
-		let x, y;
-		if (typeof secondArg === "number") [x, y] = [firstArg, secondArg];
-		else if (typeof firstArg === "object") { x = firstArg.x; y = firstArg.y; }
-		else if (typeof secondArg === "string") { x = firstArg; structureType = secondArg; }
+		const [x, y] = fetchXYArguments(firstArg, secondArg);
 		if (x === undefined || y === undefined || x < 0 || x > 49 || y < 0 || y > 49) return C.ERR_INVALID_ARGS;
+		if (_.isString(secondArg) && structureType === undefined) structureType = secondArg;
 		if (!C.CONSTRUCTION_COST[structureType]) return C.ERR_INVALID_ARGS;
-		if (this.controller && this.controller.level > 0 && !this.controller.my) return C.ERR_NOT_OWNER;
-		// RCL 数量上限
-		const limits = this.__raw.structureLimits;
-		if (limits && limits[structureType] !== undefined) {
-			const existing = this.find(FIND_STRUCTURES, { filter: (s) => s.structureType === structureType })
-				.length + this.find(FIND_CONSTRUCTION_SITES, { filter: (s) => s.structureType === structureType }).length;
-			if (existing >= limits[structureType]) return C.ERR_RCL_NOT_ENOUGH;
+		if (structureType == "spawn" && typeof name == "string") {
+			if (name.length > 100) return C.ERR_INVALID_ARGS;
+			if (__createdSpawnNames.indexOf(name) != -1) return C.ERR_INVALID_ARGS;
+			if (spawnNameTaken(name)) return C.ERR_INVALID_ARGS;
 		}
-		if (Game.constructionSites && Object.keys(Game.constructionSites).length + __createdSiteCount >= C.MAX_CONSTRUCTION_SITES) return C.ERR_FULL;
-		// 占位检查
-		const cell = this.__occupied.get(`${x},${y}`) || [];
-		const blocking = cell.some((o) => {
-			if (o instanceof Creep) return false;
-			if (o instanceof ConstructionSite) return true;
-			if (o instanceof Structure) {
-				if (structureType === "rampart" || structureType === "road") return false;
-				if (o.structureType === "rampart" || o.structureType === "road") return false;
-				return true;
+		const controller = this.controller;
+		if (controller && controller.level > 0 && !controller.my) return C.ERR_NOT_OWNER;
+		if (controller && controller.reservation && controller.reservation.username != MY_USERNAME) return C.ERR_NOT_OWNER;
+		if (!checkControllerAvailability(structureType, this.__objects, controller)) return C.ERR_RCL_NOT_ENOUGH;
+		if (!checkConstructionSiteObjects(this.__objects, structureType, x, y) ||
+			!checkConstructionSiteTerrain(terrainOf(this.name), structureType, x, y)) {
+			return C.ERR_INVALID_TARGET;
+		}
+		if (Object.keys(Game.constructionSites).length + __createdSiteCount >= C.MAX_CONSTRUCTION_SITES) return C.ERR_FULL;
+		const data = { room: this.name, roomName: this.name, x, y, structureType };
+		if (structureType == "spawn") {
+			if (typeof name !== "string") {
+				let cnt = 1;
+				do {
+					name = "Spawn" + cnt;
+					cnt++;
+				} while (spawnNameTaken(name) || __createdSpawnNames.indexOf(name) != -1);
 			}
-			return false;
-		});
-		if (blocking) return C.ERR_INVALID_TARGET;
-		// 官方只豁免 road/extractor: 容器不允许建在墙上
-		if (structureType !== "road" && structureType !== "extractor") {
-			const t = terrainOf(this.name)[y * 50 + x];
-			if (t & C.TERRAIN_MASK_WALL) return C.ERR_INVALID_TARGET;
+			__createdSpawnNames.push(name);
+			data.name = name;
 		}
-		intent("room", "createConstructionSite", { room: this.name, x, y, structureType, name });
 		__createdSiteCount++;
+		intent("room", "createConstructionSite", data);
 		return C.OK;
 	}
+	/** 官方 E/game/rooms.js:978-1027 (对象形式时参数整体前移一位) */
 	createFlag(firstArg, secondArg, name, color, secondaryColor) {
-		let x, y;
-		if (typeof secondArg === "number") [x, y] = [firstArg, secondArg];
-		else if (typeof firstArg === "object") { x = firstArg.x; y = firstArg.y; name = secondArg; }
-		if (x === undefined || x < 0 || x > 49 || y < 0 || y > 49) return C.ERR_INVALID_ARGS;
+		const [x, y] = fetchXYArguments(firstArg, secondArg);
+		if (x === undefined || y === undefined || x < 0 || x > 49 || y < 0 || y > 49) return C.ERR_INVALID_ARGS;
+		if (_.size(Game.flags) >= C.FLAGS_LIMIT) return C.ERR_FULL;
+		if (_.isObject(firstArg)) {
+			secondaryColor = color;
+			color = name;
+			name = secondArg;
+		}
 		if (!color) color = C.COLOR_WHITE;
 		if (!secondaryColor) secondaryColor = color;
+		if (!_.contains(C.COLORS_ALL, color)) return C.ERR_INVALID_ARGS;
+		if (!_.contains(C.COLORS_ALL, secondaryColor)) return C.ERR_INVALID_ARGS;
 		if (!name) {
 			let cnt = 1;
-			do name = `Flag${cnt++}`;
-			while (Game.flags[name]);
+			do {
+				name = "Flag" + cnt;
+				cnt++;
+			} while (__flagNames.has(name) || __createdFlagNames.indexOf(name) != -1);
 		}
-		if (Game.flags[name]) return C.ERR_NAME_EXISTS;
-		Game.flags[name] = new Flag(name, color, secondaryColor, this.name, x, y);
+		if (__flagNames.has(name) || __createdFlagNames.indexOf(name) != -1) return C.ERR_NAME_EXISTS;
+		if (name.length > 100) return C.ERR_INVALID_ARGS;
+		__createdFlagNames.push(name);
+		const roomName = "" + this.name;
+		Game.flags[name] = new Flag(name, color, secondaryColor, roomName, x, y);
+		intent("room", "createFlag", { room: roomName, roomName, x, y, name, color, secondaryColor });
 		return name;
 	}
+	/** 官方 E/game/rooms.js:863-866: 起点不在本房间返回空路径 */
 	findPath(fromPos, toPos, opts) {
-		return roomFindPathImpl(this.name, fromPos, toPos, opts);
+		if (fromPos.roomName != this.name) return opts && opts.serialize ? "" : [];
+		return findPath2(this.name, fromPos, toPos, opts);
 	}
 	findExitTo(room) {
-		return Game.map.findExit(this.name, typeof room === "string" ? room : room.name);
+		return Game.map.findExit(this.name, room);
 	}
 	/** 官方 E/game/rooms.js:573-582: 返回上一 tick 的房间事件; raw=true 时返回 JSON 字符串 */
 	getEventLog(raw) {
@@ -2316,8 +2619,73 @@ Room.deserializePath = function (str) {
 	return deserializePath(str);
 };
 
-function wrapObject(room, raw) {
-	raw.roomName = room.name;
+/** 原始对象类型 (快照 type 字段: 结构即 structureType) */
+function rawTypeOf(obj) {
+	return obj.__raw ? obj.__raw.type : undefined;
+}
+
+/** 官方 utils.checkControllerAvailability: 无自有控制器按 RCL 0, 数量含全部同类建筑与工地 */
+function checkControllerAvailability(type, roomObjects, roomController, offset) {
+	let rcl = 0;
+	if (_.isObject(roomController) && roomController.level && roomController.owner) rcl = roomController.level;
+	if (_.isNumber(roomController)) rcl = roomController;
+	offset = offset || 0;
+	let cnt = 0;
+	for (const i of roomObjects) {
+		const t = rawTypeOf(i);
+		if (t == type || (t == "constructionSite" && i.structureType == type)) cnt++;
+	}
+	return cnt < C.CONTROLLER_STRUCTURES[type][rcl] + offset;
+}
+
+/** 1/48 行列上的非路/容器建筑: 外侧相邻 3 格必须都是墙 (官方 checkConstructionSite) */
+function constructionBorderTiles(structureType, x, y) {
+	if (structureType == "road" || structureType == "container" || !(x == 1 || x == 48 || y == 1 || y == 48)) return null;
+	let tiles;
+	if (x == 1) tiles = [[0, y - 1], [0, y], [0, y + 1]];
+	if (x == 48) tiles = [[49, y - 1], [49, y], [49, y + 1]];
+	if (y == 1) tiles = [[x - 1, 0], [x, 0], [x + 1, 0]];
+	if (y == 48) tiles = [[x - 1, 49], [x, 49], [x + 1, 49]];
+	return tiles;
+}
+
+/** 官方 utils.checkConstructionSite 的地形分支 */
+function checkConstructionSiteTerrain(terrain, structureType, x, y) {
+	const tiles = constructionBorderTiles(structureType, x, y);
+	if (tiles) {
+		for (const [tx, ty] of tiles) {
+			if (!(terrain[ty * 50 + tx] & C.TERRAIN_MASK_WALL)) return false;
+		}
+	}
+	if (structureType == "extractor") return true;
+	if (structureType != "road" && terrain[y * 50 + x] & C.TERRAIN_MASK_WALL) return false;
+	return true;
+}
+
+/** 官方 utils.checkConstructionSite 的对象分支 (同类型 / 已有工地 / extractor 需矿 / 非路非墙的阻挡建筑 / 边缘格) */
+function checkConstructionSiteObjects(objects, structureType, x, y) {
+	const at = objects.filter((i) => i.pos.x == x && i.pos.y == y);
+	if (at.some((i) => rawTypeOf(i) == structureType)) return false;
+	if (at.some((i) => rawTypeOf(i) == "constructionSite")) return false;
+	if (structureType == "extractor") {
+		return at.some((i) => rawTypeOf(i) == "mineral") && !at.some((i) => rawTypeOf(i) == "extractor");
+	}
+	if (structureType != "rampart" && structureType != "road" &&
+		at.some((i) => { const t = rawTypeOf(i); return t != "rampart" && t != "road" && C.CONSTRUCTION_COST[t]; })) {
+		return false;
+	}
+	if (x <= 0 || y <= 0 || x >= 49 || y >= 49) return false;
+	return true;
+}
+
+/** 官方: register.spawns (所有可见 spawn) 或任一 spawn 工地已用该名 */
+function spawnNameTaken(name) {
+	return __allSpawns.some((s) => s.name === name) ||
+		__allSites.some((s) => s.structureType === "spawn" && s.name === name);
+}
+
+function wrapObject(roomName, raw) {
+	raw.roomName = roomName;
 	switch (raw.type) {
 		case "creep": return new Creep(raw);
 		case "source": return new Source(raw);
@@ -2331,145 +2699,137 @@ function wrapObject(room, raw) {
 		case "powerCreep": return new PowerCreep(raw);
 		default: {
 			const cls = STRUCTURE_CLASSES[raw.type];
-			if (!cls) return null;
-			const obj = new cls({ ...raw, structureType: raw.type });
-			return obj;
+			if (cls) return new cls({ ...raw, structureType: raw.type });
+			// 其他工作区可能引入新的掉落资源类型名: 带 resourceType 的对象按 Resource 处理
+			if (raw.resourceType !== undefined) return new Resource(raw);
+			return null;
 		}
 	}
 }
 
-/** 官方 `_.filter(result, opts.filter)`: 支持函数 / 对象 (matches) / 字符串 (属性简写) */
-function applyFilter(arr, filter) {
-	if (filter === undefined || filter === null) return arr;
-	return _.filter(arr, filter);
-}
-
-function collectFind(roomName, type, opts) {
-	const room = Game.rooms[roomName];
-	if (!room) return [];
-	const filter = opts && opts.filter;
-	const pick = (arr) => applyFilter(arr, filter);
-	switch (type) {
-		case C.FIND_CREEPS: return pick(room.__byType.creep);
-		case C.FIND_MY_CREEPS: return pick(room.__byType.creep.filter((c) => c.my));
-		case C.FIND_HOSTILE_CREEPS: return pick(room.__byType.creep.filter((c) => !c.my));
-		case C.FIND_SOURCES: return pick(room.__byType.source);
-		case C.FIND_MINERALS: return pick(room.__byType.mineral || []);
-		case C.FIND_SOURCES_ACTIVE: return pick(room.__byType.source.filter((s) => s.energy > 0));
-		case C.FIND_DROPPED_RESOURCES: return pick(room.__byType.energy);
-		case C.FIND_STRUCTURES: return pick(room.__objects.filter((o) => o instanceof Structure));
-		case C.FIND_MY_STRUCTURES: return pick(room.__objects.filter((o) => o instanceof OwnedStructure && o.my));
-		case C.FIND_CONSTRUCTION_SITES:
-		case C.FIND_MY_CONSTRUCTION_SITES: return pick(room.__byType.constructionSite.filter((s) => s.my));
-		case C.FIND_TOMBSTONES: return pick(room.__byType.tombstone);
-		case C.FIND_FLAGS: return pick(Object.values(Game.flags).filter((f) => f.pos.roomName === roomName));
-		case C.FIND_MY_SPAWNS: return pick(room.__byType.spawn.filter((s) => s.my));
-		case C.FIND_HOSTILE_SPAWNS: return pick(room.__byType.spawn.filter((s) => !s.my));
-		case C.FIND_EXIT_TOP: return pick(exitPositions(roomName, 1));
-		case C.FIND_EXIT_RIGHT: return pick(exitPositions(roomName, 3));
-		case C.FIND_EXIT_BOTTOM: return pick(exitPositions(roomName, 5));
-		case C.FIND_EXIT_LEFT: return pick(exitPositions(roomName, 7));
-		case C.FIND_EXIT: {
-			const exits = [];
-			for (const dir of [1, 3, 5, 7]) exits.push(...exitPositions(roomName, dir));
-			return pick(exits);
-		}
-		default: return [];
-	}
-}
-
-function exitPositions(roomName, dir) {
-	const terrain = terrainOf(roomName);
-	const out = [];
-	for (let i = 0; i < 50; i++) {
-		const [x, y] = dir === 1 ? [i, 0] : dir === 3 ? [49, i] : dir === 5 ? [i, 49] : [0, i];
-		if (!(terrain[y * 50 + x] & C.TERRAIN_MASK_WALL)) out.push(new RoomPosition(x, y, roomName));
-	}
-	return out;
-}
-
-function findClosestImpl(pos, type, opts, mode) {
-	const objects = typeof type === "number" ? collectFind(pos.roomName, type, opts) : type;
-	if (!objects || objects.length === 0) return null;
-	const onSquare = objects.find((o) => (o.pos || o).isEqualTo(pos));
-	if (onSquare) return onSquare;
-	if (mode === "range") {
-		let best = null, bestRange = Infinity;
-		for (const o of objects) {
-			const r = pos.getRangeTo(o.pos || o);
-			if (r < bestRange) { bestRange = r; best = o; }
-		}
-		return best;
-	}
-	// path 模式: 多目标 PathFinder (官方 E/game/rooms.js:337-373)
-	const goals = objects.map((o) => ({ pos: o.pos || o, range: 1 }));
-	const searchOpts = buildMoveSearchOpts(pos.roomName, opts);
-	// 官方 findClosestByPath 默认 maxRooms: 1
-	if (searchOpts.maxRooms === undefined) searchOpts.maxRooms = 1;
-	const result = pathFinderSearch(pos, goals, searchOpts);
-	// 路径为空 (已相邻) 时以起点为 lastPos; 部分路径也照常返回最近对象
-	const last = result.path.length ? result.path[result.path.length - 1] : pos;
-	let best = null;
-	let bestRange = Infinity;
-	for (const o of objects) {
-		const r = last.getRangeTo(o.pos || o);
-		if (r < bestRange) {
-			bestRange = r;
-			best = o;
-		}
-	}
-	return best;
-}
-
-/** moveTo/findPath 的搜索参数 (官方 _findPath2: 默认考虑道路, plain 2 / swamp 10) */
-function buildMoveSearchOpts(roomName, opts) {
+/** 官方 _findClosestByPath2 (rooms.js:330-372): 不可达返回 null, 相邻多个时取列表中最后一个 */
+function findClosestByPath2(fromPos, objects, opts) {
 	opts = opts || {};
-	// 官方 E/game/rooms.js:163,169-171: 仅当 opts.ignoreCreeps 为真才忽略 creep, 默认 false
-	const ignoreCreeps = opts.ignoreCreeps !== undefined ? opts.ignoreCreeps : false;
-	return {
-		roomCallback: (name) => buildPathMatrix(name, { ignoreCreeps, ignoreDestructibleStructures: opts.ignoreDestructibleStructures, ignoreRoads: opts.ignoreRoads }),
-		plainCost: opts.plainCost || (opts.ignoreRoads ? undefined : 2),
-		swampCost: opts.swampCost || (opts.ignoreRoads ? undefined : 10),
+	if (_.isNumber(objects)) objects = Game.rooms[fromPos.roomName].find(objects, { filter: opts.filter });
+	else if (opts.filter) objects = _.filter(objects, opts.filter);
+	if (!objects.length) return null;
+	const objectOnSquare = _.find(objects, (obj) => fromPos.isEqualTo(obj));
+	if (objectOnSquare) return objectOnSquare;
+	const goals = _.map(objects, (i) => ({ range: 1, pos: i.pos ? i.pos : i }));
+	const searchOpts = {
+		roomCallback(roomName) {
+			if (Game.rooms[roomName]) return applyCostCallback(getPathfindingGrid2(roomName, opts), roomName, opts);
+		},
+		maxOps: opts.maxOps,
+		maxRooms: 1,
+	};
+	if (!opts.ignoreRoads) {
+		searchOpts.plainCost = 2;
+		searchOpts.swampCost = 10;
+	}
+	const ret = PathFinder.search(fromPos, goals, searchOpts);
+	let result = null;
+	let lastPos = fromPos;
+	if (ret.path.length) lastPos = ret.path[ret.path.length - 1];
+	objects.forEach((obj) => {
+		if (lastPos.isNearTo(obj)) result = obj;
+	});
+	return result;
+}
+
+/** 官方 rooms.js:243-252: costCallback 拿到缓存矩阵的克隆, 返回 CostMatrix 时替换 */
+function applyCostCallback(costMatrix, roomName, opts) {
+	if (typeof opts.costCallback == "function") {
+		costMatrix = costMatrix.clone();
+		const resultMatrix = opts.costCallback(roomName, costMatrix);
+		if (resultMatrix instanceof PFCostMatrix) costMatrix = resultMatrix;
+	}
+	return costMatrix;
+}
+
+const DESTRUCTIBLE_OBSTACLES = ["constructedWall", "spawn", "extension", "link", "storage", "observer", "tower", "powerBank", "powerSpawn", "lab", "terminal"];
+
+/** 官方 makePathfindingGrid2 (rooms.js:157-199): 障碍 255 (含 portal), 路 1 */
+function makePathfindingGrid2(room, opts) {
+	const costs = new PFCostMatrix();
+	let obstacleTypes = C.OBSTACLE_OBJECT_TYPES.concat(["portal"]);
+	if (opts.ignoreDestructibleStructures) obstacleTypes = _.without(obstacleTypes, ...DESTRUCTIBLE_OBSTACLES);
+	const safeMode = !!(room.controller && room.controller.safeMode && room.controller.my);
+	if (opts.ignoreCreeps || safeMode) obstacleTypes = _.without(obstacleTypes, "creep", "powerCreep");
+	for (const object of room.__objects) {
+		const type = rawTypeOf(object);
+		const { x, y } = object.pos;
+		if (_.contains(obstacleTypes, type) ||
+			(!opts.ignoreCreeps && safeMode && (type == "creep" || type == "powerCreep") && object.my) ||
+			(!opts.ignoreDestructibleStructures && type == "rampart" && !object.isPublic && !object.my) ||
+			(!opts.ignoreDestructibleStructures && type == "constructionSite" && object.my && _.contains(C.OBSTACLE_OBJECT_TYPES, object.structureType))) {
+			costs.set(x, y, 0xff);
+		}
+		if (!opts.ignoreRoads && type == "road" && costs.get(x, y) < 0xff) costs.set(x, y, 1);
+	}
+	return costs;
+}
+
+/** 官方 getPathfindingGrid2: 每 tick 每房间按选项缓存; 无视野房间给空矩阵 */
+function getPathfindingGrid2(roomName, opts) {
+	const room = Game.rooms[roomName];
+	if (!room) return new PFCostMatrix();
+	opts = opts || {};
+	let gridName = "grid2";
+	if (opts.ignoreCreeps) gridName += "_ignoreCreeps";
+	if (opts.ignoreDestructibleStructures) gridName += "_ignoreDestructibleStructures";
+	if (opts.ignoreRoads) gridName += "_ignoreRoads";
+	if (!room.__pfGrid[gridName]) room.__pfGrid[gridName] = makePathfindingGrid2(room, opts);
+	return room.__pfGrid[gridName];
+}
+
+/** 官方 _findPath2 (rooms.js:216-307): Room.findPath / findPathTo / moveTo 的寻路实现 */
+function findPath2(id, fromPos, toPos, opts) {
+	opts = opts || {};
+	if (fromPos.isEqualTo(toPos)) return opts.serialize ? "" : [];
+	// 新寻路器下 avoid/ignore 已废弃 (官方打印 deprecated 并清除)
+	if (opts.avoid) opts.avoid = undefined;
+	if (opts.ignore) opts.ignore = undefined;
+	if (opts.maxOps === undefined && (opts.maxRooms === undefined || opts.maxRooms > 1) && fromPos.roomName != toPos.roomName) {
+		opts.maxOps = 20000;
+	}
+	const searchOpts = {
+		roomCallback(roomName) {
+			return applyCostCallback(getPathfindingGrid2(roomName, opts), roomName, opts);
+		},
 		maxOps: opts.maxOps,
 		maxRooms: opts.maxRooms,
-		heuristicWeight: opts.heuristicWeight,
-		range: opts.range,
 	};
-}
-
-/** 官方 makePathfindingGrid2: 障碍 255, 路 1 (沼泽交给 swampCost) */
-const matrixCache = new Map();
-function buildPathMatrix(roomName, opts) {
-	// 无视野房间: 官方用只有地形的空 CostMatrix (E/game/rooms.js:200-202), 不是不可走
-	if (!Game.rooms[roomName]) return new CostMatrix();
-	const room = Game.rooms[roomName];
-	const cacheKey = `${roomName}|${!!opts.ignoreCreeps}|${!!opts.ignoreDestructibleStructures}|${!!opts.ignoreRoads}|${Game.time}`;
-	if (matrixCache.has(cacheKey)) return matrixCache.get(cacheKey);
-	const costs = new CostMatrix();
-	for (const o of room.__objects) {
-		if (o instanceof Creep) {
-			if (!opts.ignoreCreeps) costs.set(o.pos.x, o.pos.y, 0xff);
-			continue;
-		}
-		if (o instanceof ConstructionSite) {
-			if (o.my && C.OBSTACLE_OBJECT_TYPES.includes(o.structureType)) costs.set(o.pos.x, o.pos.y, 0xff);
-			continue;
-		}
-		if (o instanceof Structure) {
-			const obstacle = C.OBSTACLE_OBJECT_TYPES.includes(o.structureType) ||
-				(o.structureType === "rampart" && !o.isPublic && !o.my);
-			const destructible = ["constructedWall", "spawn", "extension", "link", "storage", "observer", "tower", "powerBank", "powerSpawn", "lab", "terminal"];
-			if (obstacle && !(opts.ignoreDestructibleStructures && destructible.includes(o.structureType))) {
-				costs.set(o.pos.x, o.pos.y, 0xff);
-			}
-			if (o.structureType === "road" && !opts.ignoreRoads && costs.get(o.pos.x, o.pos.y) < 0xff) {
-				costs.set(o.pos.x, o.pos.y, 1);
-			}
-		}
+	if (!opts.ignoreRoads) {
+		searchOpts.plainCost = 2;
+		searchOpts.swampCost = 10;
 	}
-	matrixCache.set(cacheKey, costs);
-	if (matrixCache.size > 200) matrixCache.clear();
-	return costs;
+	if (opts.plainCost) searchOpts.plainCost = opts.plainCost;
+	if (opts.swampCost) searchOpts.swampCost = opts.swampCost;
+	const ret = PathFinder.search(fromPos, { range: Math.max(1, opts.range || 0), pos: toPos }, searchOpts);
+	if (!opts.range &&
+		(ret.path.length && ret.path[ret.path.length - 1].isNearTo(toPos) && !ret.path[ret.path.length - 1].isEqualTo(toPos) ||
+			!ret.path.length && fromPos.isNearTo(toPos))) {
+		ret.path.push(toPos);
+	}
+	let curX = fromPos.x, curY = fromPos.y;
+	const resultPath = [];
+	for (let i = 0; i < ret.path.length; i++) {
+		const pos = ret.path[i];
+		if (pos.roomName != id) break;
+		const result = {
+			x: pos.x,
+			y: pos.y,
+			dx: pos.x - curX,
+			dy: pos.y - curY,
+			direction: getDirection(pos.x - curX, pos.y - curY),
+		};
+		curX = result.x;
+		curY = result.y;
+		resultPath.push(result);
+	}
+	if (opts.serialize) return serializePath(resultPath);
+	return resultPath;
 }
 
 // ═══════════════════════════ 序列化路径 ═══════════════════════════
@@ -2502,74 +2862,41 @@ function deserializePath(str) {
 	return result;
 }
 
-/** Room.findPath / findPathTo 的共享实现 (官方 _findPath2 语义) */
-function roomFindPathImpl(roomName, fromPos, toPos, opts) {
-	if (fromPos.isEqualTo(toPos)) return [];
-	opts = opts || {};
-	if (opts.maxOps === undefined && (opts.maxRooms === undefined || opts.maxRooms > 1) && fromPos.roomName !== toPos.roomName) {
-		opts.maxOps = 20000;
-	}
-	const moveOpts = buildMoveSearchOpts(roomName, opts);
-	const range = Math.max(1, opts.range || 0);
-	const ret = pathFinderSearch(fromPos, [{ pos: toPos, range }], moveOpts);
-	let path = ret.path;
-	if (!opts.range && path.length && path[path.length - 1].isNearTo(toPos) && !path[path.length - 1].isEqualTo(toPos)) {
-		path.push(toPos);
-	} else if (!opts.range && !path.length && fromPos.isNearTo(toPos)) {
-		path = [toPos];
-	}
-	const resultPath = [];
-	let curX = fromPos.x, curY = fromPos.y;
-	for (const pos of path) {
-		if (pos.roomName !== roomName) break;
-		if (Math.abs(pos.x - curX) > 1 || Math.abs(pos.y - curY) > 1) break;
-		resultPath.push({
-			x: pos.x, y: pos.y,
-			dx: pos.x - curX, dy: pos.y - curY,
-			direction: getDirection(pos.x - curX, pos.y - curY),
-		});
-		curX = pos.x;
-		curY = pos.y;
-	}
-	if (opts.serialize) return serializePath(resultPath);
-	return resultPath;
-}
-
 // ═══════════════════════════ PathFinder ═══════════════════════════
 
-class CostMatrix {
+/** 官方 E/game/path-finder.js:19-48: 内部字段 `_bits`, 列优先 x*50+y 的 Uint8Array(2500) */
+// 绑定名不用 CostMatrix: shim 是经典脚本, 顶层类名会成为 bot 可见的全局词法绑定
+const PFCostMatrix = class CostMatrix {
 	constructor() {
-		// 官方 E/game/path-finder.js:19-31: 内部为列优先 x*50+y 的 Uint8Array(2500)
-		this.__bits = new Uint8Array(2500);
+		this._bits = new Uint8Array(2500);
 	}
-	set(x, y, value) {
-		x = x | 0;
-		y = y | 0;
-		// 官方 clamp 到 [0,255]: set(256) → 255 (不再是溢出成 0)
-		this.__bits[x * 50 + y] = Math.min(Math.max(0, value), 255);
-		return this;
+	set(xx, yy, val) {
+		xx = xx | 0;
+		yy = yy | 0;
+		// 官方 clamp 到 [0,255]: set(256) → 255 (不是溢出成 0)
+		this._bits[xx * 50 + yy] = Math.min(Math.max(0, val), 255);
 	}
-	get(x, y) {
-		x = x | 0;
-		y = y | 0;
-		return this.__bits[x * 50 + y];
+	get(xx, yy) {
+		xx = xx | 0;
+		yy = yy | 0;
+		return this._bits[xx * 50 + yy];
 	}
 	clone() {
-		const m = new CostMatrix();
-		m.__bits = new Uint8Array(this.__bits);
+		const m = new PFCostMatrix();
+		m._bits = new Uint8Array(this._bits);
 		return m;
 	}
 	/** 官方 serialize: 返回 Uint32Array(625) 的普通数组 (即 2500 字节的视图) */
 	serialize() {
-		return Array.prototype.slice.call(new Uint32Array(this.__bits.buffer));
+		return Array.prototype.slice.apply(new Uint32Array(this._bits.buffer));
 	}
-	/** 官方 deserialize(array): 接受 serialize() 的数组 (此前误实现为按逗号拆字符串) */
+	/** 官方 deserialize(array): 接受 serialize() 的数组 */
 	static deserialize(data) {
-		const m = new CostMatrix();
-		m.__bits = new Uint8Array(new Uint32Array(data).buffer);
-		return m;
+		const instance = Object.create(PFCostMatrix.prototype);
+		instance._bits = new Uint8Array(new Uint32Array(data).buffer);
+		return instance;
 	}
-}
+};
 
 /** 二叉最小堆 */
 class MinHeap {
@@ -2609,224 +2936,189 @@ class MinHeap {
 	}
 }
 
-const OP_LIMIT_ROOMS = 16, OP_LIMIT_OPS = 2000;
+const PF_OBSTACLE = 0xffff;
 
 /**
- * PathFinder.search: 多房间 A* (typed array + 二叉堆)。
- * 房间邻接按世界房名推导; roomCallback 返回 false 排除房间;
- * CostMatrix 0 = 地形默认 (plain/swampCost), 255 = 不可通行。
- * 近似点: 跨房边界按"出口格 + 对侧入口格"两步计价, 官方为同节点;
- * 启发式用世界坐标 octile × heuristicWeight。
+ * PathFinder.search: 多房间 A* (typed array + 二叉堆), 语义对齐官方 driver path-finder.js + native pf.cc:
+ * - 选项 clamp: plainCost/swampCost 取整到 1..254 (默认 1/5), heuristicWeight 1..9 (默认 1.2),
+ *   maxRooms ≤ 64 (默认 16), maxOps 默认 2000
+ * - 启发式为切比雪夫世界距离: 普通模式 min(max(0, dist - range)), flee 模式 max(max(0, range - dist));
+ *   弹出启发值为 0 的节点即成功 (incomplete=false), 否则返回启发值最小节点的部分路径
+ * - 边界格只允许笔直跨房或退回房内 (native astar 的 portal 规则), 不能沿出口格横走
+ * 近似点: 官方 native 为 JPS, 这里是逐格 A* (等价代价, 路径形状可能不同)。
  */
-function pathFinderSearch(origin, goal, opts) {
-	opts = opts || {};
-	// 目标归一化: 接受 RoomPosition 或 {pos, range} (官方 path-finder.js:58-60)
-	const goals = (Array.isArray(goal) ? goal : [goal])
-		.map((g) => {
-			if (!g) return null;
-			if (g.pos) return { pos: g.pos, range: g.range || 0 };
-			return { pos: g, range: 0 };
-		})
-		.filter((g) => g && g.pos && g.pos.roomName);
-	// 空目标数组: 官方直接返回, 不消耗 ops
-	if (goals.length === 0) return { path: [], ops: 0, cost: 0, incomplete: false };
-	const plainCost = opts.plainCost || 1;
-	const swampCost = opts.swampCost || 5;
-	const maxRooms = Math.max(1, opts.maxRooms || OP_LIMIT_ROOMS);
-	const maxOps = opts.maxOps || OP_LIMIT_OPS;
-	const maxCost = opts.maxCost || Infinity;
-	const hw = opts.heuristicWeight === undefined ? 1.2 : opts.heuristicWeight;
-	const flee = !!opts.flee;
+function pathFinderSearch(origin, goal, options) {
+	// 官方 game/path-finder.js:55-58: 空目标直接返回
+	if (!goal || (Array.isArray(goal) && !goal.length)) return { path: [], ops: 0 };
+	options = options || {};
+	const plainCost = Math.min(254, Math.max(1, (options.plainCost | 0) || 1));
+	const swampCost = Math.min(254, Math.max(1, (options.swampCost | 0) || 5));
+	const heuristicWeight = Math.min(9, Math.max(1, options.heuristicWeight || 1.2));
+	const maxOps = Math.max(1, (options.maxOps | 0) || 2000);
+	const maxCost = options.maxCost > 0 ? Math.max(1, +options.maxCost) : Infinity;
+	const maxRooms = Math.min(64, Math.max(1, (options.maxRooms | 0) || 16));
+	const flee = !!options.flee;
 
-	// 房间注册表
-	const roomIndex = new Map(); // name → idx
-	const roomData = []; // {name, terrain, matrix, exits}
-	function registerRoom(name) {
-		if (roomIndex.has(name)) return roomIndex.get(name);
-		if (roomIndex.size >= maxRooms) return -1;
-		if (!__W.roomNames.includes(name)) return -1;
+	// 目标归一化: RoomPosition (x/y/roomName 俱全) range 0, 否则 {pos, range}
+	const goals = (Array.isArray(goal) ? goal : [goal]).map((g) => {
+		let x, y, roomName, range;
+		if (g.x !== undefined && g.y !== undefined && g.roomName !== undefined) {
+			x = g.x; y = g.y; roomName = g.roomName; range = 0;
+		} else {
+			range = Math.max(0, g.range | 0);
+			x = g.pos.x; y = g.pos.y; roomName = g.pos.roomName;
+		}
+		const [rx, ry] = roomNameToXY(roomName);
+		return { wx: rx * 50 + x, wy: ry * 50 + y, range };
+	});
+	function heuristic(wx, wy) {
+		if (flee) {
+			let ret = 0;
+			for (const g of goals) {
+				const d = Math.max(Math.abs(wx - g.wx), Math.abs(wy - g.wy));
+				if (d < g.range) ret = Math.max(ret, g.range - d);
+			}
+			return ret;
+		}
+		let ret = Infinity;
+		for (const g of goals) {
+			const d = Math.max(Math.abs(wx - g.wx), Math.abs(wy - g.wy));
+			ret = Math.min(ret, d > g.range ? d - g.range : 0);
+		}
+		return ret;
+	}
+
+	// 房间注册表: name → idx (-1 = 被 roomCallback 排除 / 不在世界内)
+	const roomIndex = new Map();
+	const roomData = []; // {name, terrain, matrix, rx, ry}
+	function registerRoom(rx, ry) {
+		const name = xyToRoomName(rx, ry);
+		const known = roomIndex.get(name);
+		if (known !== undefined) return known;
+		if (roomData.length >= maxRooms) return -1;
+		if (!__roomNameSet.has(name)) {
+			roomIndex.set(name, -1);
+			return -1;
+		}
 		let matrix = null;
-		if (opts.roomCallback) {
-			const ret = opts.roomCallback(name);
-			if (ret === false) { roomIndex.set(name, -1); return -1; }
-			if (ret instanceof CostMatrix) matrix = ret.__bits;
+		if (options.roomCallback) {
+			const ret = options.roomCallback(name);
+			if (ret === false) {
+				roomIndex.set(name, -1);
+				return -1;
+			}
+			if (ret && ret._bits) matrix = ret._bits;
 		}
 		const idx = roomData.length;
-		const [rx, ry] = roomNameToXY(name);
-		roomData.push({ name, terrain: terrainOf(name), matrix, rx, ry });
+		roomData.push({ name, terrain: terrainOf(name), matrix, rx, ry, g: null, closed: null, parent: null });
 		roomIndex.set(name, idx);
 		return idx;
 	}
-	const originIdx = registerRoom(origin.roomName);
-	if (originIdx < 0) return { path: [], ops: 0, cost: 0, incomplete: true };
-	const oRoom = roomData[originIdx];
-
 	function tileCost(room, x, y) {
 		// CostMatrix 内部列优先 x*50+y (官方 path-finder.js)
 		const m = room.matrix ? room.matrix[x * 50 + y] : 0;
-		if (m === 0xff) return 0xffff;
+		if (m === 0xff) return PF_OBSTACLE;
 		if (m > 0) return m;
 		const t = room.terrain[y * 50 + x];
-		if (t & C.TERRAIN_MASK_WALL) return 0xffff;
+		if (t & C.TERRAIN_MASK_WALL) return PF_OBSTACLE;
 		return t & C.TERRAIN_MASK_SWAMP ? swampCost : plainCost;
 	}
-
-	// 目标世界坐标 (启发式)
-	const goalAnchors = goals.map((g) => {
-		const [gx, gy] = roomNameToXY(g.pos.roomName);
-		return { wx: gx * 50 + g.pos.x, wy: gy * 50 + g.pos.y, range: g.range || 0, goal: g };
-	});
-	function heuristic(roomIdx, x, y) {
-		const room = roomData[roomIdx];
-		const wx = room.rx * 50 + x, wy = room.ry * 50 + y;
-		let best = Infinity;
-		for (const a of goalAnchors) {
-			const dx = Math.max(Math.abs(wx - a.wx) - a.range, 0);
-			const dy = Math.max(Math.abs(wy - a.wy) - a.range, 0);
-			const h = dx > dy ? dx + 0.41421356 * dy : dy + 0.41421356 * dx;
-			if (h < best) best = h;
+	function ensureState(room) {
+		if (!room.g) {
+			room.g = new Float64Array(2500).fill(Infinity);
+			room.closed = new Uint8Array(2500);
+			room.parent = new Int32Array(2500).fill(-1);
 		}
-		return best * hw;
-	}
-	function inGoal(roomIdx, x, y) {
-		const room = roomData[roomIdx];
-		for (const a of goalAnchors) {
-			if (a.goal.pos.roomName !== room.name) continue;
-			const r = Math.max(Math.abs(x - a.goal.pos.x), Math.abs(y - a.goal.pos.y));
-			if (r <= a.range) return true;
-		}
-		return false;
-	}
-	// flee: 目标是要远离的东西, 评分 = 到最近 goal 的切比雪夫世界距离 (越大越好)
-	function fleeScore(roomIdx, x, y) {
-		const room = roomData[roomIdx];
-		const wx = room.rx * 50 + x, wy = room.ry * 50 + y;
-		let best = Infinity;
-		for (const a of goalAnchors) {
-			const d = Math.max(Math.abs(wx - a.wx), Math.abs(wy - a.wy)) - a.range;
-			if (d < best) best = d;
-		}
-		return best;
 	}
 
-	// 状态数组: 每房间 2500 格
-	const gCost = [], closed = [], parent = [];
-	const ensureRoom = (idx) => {
-		if (!gCost[idx]) { gCost[idx] = new Float64Array(2500).fill(Infinity); closed[idx] = new Uint8Array(2500); parent[idx] = new Int32Array(2500 * 2).fill(-1); }
-	};
+	const [orx, ory] = roomNameToXY(origin.roomName);
+	const originIdx = registerRoom(orx, ory);
+	if (originIdx < 0) return { path: [], ops: 0, cost: 0, incomplete: true };
+	const h0 = heuristic(orx * 50 + origin.x, ory * 50 + origin.y);
+	// native: 起点已满足目标 → undefined → 空路径且完整
+	if (h0 === 0) return { path: [], ops: 0, cost: 0, incomplete: false };
 
-	const startNode = { f: heuristic(originIdx, origin.x, origin.y), g: 0, room: originIdx, x: origin.x, y: origin.y };
+	const oRoom = roomData[originIdx];
+	ensureState(oRoom);
+	const originKey = originIdx * 2500 + origin.y * 50 + origin.x;
+	oRoom.g[origin.y * 50 + origin.x] = 0;
 	const heap = new MinHeap();
-	heap.push(startNode);
-	ensureRoom(originIdx);
-	gCost[originIdx][origin.y * 50 + origin.x] = 0;
-	let ops = 0;
-	let found = null;
-	// 官方: 搜索不完整时返回通往启发值最低节点的部分路径
-	let bestNode = null;
-	let bestH = Infinity;
-	// flee 模式: 记录 "离目标最远" 的节点 (评分最高, 同分取路径最短)
-	let bestFlee = -Infinity;
-	let bestFleeG = Infinity;
-	if (!flee && inGoal(originIdx, origin.x, origin.y)) found = { room: originIdx, x: origin.x, y: origin.y };
+	heap.push({ f: h0 * heuristicWeight, g: 0, k: originKey });
+	let minKey = originKey, minH = h0, minG = 0;
+	let opsRemaining = maxOps;
 
-	while ((flee || !found) && heap.size && ops < maxOps) {
+	while (heap.size && opsRemaining > 0) {
 		const node = heap.pop();
-		ops++;
-		const { room: ridx, x, y } = node;
-		const ci = y * 50 + x;
-		if (closed[ridx][ci]) continue;
-		closed[ridx][ci] = 1;
-		if (node.g > gCost[ridx][ci]) continue;
-		if (flee) {
-			const s = fleeScore(ridx, x, y);
-			if (s > bestFlee || (s === bestFlee && node.g < bestFleeG)) {
-				bestFlee = s;
-				bestFleeG = node.g;
-				bestNode = { room: ridx, x, y };
-			}
-		} else {
-			const h = heuristic(ridx, x, y);
-			if (h < bestH) {
-				bestH = h;
-				bestNode = { room: ridx, x, y };
-			}
-			if (inGoal(ridx, x, y)) { found = { room: ridx, x, y }; break; }
-		}
-
+		const ridx = (node.k / 2500) | 0;
+		const ti = node.k - ridx * 2500;
 		const room = roomData[ridx];
+		if (room.closed[ti] || node.g > room.g[ti]) continue;
+		room.closed[ti] = 1;
+		const x = ti % 50, y = (ti / 50) | 0;
+		const h = heuristic(room.rx * 50 + x, room.ry * 50 + y);
+		if (h === 0) {
+			minKey = node.k; minH = 0; minG = node.g;
+			break;
+		}
+		if (h < minH) {
+			minKey = node.k; minH = h; minG = node.g;
+		}
+		if (node.g + h > maxCost) break;
+
 		for (let dir = 1; dir <= 8; dir++) {
-			const [dx, dy] = OFFSETS[dir];
-			const nx = x + dx, ny = y + dy;
-			if (nx < 0 || nx > 49 || ny < 0 || ny > 49) continue;
-			const step = tileCost(room, nx, ny);
-			if (step >= 0xffff) continue;
-			const ng = node.g + step;
-			if (ng > maxCost) continue;
-			ensureRoom(ridx);
-			const ni = ny * 50 + nx;
-			if (ng < gCost[ridx][ni]) {
-				gCost[ridx][ni] = ng;
-				parent[ridx][ni * 2] = ci;
-				parent[ridx][ni * 2 + 1] = ridx;
-				heap.push({ f: ng + heuristic(ridx, nx, ny), g: ng, room: ridx, x: nx, y: ny });
+			const dx = OFFSETS[dir][0], dy = OFFSETS[dir][1];
+			// native pf.cc astar: 边界格上只能笔直跨房或回到房内, 不能沿边界移动
+			if (x === 0) {
+				if ((dx === -1 && dy !== 0) || dx === 0) continue;
+			} else if (x === 49) {
+				if ((dx === 1 && dy !== 0) || dx === 0) continue;
+			} else if (y === 0) {
+				if ((dy === -1 && dx !== 0) || dy === 0) continue;
+			} else if (y === 49) {
+				if ((dy === 1 && dx !== 0) || dy === 0) continue;
 			}
-		}
-		// 跨房: 从边界格跳到相邻房间对侧格
-		if (x === 0 || x === 49 || y === 0 || y === 49) {
-			const crossings = [];
-			if (x === 0) crossings.push([room.rx - 1, room.ry, 49, y]);
-			if (x === 49) crossings.push([room.rx + 1, room.ry, 0, y]);
-			if (y === 0) crossings.push([room.rx, room.ry - 1, x, 49]);
-			if (y === 49) crossings.push([room.rx, room.ry + 1, x, 0]);
-			for (const [nrx, nry, nx, ny] of crossings) {
-				const nName = xyToRoomName(nrx, nry);
-				const nIdx = registerRoom(nName);
+			let nx = x + dx, ny = y + dy;
+			let nRoom = room, nIdx = ridx;
+			if (nx < 0 || nx > 49 || ny < 0 || ny > 49) {
+				const rdx = nx < 0 ? -1 : nx > 49 ? 1 : 0;
+				const rdy = ny < 0 ? -1 : ny > 49 ? 1 : 0;
+				nIdx = registerRoom(room.rx + rdx, room.ry + rdy);
 				if (nIdx < 0) continue;
-				const nRoom = roomData[nIdx];
-				const step = tileCost(nRoom, nx, ny);
-				if (step >= 0xffff) continue;
-				const ng = node.g + step;
-				ensureRoom(nIdx);
-				const ni = ny * 50 + nx;
-				if (ng < gCost[nIdx][ni]) {
-					gCost[nIdx][ni] = ng;
-					parent[nIdx][ni * 2] = ci;
-					parent[nIdx][ni * 2 + 1] = ridx;
-					heap.push({ f: ng + heuristic(nIdx, nx, ny), g: ng, room: nIdx, x: nx, y: ny });
-				}
+				nRoom = roomData[nIdx];
+				nx -= rdx * 50;
+				ny -= rdy * 50;
+			}
+			const step = tileCost(nRoom, nx, ny);
+			if (step === PF_OBSTACLE) continue;
+			ensureState(nRoom);
+			const ni = ny * 50 + nx;
+			if (nRoom.closed[ni]) continue;
+			const ng = node.g + step;
+			if (ng < nRoom.g[ni]) {
+				nRoom.g[ni] = ng;
+				nRoom.parent[ni] = node.k;
+				const nh = heuristic(nRoom.rx * 50 + nx, nRoom.ry * 50 + ny);
+				heap.push({ f: ng + nh * heuristicWeight, g: ng, k: nIdx * 2500 + ni });
 			}
 		}
+		opsRemaining--;
 	}
 
 	const path = [];
-	let cost = 0;
-	const end = flee ? bestNode : found || bestNode;
-	if (end) {
-		let { room: ridx, x, y } = end;
-		cost = gCost[ridx][y * 50 + x];
-		for (;;) {
-			path.push(new RoomPosition(x, y, roomData[ridx].name));
-			if (ridx === originIdx && x === origin.x && y === origin.y) break;
-			const ti = y * 50 + x;
-			const pRoom = parent[ridx][ti * 2 + 1];
-			const pTile = parent[ridx][ti * 2];
-			if (pRoom < 0 || pTile < 0) break;
-			ridx = pRoom;
-			x = pTile % 50;
-			y = Math.floor(pTile / 50);
-		}
-		path.reverse();
-		// 起点移除; 若回溯链未精确落在起点 (不应发生), 以起点最近一跳截断
-		if (path.length && path[0].isEqualTo(origin)) path.shift();
-		const oi = path.findIndex((p) => p.isEqualTo(origin));
-		if (oi > 0) path.splice(0, oi);
+	let k = minKey;
+	while (k !== originKey && k >= 0) {
+		const ridx = (k / 2500) | 0;
+		const ti = k - ridx * 2500;
+		const room = roomData[ridx];
+		path.push(new RoomPosition(ti % 50, (ti / 50) | 0, room.name));
+		k = room.parent[ti];
 	}
-	return { path, ops, cost, incomplete: flee ? ops >= maxOps : !found };
+	path.reverse();
+	return { path, ops: maxOps - opsRemaining, cost: minG, incomplete: minH !== 0 };
 }
 
 const PathFinder = {
-	CostMatrix,
+	CostMatrix: PFCostMatrix,
 	search: pathFinderSearch,
 	use() {},
 };
@@ -2888,6 +3180,13 @@ function buildGame() {
 	__createdCreepNames = new Set();
 	__lastActivateSafeMode = null;
 	__createdSiteCount = 0;
+	__createdSpawnNames = [];
+	__createdFlagNames = [];
+	__flagNames = new Set();
+	__allSpawns = [];
+	__allSites = [];
+	__notifyCount = 0;
+	__roomNameSet = new Set(__W.roomNames);
 	Game = {
 		time: __W.time,
 		rooms: {},
@@ -2920,35 +3219,47 @@ function buildGame() {
 		getObjectById(id) {
 			return byId.get(id) || null;
 		},
-		notify() {},
+		/** 官方 game.js:174-181: 每 tick 前 20 条返回 OK, 之后 ERR_FULL (模拟器不发送通知) */
+		notify(message, groupInterval) {
+			if (__notifyCount >= 20) return C.ERR_FULL;
+			__notifyCount++;
+			return C.OK;
+		},
+	};
+	const registerObject = (obj) => {
+		byId.set(obj.id, obj);
+		if (obj instanceof Creep && obj.my) Game.creeps[obj.name] = obj;
+		if (obj instanceof StructureSpawn) {
+			__allSpawns.push(obj);
+			if (obj.my) Game.spawns[obj.name] = obj;
+		}
+		// 官方 E/game/game.js:302-305: Game.structures 只含自己的 OwnedStructure
+		if (obj instanceof OwnedStructure && obj.my) Game.structures[obj.id] = obj;
+		if (obj instanceof ConstructionSite) {
+			__allSites.push(obj);
+			if (obj.my) Game.constructionSites[obj.id] = obj;
+		}
 	};
 	for (const [name, rawRoom] of Object.entries(__W.rooms)) {
 		const room = new Room(name, rawRoom);
 		Game.rooms[name] = room;
-		for (const obj of room.__objects) {
-			if (!obj) continue;
-			byId.set(obj.id, obj);
-			if (obj instanceof Creep && obj.my) Game.creeps[obj.name] = obj;
-			if (obj instanceof StructureSpawn && obj.my) Game.spawns[obj.name] = obj;
-			// 官方 E/game/game.js:302-305: Game.structures 只含自己的 OwnedStructure
-			if (obj instanceof OwnedStructure && obj.my) Game.structures[obj.id] = obj;
-			if (obj instanceof ConstructionSite && obj.my) Game.constructionSites[obj.id] = obj;
-		}
+		for (const obj of room.__objects) registerObject(obj);
 	}
-	// RCL 结构上限表 (createConstructionSite 校验用)
-	for (const room of Object.values(Game.rooms)) {
-		if (room.controller) {
-			room.__raw.structureLimits = structureLimitsFor(room.controller.level);
-		}
+	// 无视野房间里自己的工地 (官方 runtimeData.userObjects): 进 Game.constructionSites / getObjectById,
+	// 但不进任何房间的 find/look (对象的 .room 为 undefined)
+	for (const raw of __W.constructionSites || []) {
+		const site = wrapObject(raw.room, raw);
+		if (site) registerObject(site);
 	}
-}
-
-/** 由官方 CONTROLLER_STRUCTURES 派生 (不再手写一份易漂移的表) */
-function structureLimitsFor(rcl) {
-	const out = {};
-	const lv = Math.min(rcl, 8);
-	for (const [st, table] of Object.entries(C.CONTROLLER_STRUCTURES)) out[st] = table[lv];
-	return out;
+	// 旗 (官方 runtimeData.flags): 全部进 Game.flags, 有视野的房间才进 find/look 登记表
+	for (const f of __W.flags || []) {
+		const flag = new Flag(f.name, f.color, f.secondaryColor, f.room, f.x, f.y);
+		byId.set("flag_" + f.name, flag);
+		Game.flags[f.name] = flag;
+		__flagNames.add(f.name);
+		const room = Game.rooms[f.room];
+		if (room) room.__register(flag);
+	}
 }
 
 function makeCpu(raw) {
@@ -2974,15 +3285,25 @@ function makeCpu(raw) {
 function makeMap() {
 	return {
 		getWorldSize() { return __W.roomNames.length > 1 ? 200 : 50; },
+		/** 官方 map.js:21-45: 只列出有出口格 (边上存在非墙格) 且相邻房间存在的方向 */
 		describeExits(roomName) {
-			if (!__W.roomNames.includes(roomName)) return null;
+			if (!/^(W|E)\d+(N|S)\d+$/.test(roomName)) return null;
+			if (!__roomNameSet.has(roomName)) return null;
 			const [rx, ry] = roomNameToXY(roomName);
+			const terrain = terrainOf(roomName);
+			const hasExit = (dir) => {
+				for (let i = 0; i < 50; i++) {
+					const [x, y] = dir === C.TOP ? [i, 0] : dir === C.BOTTOM ? [i, 49] : dir === C.RIGHT ? [49, i] : [0, i];
+					if (!(terrain[y * 50 + x] & C.TERRAIN_MASK_WALL)) return true;
+				}
+				return false;
+			};
 			const exits = {};
-			const set = (dir, name) => { if (__W.roomNames.includes(name)) exits[dir] = name; };
-			set("1", xyToRoomName(rx, ry - 1));
-			set("3", xyToRoomName(rx + 1, ry));
-			set("5", xyToRoomName(rx, ry + 1));
-			set("7", xyToRoomName(rx - 1, ry));
+			const set = (dir, name) => { if (__roomNameSet.has(name) && hasExit(dir)) exits[dir] = name; };
+			set(C.TOP, xyToRoomName(rx, ry - 1));
+			set(C.BOTTOM, xyToRoomName(rx, ry + 1));
+			set(C.LEFT, xyToRoomName(rx - 1, ry));
+			set(C.RIGHT, xyToRoomName(rx + 1, ry));
 			return exits;
 		},
 		findExit(fromRoom, toRoom, opts) {
@@ -2994,6 +3315,7 @@ function makeMap() {
 		findRoute(fromRoom, toRoom, opts) {
 			const from = typeof fromRoom === "string" ? fromRoom : fromRoom.name;
 			const to = typeof toRoom === "string" ? toRoom : toRoom.name;
+			if (from == to) return [];
 			if (!__W.roomNames.includes(from) || !__W.roomNames.includes(to)) return C.ERR_NO_PATH;
 			const cb = opts && opts.routeCallback;
 			// Dijkstra
@@ -3029,27 +3351,41 @@ function makeMap() {
 			}
 			return route;
 		},
-		getRoomLinearDistance(roomName1, roomName2) {
+		/** 官方 utils.calcRoomsDistance: continuous 时按环绕世界取短边 */
+		getRoomLinearDistance(roomName1, roomName2, continuous) {
 			const [x1, y1] = roomNameToXY(roomName1);
 			const [x2, y2] = roomNameToXY(roomName2);
-			return Math.max(Math.abs(x1 - x2), Math.abs(y1 - y2));
+			let dx = Math.abs(x2 - x1);
+			let dy = Math.abs(y2 - y1);
+			if (continuous) {
+				const worldSize = this.getWorldSize();
+				dx = Math.min(worldSize - dx, dx);
+				dy = Math.min(worldSize - dy, dy);
+			}
+			return Math.max(dx, dy);
 		},
 		getRoomTerrain(roomName) {
 			return new Terrain(roomName);
 		},
+		/** 官方 map.js:205-229: 越界或未知房间返回 undefined */
 		getTerrainAt(x, y, roomName) {
-			// 支持 (x, y, roomName) 与 (pos) 两种重载; 返回 'wall'/'swamp'/'plain' (官方为字符串)
-			if (typeof x === "object" && x !== null) { roomName = x.roomName; y = x.y; x = x.x; }
-			const t = new Terrain(roomName).get(x, y);
-			return t & C.TERRAIN_MASK_WALL ? "wall" : t & C.TERRAIN_MASK_SWAMP ? "swamp" : "plain";
+			if (_.isObject(x)) { y = x.y; roomName = x.roomName; x = x.x; }
+			if (x < 0 || x > 49 || y < 0 || y > 49) return undefined;
+			if (!hasTerrain(roomName)) return undefined;
+			const t = terrainOf(roomName)[y * 50 + x];
+			if (t & C.TERRAIN_MASK_WALL) return "wall";
+			if (t & C.TERRAIN_MASK_SWAMP) return "swamp";
+			return "plain";
 		},
 		isRoomAvailable(roomName) {
-			return __W.roomNames.includes(roomName);
+			if (!/^(W|E)\d+(N|S)\d+$/.test(roomName)) return false;
+			return __roomNameSet.has(roomName);
 		},
+		/** 官方 map.js:177-203: 非法房名 undefined; 世界内 normal; 其余 closed */
 		getRoomStatus(roomName) {
-			// 官方恒返回 {status, timestamp}; 场景外房间也一样 (此前返回 null)
-			if (typeof roomName !== "string" || !/^([WE])\d+([NS])\d+$/.test(roomName)) return null;
-			return { status: "normal", timestamp: null };
+			if (!/^(W|E)\d+(N|S)\d+$/.test(roomName)) return undefined;
+			if (__roomNameSet.has(roomName)) return { status: "normal", timestamp: null };
+			return { status: "closed", timestamp: null };
 		},
 		visual: new RoomVisual("map"),
 	};
@@ -3098,9 +3434,11 @@ function __consoleLine(args) {
 	}
 }
 globalThis.console = console;
-function fmt(v) {
-	if (typeof v === "string") return v;
-	try { return JSON.stringify(v); } catch { return String(v); }
+/** 官方 game/console.js:21-25: 有 toString 的用 toString, undefined → 'undefined', 其余 JSON.stringify */
+function fmt(i) {
+	if (i && i.toString) return i.toString();
+	if (typeof i === "undefined") return "undefined";
+	return JSON.stringify(i);
 }
 
 // ═══════════════════════════ RawMemory / 全局暴露 ═══════════════════════════
@@ -3212,7 +3550,7 @@ class Ruin extends RoomObject {
 		});
 		if (st.my !== undefined) {
 			Object.defineProperties(structure, {
-				owner: { enumerable: true, value: { username: st.my ? "Nexus" : "Invader" } },
+				owner: { enumerable: true, value: { username: st.my ? MY_USERNAME : HOSTILE_USERNAME } },
 				my: { enumerable: true, value: !!st.my },
 			});
 		}
@@ -3234,8 +3572,9 @@ class PowerCreep extends RoomObject {
 		super(raw);
 		this.name = raw.name;
 		this.my = raw.my !== false;
-		this.owner = { username: "Nexus" };
-		this.store = makeStore(raw.store, Infinity, null);
+		this.owner = { username: this.my ? MY_USERNAME : HOSTILE_USERNAME };
+		// 官方 power creep 的 storeCapacity 来自对象数据; 快照未给出时与官方缺字段一致 (null)
+		this.store = makeStore(raw.store, raw.storeCapacity == null ? null : raw.storeCapacity, null);
 		this.hits = raw.hits;
 		this.hitsMax = raw.hitsMax;
 		this.ticksToLive = raw.ticksToLive;
@@ -3258,9 +3597,8 @@ for (const [name, cls] of Object.entries(GLOBAL_CLASSES)) {
 }
 // 官方 E/game/structures.js:1293: 旧别名 Spawn === StructureSpawn
 globalThis.Spawn = StructureSpawn;
-// PathFinder 命名空间 + CostMatrix 全局
+// PathFinder 命名空间 (官方没有全局 CostMatrix, 只有 PathFinder.CostMatrix)
 globalThis.PathFinder = PathFinder;
-globalThis.CostMatrix = CostMatrix;
 globalThis.RawMemory = RawMemory;
 globalThis.InterShardMemory = InterShardMemory;
 
