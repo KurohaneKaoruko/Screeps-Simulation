@@ -928,3 +928,97 @@ fn terrain_read_after_first_tick_is_correct() {
 		assert_eq!(v["plain"], 0, "{v}");
 	});
 }
+
+/// 战斗 API 端到端: 快照 → shim controller.activateSafeMode / nuker.launchNuke →
+/// 意图 → 引擎结算 → 下一 tick 快照回读 (safeMode / FIND_NUKES / nuker cooldown)。
+const COMBAT_JS_SCENE: &str = r#"{
+	"name": "combat-js",
+	"seed": 1,
+	"rooms": [
+		{ "name": "W5N8", "terrain": { "kind": "flat" },
+		  "sources": { "count": 0 },
+		  "controller": { "level": 8, "pos": [25, 25], "safeModeAvailable": 1 },
+		  "structures": [{ "type": "nuker", "pos": [40, 40], "store": { "energy": 300000, "G": 5000 } }] }
+	]
+}"#;
+
+#[test]
+fn combat_apis_via_js() {
+	in_tokio(|| {
+		let scenario = Scenario::from_json(COMBAT_JS_SCENE).unwrap();
+		let mut world = build_world(&scenario).unwrap();
+		let mut movement = Movement::default();
+		let bundle = r#"
+			exports.loop = function() {
+				const room = Game.rooms.W5N8;
+				const ctrl = room.controller;
+				const nuker = room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_NUKER })[0];
+				const r = { phase: Memory.phase || 0 };
+				Memory.phase = r.phase + 1;
+				r.safeMode = ctrl.safeMode;
+				r.available = ctrl.safeModeAvailable;
+				r.cooldown = ctrl.safeModeCooldown;
+				r.nukes = room.find(FIND_NUKES).length;
+				// launchNuke/activateSafeMode 只提交意图 (引擎在 tick 末结算), 故同 tick 读到的 store 仍是发射前的值
+				r.nukerE = nuker.store.energy;
+				r.nukerG = nuker.store[RESOURCE_GHODIUM];
+				if (r.phase === 0) {
+					r.activate = ctrl.activateSafeMode();
+					r.launch = nuker.launchNuke(new RoomPosition(10, 10, "W5N8"));
+				} else {
+					r.nukerCooldown = nuker.cooldown;
+					r.launchTired = nuker.launchNuke(new RoomPosition(10, 10, "W5N8"));
+					r.activateBusy = ctrl.activateSafeMode();
+					const n = room.find(FIND_NUKES)[0];
+					r.nukeInfo = n ? [n.timeToLand, n.launchRoomName, n.pos.x, n.pos.y] : null;
+				}
+				console.log(JSON.stringify(r));
+			};
+		"#;
+		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut memory = String::from("{}");
+		let mut infos = Vec::new();
+		for _ in 0..2 {
+			let snapshot = build_snapshot(
+				&world,
+				&SnapshotOptions {
+					cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 },
+					always_visible: false,
+					include_terrain: true,
+				},
+			);
+			let result = bot.run_tick(snapshot, memory.clone()).unwrap();
+			assert!(result.errors.is_empty(), "bundle 不应报错: {:?}", result.errors);
+			memory = result.memory.clone();
+			infos.push(
+				serde_json::from_str::<serde_json::Value>(
+					result.console.first().map(String::as_str).unwrap_or("{}"),
+				)
+				.unwrap(),
+			);
+			tick::run_tick(&mut world, &mut movement, &result.intents);
+		}
+
+		let t0 = &infos[0];
+		assert_eq!(t0["safeMode"], serde_json::Value::Null, "{t0}");
+		assert_eq!(t0["available"], 1, "{t0}");
+		assert_eq!(t0["cooldown"], serde_json::Value::Null, "{t0}");
+		assert_eq!(t0["nukes"], 0, "{t0}");
+		assert_eq!(t0["activate"], 0, "activateSafeMode → OK: {t0}");
+		assert_eq!(t0["launch"], 0, "launchNuke → OK: {t0}");
+		assert_eq!(t0["nukerE"], 300000, "意图未结算, 同 tick 读到发射前的能量: {t0}");
+		assert_eq!(t0["nukerG"], 5000, "{t0}");
+
+		let t1 = &infos[1];
+		assert_eq!(t1["nukerE"], 0, "发射已扣光 energy: {t1}");
+		assert_eq!(t1["nukerG"], 0, "发射已扣光 ghodium: {t1}");
+		assert_eq!(t1["safeMode"], 20000, "SAFE_MODE_DURATION 绝对到期 tick: {t1}");
+		assert_eq!(t1["available"], 0, "已消耗: {t1}");
+		assert_eq!(t1["cooldown"], 50000, "SAFE_MODE_COOLDOWN 到期 tick: {t1}");
+		assert_eq!(t1["nukes"], 1, "{t1}");
+		assert_eq!(t1["nukeInfo"], serde_json::json!([49999, "W5N8", 10, 10]), "{t1}");
+		assert_eq!(t1["nukerCooldown"], 99999, "NUKER_COOLDOWN − 1 tick: {t1}");
+		assert_eq!(t1["launchTired"], -11, "冷却中 → ERR_TIRED: {t1}");
+		assert_eq!(t1["activateBusy"], -4, "安全模式已激活 → ERR_BUSY: {t1}");
+	});
+}

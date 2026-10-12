@@ -240,6 +240,9 @@ pub struct World {
     /// 成交记录 (新→旧), 供 Game.market.getHistory
     #[serde(default)]
     pub market_deals: Vec<crate::engine::market::MarketDeal>,
+    /// 在飞的核弹 (官方 Nuke; 落地后从列表移除)
+    #[serde(default)]
+    pub nukes: Vec<crate::engine::combat::Nuke>,
 }
 
 /// 终端转账记录 (官方 transactions 集合的字段子集)
@@ -282,6 +285,7 @@ impl World {
             market_orders: BTreeMap::new(),
             market_order_seq: 0,
             market_deals: Vec::new(),
+            nukes: Vec::new(),
         }
     }
 
@@ -467,6 +471,16 @@ impl World {
                 if let Some(g) = obj.guard_lair {
                     mix_u64(&mut h, g);
                 }
+                // 安全模式: 只在非默认值时混入 (默认场景黄金哈希保持不变)
+                if obj.safe_mode_until > 0 {
+                    mix_u64(&mut h, obj.safe_mode_until);
+                }
+                if obj.safe_mode_available > 0 {
+                    mix_u64(&mut h, obj.safe_mode_available as u64);
+                }
+                if obj.safe_mode_cooldown_until > 0 {
+                    mix_u64(&mut h, obj.safe_mode_cooldown_until);
+                }
             }
         }
         // 市场字段: 只在非默认值时混入 (无市场的场景黄金哈希保持不变)
@@ -491,6 +505,15 @@ impl World {
             mix_str(&mut h, &d.resource_type);
             mix_u64(&mut h, d.amount as u64);
             mix_u64(&mut h, d.price.to_bits());
+        }
+        // 在飞的核弹 (只在非空时混入)
+        for n in &self.nukes {
+            mix_u64(&mut h, n.id);
+            mix_str(&mut h, &n.launch_room);
+            mix_str(&mut h, &n.target_room);
+            mix_u64(&mut h, n.x as u64);
+            mix_u64(&mut h, n.y as u64);
+            mix_u64(&mut h, n.land_tick);
         }
         h
     }

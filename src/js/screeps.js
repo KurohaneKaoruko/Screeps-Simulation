@@ -1528,14 +1528,23 @@ class StructureController extends OwnedStructure {
 		this.ticksToDowngrade = raw.ticksToDowngrade;
 		this.safeModeAvailable = raw.safeModeAvailable || 0;
 		this.safeMode = raw.safeMode || null;
-		this.safeModeCooldown = null;
+		this.safeModeCooldown = raw.safeModeCooldown || null;
 		this.upgradeBlocked = raw.upgradeBlocked || 0;
 		// 官方 structures.js: 没有保留时为 undefined; 字段名 ticksToEnd
 		this.reservation = raw.reservation || undefined;
 		this.sign = raw.sign || null;
 		this.isPowerEnabled = false;
 	}
-	activateSafeMode() { return C.ERR_INVALID_ARGS; }
+	/** 官方 E/game/structures.js: StructureController.activateSafeMode */
+	activateSafeMode() {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (this.safeMode) return C.ERR_BUSY;
+		if (this.upgradeBlocked > 0) return C.ERR_BUSY;
+		if (this.safeModeAvailable === 0) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if (this.safeModeCooldown) return C.ERR_TIRED;
+		intent(this.id, "activateSafeMode", {});
+		return C.OK;
+	}
 	unclaim() { return C.OK; }
 	toString() {
 		return `[controller ${this.pos.roomName}]`;
@@ -1713,7 +1722,31 @@ class StructureLab extends OwnedStructure {
 		return C.OK;
 	}
 }
-class StructureNuker extends OwnedStructure { }
+class StructureNuker extends OwnedStructure {
+	constructor(raw) {
+		super(raw);
+		this.energy = raw.store ? raw.store.energy || 0 : 0;
+		this.energyCapacity = C.NUKER_ENERGY_CAPACITY;
+		this.ghodium = raw.store ? raw.store.G || 0 : 0;
+		this.ghodiumCapacity = C.NUKER_GHODIUM_CAPACITY;
+		this.cooldown = raw.cooldown || 0;
+	}
+	/** 官方 E/game/structures.js: StructureNuker.launchNuke(pos) */
+	launchNuke(pos) {
+		if (!this.my) return C.ERR_NOT_OWNER;
+		if (!this.isActive()) return C.ERR_RCL_NOT_ENOUGH;
+		if (!pos || typeof pos.x !== "number" || typeof pos.y !== "number" || typeof pos.roomName !== "string") {
+			return C.ERR_INVALID_ARGS;
+		}
+		if (pos.x < 0 || pos.x > 49 || pos.y < 0 || pos.y > 49) return C.ERR_INVALID_ARGS;
+		if (this.cooldown > 0) return C.ERR_TIRED;
+		const store = this.__raw.store || {};
+		if ((store.energy || 0) < C.NUKER_ENERGY_CAPACITY) return C.ERR_NOT_ENOUGH_RESOURCES;
+		if ((store.G || 0) < C.NUKER_GHODIUM_CAPACITY) return C.ERR_NOT_ENOUGH_RESOURCES;
+		intent(this.id, "launchNuke", { x: pos.x, y: pos.y, roomName: pos.roomName });
+		return C.OK;
+	}
+}
 /** 官方 E/game/structures.js:538-572 */
 class StructureObserver extends OwnedStructure {
 	observeRoom(roomName) {
@@ -1918,6 +1951,8 @@ class Room {
 		}
 		this.energyAvailable = raw.energyAvailable;
 		this.energyCapacityAvailable = raw.energyCapacityAvailable;
+		// 飞向本房间的在飞核弹 (官方 FIND_NUKES / LOOK_NUKES)
+		this.__nukes = (raw.nukes || []).map((n) => new Nuke(n, name));
 	}
 	// visual 懒创建 (no-op 实现; 绘制型 bot 访问时才分配)
 	get visual() {
@@ -1957,6 +1992,7 @@ class Room {
 			case C.LOOK_STRUCTURES: return cell.filter((o) => o instanceof Structure);
 			case C.LOOK_CONSTRUCTION_SITES: return cell.filter((o) => o instanceof ConstructionSite);
 			case C.LOOK_TOMBSTONES: return cell.filter((o) => o instanceof Tombstone);
+			case C.LOOK_NUKES: return (this.__nukes || []).filter((n) => n.pos.x === x && n.pos.y === y);
 			case C.LOOK_FLAGS: return cell.filter((o) => o instanceof Flag);
 			case C.LOOK_TERRAIN: {
 				const t = terrainOf(this.name)[y * 50 + x];
@@ -1969,7 +2005,7 @@ class Room {
 		if (typeof x === "object") { y = x.y; x = x.x; }
 		const out = [];
 		// 官方 rooms.js lookAt 的类型顺序 (无对象的类型自然为空)
-		for (const type of ["creep", "energy", "resource", "source", "mineral", "structure", "flag", "constructionSite", "terrain", "tombstone"]) {
+		for (const type of ["creep", "energy", "resource", "source", "mineral", "structure", "flag", "constructionSite", "terrain", "tombstone", "nuke"]) {
 			for (const v of this.lookForAt(type, x, y)) out.push({ type, [type]: v });
 		}
 		return out;
@@ -2131,6 +2167,7 @@ function collectFind(roomName, type, opts) {
 		case C.FIND_CONSTRUCTION_SITES:
 		case C.FIND_MY_CONSTRUCTION_SITES: return pick(room.__byType.constructionSite.filter((s) => s.my));
 		case C.FIND_TOMBSTONES: return pick(room.__byType.tombstone);
+		case C.FIND_NUKES: return pick(room.__nukes || []);
 		case C.FIND_FLAGS: return pick(Object.values(Game.flags).filter((f) => f.pos.roomName === roomName));
 		case C.FIND_MY_SPAWNS: return pick(room.__byType.spawn.filter((s) => s.my));
 		case C.FIND_HOSTILE_SPAWNS: return pick(room.__byType.spawn.filter((s) => !s.my));
@@ -3102,11 +3139,15 @@ class Ruin extends RoomObject {
 		this.ticksToDecay = raw.ticksToDecay;
 	}
 }
+/** 官方 E/game/nukes.js: 在飞核弹 (room.find(FIND_NUKES) / lookForAt(LOOK_NUKES) 返回) */
 class Nuke extends RoomObject {
-	constructor(raw) {
-		super(raw);
+	constructor(raw, roomName) {
+		super(roomName ? { ...raw, roomName } : raw);
 		this.timeToLand = raw.timeToLand;
 		this.launchRoomName = raw.launchRoomName;
+	}
+	toString() {
+		return `[nuke ${this.id}]`;
 	}
 }
 class PowerCreep extends RoomObject {

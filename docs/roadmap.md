@@ -178,12 +178,18 @@ isolate 创建从「编译 540KB 源码」变为「反序列化字节码」。�
 
 ### PvP/PvE 缺口
 
-5. **safeMode** 拦截攻击、**nuker** (landing→impact 两阶段)、**power creeps** (`PWR_*` 效果);
+5. ✅ **safeMode + nuker** (2026-10-12 交付): 安全模式 (`controller.activateSafeMode`:
+   消耗激活次数、`SAFE_MODE_DURATION` 20000 持续、`SAFE_MODE_COOLDOWN` 50000 间隔、
+   一个 shard 同时一房、非房主攻击被拦截、控制器升级 +1 次; 意图阶段预扫描结算保证同 tick 生效)、
+   核弹 (`nuker.launchNuke`: 满仓 energy+ghodium、`NUKER_COOLDOWN` 冷却、`NUKE_LAND_TIME` 50000 飞行、
+   落地清空全房间 creep/工地/掉落/墓碑/废墟并造成 `NUKE_DAMAGE[0/2]` 结构伤害、取消该房安全模式、
+   控制器 `upgradeBlocked` 200 tick)。`tests/combat.rs` 12 项 + `examples/combat.sim.ts`。
+   未做: power creeps (`PWR_*` 效果);
 6. ✅ **NPC** (2026-10-12 交付): invader 定期袭击 (对外房 harvest 的惩罚, 官方平衡性核心)、
    source keeper (lair 周期生成/守卫 source/仇恨圈攻击)、power bank (2M hits/半伤害反弹/线性衰减归零掉落)。
    意图驱动: NPC 每 tick 生成意图并入同一 `apply_intents` 管线 (复用疲劳/碰撞/伤害/互斥表/近战反击);
    开关 `world.npc_enabled`, 无 NPC 场景黄金基线哈希不变。`tests/npc.rs` 10 项 + `examples/npc.sim.ts`。
-   未做: nuke、power creeps (`PWR_*`)、ruin;
+   未做: power creeps (`PWR_*`)、ruin;
 7. ruin、construction site 过期、portal/highway。
 
 ### 终极正确性工具: 官方引擎对拍 (parity harness)
@@ -261,5 +267,5 @@ isolate 创建从「编译 540KB 源码」变为「反序列化字节码」。�
 | boost/lab + market | 高 (经济保真) | 高 | 第三批 (✅ boost/lab + market 已交付) |
 | 官方对拍 harness | 极高 (正确性闭环) | 高 | 第三批 |
 | CDP 调试 (`--inspect`) | 高 (DX 质变) | 中-高 | 第四批 |
-| NPC / nuke / power | 中 | 中 | 第四批 (✅ NPC 已交付, nuke/power 待做) |
+| NPC / nuke / power | 中 | 中 | 第四批 (✅ NPC + safeMode/nuke 已交付, power 待做) |
 | 预编译二进制分发 | 中 (普及) | 中 | 第四批 |

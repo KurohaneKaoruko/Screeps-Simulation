@@ -100,6 +100,11 @@ pub fn run_tick(world: &mut World, movement: &mut Movement, intents: &IntentList
     // 市场阶段: 本 tick 登记的 market 操作 (下单/成交/撤单/改价/延期)
     crate::engine::market::execute_market_ops(world, &effects.market_ops);
 
+    // 战斗阶段 (官方 nuker 阶段): 核弹发射 → 本 tick 落地核弹结算
+    // (安全模式激活已在意图阶段预扫描结算, 见 intents::apply_intents)
+    crate::engine::combat::execute_nuke_launches(world, &effects.nuke_launches);
+    crate::engine::combat::run_nuke_tick(world);
+
     // NPC tick 相位: invader 撤离 / powerBank 衰减 / keeper 与 invader 生成
     if world.npc_enabled {
         npc::run_npc_tick(world);

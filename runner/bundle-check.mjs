@@ -69,7 +69,6 @@ const MISSING_APIS = [
 // [匹配, 说明, 级别] —— level: 'error' 调用即抛错 / 'warn' no-op 或恒定值
 const SIM_COVERAGE = [
 	[/\bGame\.powerCreeps\b/, 'powerCreeps 恒为空对象 —— power creep 不会被模拟 (PWR_* 效果、有等级的工厂商品均不可用)', 'warn'],
-	[/\blaunchNuke\s*\(/, 'nuker 未实现 (StructureNuker 为空类, 调用即 TypeError)', 'error'],
 ]
 
 /// bundle 里声明过的标识符 (var/let/const/function/class, 含 `var A = 1, B = 2` 与解构)。

@@ -197,8 +197,9 @@ console.log('bundle 静态检查 (bundle-check.mjs)')
 	r = checkBundle(`exports.loop = function () { lab.runReaction(a, b); lab.boostCreep(c); lab.unboostCreep(c); terminal.send(RESOURCE_ENERGY, 100, 'W1N1'); factory.produce(RESOURCE_UTRIUM_BAR); ps.processPower(); obs.observeRoom('W1N1'); Game.market.calcTransactionCost(100, 'W1N1', 'W2N2'); x = Game.gpl.level; };`)
 	expect(r.errors.length === 0 && r.warnings.length === 0, `工业 API 不再被标为未实现 (实际: ${[...r.errors, ...r.warnings].map((e) => e.message)})`)
 
+	// 核弹 API 已实现: 不再报覆盖度错误/警告
 	r = checkBundle(`exports.loop = function () { nuker.launchNuke(pos); };`)
-	expect(r.errors.some((e) => e.message.includes('nuker')), 'nuker.launchNuke → error')
+	expect(r.errors.length === 0 && r.warnings.length === 0, `nuker.launchNuke 不再被标为未实现 (实际: ${[...r.errors, ...r.warnings].map((e) => e.message)})`)
 
 	r = checkBundle(`exports.loop = function () { WebAssembly.instantiate(bytes); };`)
 	expect(r.warnings.some((w) => w.message.includes('异步')), 'WebAssembly.instantiate 异步警告')

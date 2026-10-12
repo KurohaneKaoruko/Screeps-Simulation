@@ -81,6 +81,16 @@ pub struct Obj {
     pub sign: Option<String>,
     /// 攻击封锁升级的到期 tick (官方 upgradeBlocked)
     pub upgrade_blocked: u64,
+    // ── 安全模式 (官方 StructureController.safeMode / safeModeAvailable / safeModeCooldown) ──
+    /// 安全模式到期 tick (0 = 未激活; 激活期间非房主在本房的攻击被拦截)
+    #[serde(default)]
+    pub safe_mode_until: u64,
+    /// 可用的安全模式激活次数 (每次控制器升级 +1)
+    #[serde(default)]
+    pub safe_mode_available: u32,
+    /// 下次可激活安全模式的 tick (激活后冷却 SAFE_MODE_COOLDOWN)
+    #[serde(default)]
+    pub safe_mode_cooldown_until: u64,
     // ── mineral ──
     pub mineral_type: Option<String>,
     pub mineral_amount: Option<u32>,
@@ -361,6 +371,9 @@ pub fn structure(id: u64, structure_type: &str, x: u8, y: u8, mine: bool) -> Obj
         reservation_end_time: None,
         sign: None,
         upgrade_blocked: 0,
+        safe_mode_until: 0,
+        safe_mode_available: 0,
+        safe_mode_cooldown_until: 0,
         mineral_type: None,
         mineral_amount: None,
         density: 0,
@@ -435,6 +448,9 @@ pub fn creep_obj(id: u64, name: &str, x: u8, y: u8, body: Vec<BodyPart>) -> Obj 
         reservation_end_time: None,
         sign: None,
         upgrade_blocked: 0,
+        safe_mode_until: 0,
+        safe_mode_available: 0,
+        safe_mode_cooldown_until: 0,
         mineral_type: None,
         mineral_amount: None,
         density: 0,

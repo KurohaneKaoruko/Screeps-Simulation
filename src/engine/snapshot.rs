@@ -134,6 +134,26 @@ pub fn build_snapshot(world: &World, opts: &SnapshotOptions) -> String {
             }
             None => out.push_str("null"),
         }
+        out.push_str(",\"nukes\":[");
+        let mut first_nuke = true;
+        for n in world.nukes.iter().filter(|n| n.target_room == *name) {
+            if !first_nuke {
+                out.push(',');
+            }
+            first_nuke = false;
+            out.push_str("{\"id\":\"");
+            let _ = write!(out, "{:024x}", n.id);
+            out.push_str("\",\"launchRoomName\":");
+            put_str(&mut out, &n.launch_room);
+            out.push_str(",\"timeToLand\":");
+            let _ = write!(out, "{}", n.land_tick.saturating_sub(world.tick));
+            out.push_str(",\"x\":");
+            let _ = write!(out, "{}", n.x);
+            out.push_str(",\"y\":");
+            let _ = write!(out, "{}", n.y);
+            out.push('}');
+        }
+        out.push(']');
         out.push_str(",\"objects\":[");
         for (i, obj) in room.objects.values().enumerate() {
             if i > 0 {
@@ -342,7 +362,22 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
                 }
                 None => out.push_str("null"),
             }
-            out.push_str(",\"safeModeAvailable\":0,\"safeMode\":null,\"upgradeBlocked\":");
+            out.push_str(",\"safeModeAvailable\":");
+            let _ = write!(out, "{}", obj.safe_mode_available);
+            // 官方 StructureController.safeMode: 绝对到期 tick (未激活为 null)
+            out.push_str(",\"safeMode\":");
+            if obj.safe_mode_until > world.tick {
+                let _ = write!(out, "{}", obj.safe_mode_until);
+            } else {
+                out.push_str("null");
+            }
+            out.push_str(",\"safeModeCooldown\":");
+            if obj.safe_mode_cooldown_until > world.tick {
+                let _ = write!(out, "{}", obj.safe_mode_cooldown_until);
+            } else {
+                out.push_str("null");
+            }
+            out.push_str(",\"upgradeBlocked\":");
             let _ = write!(out, "{}", obj.upgrade_blocked.saturating_sub(world.tick));
             out.push_str(",\"reservation\":");
             match obj.reservation_end_time {
@@ -499,6 +534,7 @@ pub fn build_snapshot_value(world: &World, opts: &SnapshotOptions) -> Value {
                 "energyCapacityAvailable": room.energy_capacity_available(),
                 "controller": controller_id,
                 "storage": storage_id,
+                "nukes": room_nukes_json(world, name),
                 "objects": objects,
                 "events": events,
             }),
@@ -681,8 +717,23 @@ fn object_json(obj: &Obj, world: &World) -> Value {
                 "ticksToDowngrade".into(),
                 json!(obj.downgrade_time.map(|t| t.saturating_sub(world.tick))),
             );
-            extra.insert("safeModeAvailable".into(), json!(0));
-            extra.insert("safeMode".into(), Value::Null);
+            extra.insert("safeModeAvailable".into(), json!(obj.safe_mode_available));
+            extra.insert(
+                "safeMode".into(),
+                if obj.safe_mode_until > world.tick {
+                    json!(obj.safe_mode_until)
+                } else {
+                    Value::Null
+                },
+            );
+            extra.insert(
+                "safeModeCooldown".into(),
+                if obj.safe_mode_cooldown_until > world.tick {
+                    json!(obj.safe_mode_cooldown_until)
+                } else {
+                    Value::Null
+                },
+            );
             extra.insert(
                 "upgradeBlocked".into(),
                 json!(obj.upgrade_blocked.saturating_sub(world.tick)),
@@ -797,13 +848,36 @@ fn store_json(store: &Store) -> Value {
     Value::Object(map)
 }
 
-/// 工业结构的 API cooldown: extractor/link 用递减计数, lab/terminal/factory 用绝对到期 tick
+/// 工业结构的 API cooldown: extractor/link 用递减计数, lab/terminal/factory/nuker 用绝对到期 tick
 fn industry_cooldown(obj: &Obj, world: &World) -> Option<u64> {
     match obj.obj_type.as_str() {
         "extractor" => Some(obj.cooldown as u64),
-        "lab" | "terminal" | "factory" => Some(obj.cooldown_time.saturating_sub(world.tick)),
+        "lab" | "terminal" | "factory" | "nuker" => {
+            Some(obj.cooldown_time.saturating_sub(world.tick))
+        }
         _ => None,
     }
+}
+
+/// 飞向某房间的在飞核弹 (官方 room.find(FIND_NUKES) 的数据源; Nuke: id/launchRoomName/
+/// timeToLand + pos)
+fn room_nukes_json(world: &World, room_name: &str) -> Value {
+    Value::Array(
+        world
+            .nukes
+            .iter()
+            .filter(|n| n.target_room == room_name)
+            .map(|n| {
+                json!({
+                    "id": World::id_string(n.id),
+                    "launchRoomName": n.launch_room,
+                    "timeToLand": n.land_tick.saturating_sub(world.tick),
+                    "x": n.x,
+                    "y": n.y,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// 最近的终端转账 (官方 Game.market.incoming/outgoingTransactions 的数据源)

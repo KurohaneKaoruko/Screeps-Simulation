@@ -240,6 +240,10 @@ export function checkScenario(sim) {
 			if (c.mine === false && c.level > 0) {
 				warn(`${ctx}.controller`, 'mine=false 的中立控制器等级将被引擎强制为 0 (level 字段无效)')
 			}
+			if (c.safeModeAvailable !== undefined
+				&& (!Number.isInteger(c.safeModeAvailable) || c.safeModeAvailable < 0)) {
+				err(`${ctx}.controller.safeModeAvailable`, `应为非负整数 (当前 ${c.safeModeAvailable})`)
+			}
 		}
 
 		// sources

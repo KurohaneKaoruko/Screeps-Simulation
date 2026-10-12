@@ -79,13 +79,13 @@
 | PathFinder 跨房计价 | 出口格与对侧入口格按两步计价（官方为同节点），宏观行为一致 |
 | 有限世界 | 场景未定义相邻房间时，出口格上的 creep 停留原地（官方无限世界必穿越） |
 | 市场（部分完成） | 订单 `createOrder`/`deal`/`cancelOrder`/`changeOrderPrice`/`extendOrder`、`getAllOrders`/`getOrderById`/`getHistory`、`credits` 已对齐官方：下单收「总价 × 5%」手续费、成交运输能量费**由接单方终端出**、资源卖方→买方 / credits 买方→卖方、资源或 credits 不足则订单未激活。差异：单玩家模拟器里对手方是场景给定的「外部订单」（`market.orders`），成交在 tick 末统一结算（同 tick 内多笔成交互不可见）；`getHistory` 的 `date` 用 tick（官方为 UTC 日）、订单 `createdTimestamp` 由 tick×1000 近似 |
-| Power Creep / Nuker | 未实现：`Game.powerCreeps` 恒空，`launchNuke` 缺失（bundle 预检会报错） |
+| Power Creep | 未实现：`Game.powerCreeps` 恒空（`PWR_*` 效果、有等级的工厂商品均不可用） |
 | 工业的 Power 效果 | 不模拟任何 `PWR_*` 效果（`PWR_OPERATE_LAB/TERMINAL/FACTORY/POWER`、`PWR_REGEN_MINERAL` 等）；因此**有等级的工厂商品**（`COMMODITIES[x].level > 0`）恒失败（API 返回 `ERR_BUSY`/`ERR_INVALID_TARGET`，与官方无效果时一致），只有 0 级商品可生产；工厂等级只能由场景 `structures[].level` 给定 |
 | 矿物换密度的随机数 | 官方处理器用 `Math.random`；这里用场景 `seed` 播种的引擎随机数（splitmix64），概率分布一致、序列不同，同 seed 可复现 |
 | 转账记录 | 单玩家：发往自己终端的转账同时出现在 `incomingTransactions` 与 `outgoingTransactions`；只保留最近 100 条，`sender/recipient` 的 username 固定为 `Nexus`（敌方终端无 recipient） |
 | 敌方结构的激活 | 结构 `isActive()`（RCL 名额）只对我方结构计算，场景放置的敌方结构恒为激活 |
-| 战斗（近似完成） | 近战/远程/群体攻击、治疗、拆除、claim/reserve/sign/attackController 已对齐官方语义（含 hit-back、rampart 重定向、部件从头损坏、伤害 tick 末统一应用、意图互斥表）；未覆盖：Power 效果（`PWR_FORTIFY` 等护盾）、safeMode 拦截、nuker |
-| NPC（部分完成） | invader 定期侵袭波、source keeper（lair 每 300 tick 生成、守卫 source、仅打仇恨圈内目标）、power bank（2M hits、`POWER_BANK_HIT_BACK=0.5` 伤害反弹、5000 tick 线性衰减、归零销毁掉落 power）已对齐官方主流程；keeper/invader 身体部件数、侵袭周期（`npcs.invaders.every/first/lifetime/squad`）为社区近似；nuke、Power Creeps 仍未实现 |
+| 战斗（近似完成） | 近战/远程/群体攻击、治疗、拆除、claim/reserve/sign/attackController 已对齐官方语义（含 hit-back、rampart 重定向、部件从头损坏、伤害 tick 末统一应用、意图互斥表）；安全模式（`activateSafeMode`：消耗激活次数、20000 tick 持续、50000 tick 间隔、一个 shard 同时一房、非房主攻击拦截、控制器升级 +1 次）与核弹（`launchNuke`：满仓 energy+ghodium、100000 tick 冷却、50000 tick 飞行、落地清空 creep/工地/掉落/墓碑/废墟并造成 1e7 / 5e6 结构伤害、取消安全模式、`upgradeBlocked` 200 tick）已实现；未覆盖：Power 效果（`PWR_FORTIFY` 等护盾） |
+| NPC（部分完成） | invader 定期侵袭波、source keeper（lair 每 300 tick 生成、守卫 source、仅打仇恨圈内目标）、power bank（2M hits、`POWER_BANK_HIT_BACK=0.5` 伤害反弹、5000 tick 线性衰减、归零销毁掉落 power）已对齐官方主流程；keeper/invader 身体部件数、侵袭周期（`npcs.invaders.every/first/lifetime/squad`）为社区近似；Power Creeps 仍未实现 |
 | 地形生成 | `generated` 为噪声近似，不复刻官方地形算法；可用 `rows`/`raw` 显式给定真实地形 |
 | 事件日志结构 | 已实现 `EVENT_HARVEST/BUILD/REPAIR/UPGRADE_CONTROLLER/TRANSFER/OBJECT_DESTROYED/EXIT/ATTACK/HEAL/ATTACK_CONTROLLER/RESERVE_CONTROLLER`；`objectId` 取发起动作的对象，目标 id 放在 `data.targetId`/`data.sourceId`（采能量用 `sourceId`，采矿按官方用 `targetId`、`amount` 为未截断的采集功率）；lab/terminal/factory/observer/powerSpawn 不产生事件（官方只写 actionLog） |
 | CPU 墙钟耗时 | `usedTime` 只计 `loop()` 墙钟 + 意图计价，不含 Memory 解析/序列化；跨机器不可复现（P95 断言请留足余量）。bot 按 `getUsed()` 做决策时每次运行结果会不同，需要逐位复现（A/B 对比）时打开 `cpu.deterministic` |
@@ -197,10 +197,9 @@ screeps-sim check --strict             # 警告也计为失败 (CI 用)
 
 - 错误: **常量拼写错误** (`ERR_NOT_IN_RANG` → 运行时 undefined, 比较永远失败)、
   **参数顺序颠倒** (`transfer(RESOURCE_ENERGY, target)` / `spawnCreep('name', body)`)、
-  **node 泄漏** (`process.` / `require(` / `Buffer.` —— 官方同样会炸)、
-  调用模拟器未实现的方法 (`launchNuke` → TypeError)
+  **node 泄漏** (`process.` / `require(` / `Buffer.` —— 官方同样会炸)
 - 警告: `setTimeout` 等运行时缺失的 API、`WebAssembly.instantiate` 跨 tick 异步必死、
-  **模拟覆盖度** (`Game.market` 订单/deal no-op、powerCreeps 恒空 —— 提示哪些行为不会被模拟)
+  **模拟覆盖度** (`Game.powerCreeps` 恒空 —— 提示哪些行为不会被模拟)
 
 常量表从 `src/js/screeps.js` 自动提取 (`node runner/gen-constants.mjs`), `npm test` 校验同步。
 `test` 运行时自动做两层预检: 场景错误 → 用例秒失败; bundle 错误 → 使用该 bundle 的用例全部秒失败,
@@ -434,6 +433,7 @@ cargo test --release   # 推荐: 同时覆盖 release 优化后的代码生成 (
 | `tests/checkpoint_time_travel.rs` | 时间旅行：检查点序列化往返、落盘/发现/加载语义、"检查点 + 意图重放 == 连续运行" 每 tick 哈希对拍 |
 | `tests/npc.rs` | NPC：invader 侵袭波（按 `every/first/lifetime/squad` 周期性从房间边缘进入、攻击玩家目标、到期撤离不留痕）、source keeper（每个 lair 独立周期生成/更替自身 keeper、无仇恨时回防 source 守卫圈、仅攻击仇恨圈内玩家、贴脸近战）、lair 受损重置生成倒计时、power bank 线性衰减至归零销毁、`POWER_BANK_HIT_BACK` 半伤害反弹与掉落 power、快照字段（`ticksToSpawn`/`power`/`ticksToDecay`） |
 | `tests/market.rs` | 市场：下单 5% 手续费（买卖一致）、买入/卖出外部订单的资源与 credits 流向、运输能量费由接单方终端扣除（含卖出能量时 amount+cost 同扣）、credits 不足拒成交、撤单/改价/追加数量仅对自己订单生效、订单激活判定、`getHistory` 按 tick 聚合、快照市场字段（`marketCredits`/`marketOrders`/`marketHistory`）与快路径/Value 路径一致 |
+| `tests/combat.rs` | 战斗：安全模式（消耗激活次数与 20000/50000 计时、无次数拒绝、冷却期拒绝、一 shard 一房、拦截敌方攻击但不拦房主、控制器升级 +1 次）、核弹（发射消耗满仓 energy+ghodium 并进入冷却、越界/资源不足拒绝、落地清空 creep/掉落并造成 1e7 / 5e6 结构伤害、取消安全模式 + `upgradeBlocked` 200）、快照安全模式字段与在飞核弹（`nukes`）快路径/Value 一致 |
 
 ### 复现基准
 
@@ -453,6 +453,7 @@ src/
     intents.rs   意图结算 (creep/spawn/room intents 移植)
     npc.rs       NPC: invader 侵袭波 / source keeper / power bank
     market.rs    市场: 订单 / 成交 / credits / 终端跨房交易
+    combat.rs    战斗: 安全模式 (activateSafeMode) / 核弹 (launchNuke + 落地)
     tick.rs      Tick 推进顺序 (processor.js 对齐)
     snapshot.rs  可见世界 → JSON 快照
     scenario.rs  场景定义与加载
@@ -466,7 +467,7 @@ bin/             screeps-sim 命令入口 (test/watch/check 子命令, 其余透
 runner/          .sim.ts 测试 runner (发现/加载/运行/汇总/watch, 零依赖)
 index.mjs        编程 API (defineSim / runSim)
 index.d.ts       .sim.ts 用例的完整类型定义
-examples/        示例用例 (smoke 自包含可跑; npc 展示侵袭波/keeper/powerBank; market 展示下单/成交) + fixtures/*.js 陪跑 bundle
+examples/        示例用例 (smoke 自包含可跑; npc 展示侵袭波/keeper/powerBank; market 展示下单/成交; combat 展示安全模式/核弹) + fixtures/*.js 陪跑 bundle
 scenarios/       wire JSON 场景 (--scenario 直跑用)
-tests/           回归测试 (engine_rules / shim_apis / cpu_watchdog / memory_segments / framework / checkpoint_time_travel / npc / market)
+tests/           回归测试 (engine_rules / shim_apis / cpu_watchdog / memory_segments / framework / checkpoint_time_travel / npc / market / combat)
 ```

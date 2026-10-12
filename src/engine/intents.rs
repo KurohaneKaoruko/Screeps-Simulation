@@ -148,6 +148,8 @@ pub struct TickEffects {
     pub sends: Vec<TerminalSend>,
     /// 本 tick 登记的市场操作 (官方 market 阶段在 tick 末统一结算)
     pub market_ops: Vec<crate::engine::market::MarketOp>,
+    /// 本 tick 登记的核弹发射 (tick 末结算)
+    pub nuke_launches: Vec<crate::engine::combat::NukeLaunch>,
 }
 
 /// 待执行的终端转账 (官方 terminal.send 意图)
@@ -169,6 +171,7 @@ pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
         errors: vec![],
         sends: vec![],
         market_ops: vec![],
+        nuke_launches: vec![],
     };
     // 对象意图按 id 序 (等价官方 roomObjects 迭代序), 同对象多意图按提交序
     let mut object_intents: Vec<(u64, String, Value)> = Vec::new();
@@ -188,6 +191,14 @@ pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
         }
     }
     object_intents.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // 安全模式激活: 先于其余意图结算 (官方 controllers/activate-safe-mode.js 在意图阶段立即
+    // 设置 safeMode, 本 tick 内的攻击即可被拦截; 且需满足"一个 shard 同时一个房间"的全局约束)
+    for (id, name, _) in &object_intents {
+        if name == "activateSafeMode" {
+            crate::engine::combat::activate_safe_mode(world, *id);
+        }
+    }
 
     // 同对象意图排序: 照搬官方 processor/intents/creeps/intents.js 的 creepActions 顺序
     let mut i = 0;
@@ -690,6 +701,8 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     if progress + boosted >= next_req && can_level {
                         controller.progress = progress + boosted - next_req;
                         controller.level = level + 1;
+                        // 官方: 每次控制器升级获得一次安全模式激活
+                        controller.safe_mode_available += 1;
                         controller.downgrade_time =
                             Some(world.tick + downgrade_for(level + 1) / 2);
                         if controller.level == 8 {
@@ -1603,6 +1616,26 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                     o.observe_room = Some(target);
                 }
             }
+            // ── 安全模式 (官方 controllers/activate-safe-mode.js) ──
+            // 已在 apply_intents 的预扫描阶段结算 (保证同 tick 攻击被拦截), 此处为占位
+            ("controller", "activateSafeMode") => {}
+            // ── 核弹发射 (官方 nukers/launch-nuke.js): tick 末结算 ──
+            ("nuker", "launchNuke") => {
+                let x = data.get("x").and_then(Value::as_i64).unwrap_or(-1);
+                let y = data.get("y").and_then(Value::as_i64).unwrap_or(-1);
+                let target_room =
+                    data.get("roomName").and_then(Value::as_str).unwrap_or("").to_string();
+                if !(0..=49).contains(&x) || !(0..=49).contains(&y) || !is_room_name(&target_room) {
+                    continue;
+                }
+                effects.nuke_launches.push(crate::engine::combat::NukeLaunch {
+                    room: room_name.clone(),
+                    nuker: id,
+                    x: x as u8,
+                    y: y as u8,
+                    target_room,
+                });
+            }
             // ── PowerSpawn (官方 power-spawns/process-power.js) ──
             ("powerSpawn", "processPower") => {
                 let ok = match room.objects.get(&id) {
@@ -1938,6 +1971,12 @@ fn apply_damage(
     attack_type: u32,
 ) {
     if amount == 0 {
+        return;
+    }
+    // 安全模式: 目标房间处于安全模式时, 非本房间所有者的攻击被拦截
+    if crate::engine::combat::safe_mode_active(world, room_name)
+        && world.rooms[room_name].objects.get(&attacker_id).is_some_and(|a| !a.mine)
+    {
         return;
     }
     let (target_is_creep, attack_back) = {

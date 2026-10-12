@@ -75,6 +75,9 @@ pub struct ControllerSpec {
     /// 是否归属我方 (默认 true)。false 时构造中立控制器 (level 强制 0), 供 claim/reserve 验证。
     #[serde(default = "default_true")]
     pub mine: bool,
+    /// 预置可用的安全模式激活次数 (官方 safeModeAvailable; 短场景下免去先升级控制器)
+    #[serde(default, rename = "safeModeAvailable")]
+    pub safe_mode_available: u32,
 }
 
 fn default_mineral_type() -> String {
@@ -534,6 +537,7 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
                 obj.level = 0;
             }
             obj.progress = ctrl.progress.unwrap_or(0);
+            obj.safe_mode_available = ctrl.safe_mode_available;
             room.objects.insert(id, obj);
         }
 

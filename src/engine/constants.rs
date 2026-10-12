@@ -577,6 +577,21 @@ pub const POWER_LEVEL_POW: f64 = 2.0;
 pub const FACTORY_CAPACITY: u32 = 50_000;
 pub const NUKER_ENERGY_CAPACITY: u32 = 300_000;
 pub const NUKER_GHODIUM_CAPACITY: u32 = 5000;
+/// 发射核弹后 nuker 的冷却 (官方 NUKER_COOLDOWN)
+pub const NUKER_COOLDOWN: u64 = 100_000;
+/// 核弹飞行 tick 数 (官方 NUKE_LAND_TIME: 发射到落地 50000 tick)
+pub const NUKE_LAND_TIME: u64 = 50_000;
+/// 核弹落点伤害 (官方 NUKE_DAMAGE[0])
+pub const NUKE_DAMAGE_RANGE_0: u32 = 10_000_000;
+/// 核弹 5×5 范围伤害 (官方 NUKE_DAMAGE[2])
+pub const NUKE_DAMAGE_RANGE_2: u32 = 5_000_000;
+
+/// 安全模式持续 tick 数 (官方 SAFE_MODE_DURATION)
+pub const SAFE_MODE_DURATION: u64 = 20_000;
+/// 两次安全模式激活的间隔 (官方 SAFE_MODE_COOLDOWN)
+pub const SAFE_MODE_COOLDOWN: u64 = 50_000;
+/// 核弹落地后控制器 upgradeBlocked 时长 (官方 CONTROLLER_NUKE_BLOCKED_UPGRADE)
+pub const CONTROLLER_NUKE_BLOCKED_UPGRADE: u64 = 200;
 
 /// 官方 BOOSTS[part][boost][method] (无该加成返回 None)
 pub fn boost_effect(part: &str, boost: &str, method: &str) -> Option<f64> {
