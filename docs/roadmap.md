@@ -206,14 +206,19 @@ isolate 创建从「编译 540KB 源码」变为「反序列化字节码」。�
 
 ## C. 开发体验路线图 (产品化)
 
-1. **`--inspect` CDP 调试**: deno_core inspector 会话, Chrome DevTools 断点进 bot 代码,
+1. ✅ **时间旅行** (2026-10-12 交付): `--checkpoint-every/--checkpoint-dir` 每 N tick 落盘
+   World+Memory+bucket; `--at T --steps N --dump-state p` 恢复 ≤T 的最近检查点 + 重放录制意图
+   精确重建落点, dump/单步; `--resume` 从落点交还 bundle 续跑。对拍测试
+   (`tests/checkpoint_time_travel.rs`) 锁定"检查点+重放 == 连续运行"逐 tick 哈希一致。
+4. ✅ **watch 模式** (2026-10-12 交付): `screeps-sim watch` 首跑 + bundle/用例文件变更
+   去抖自动重跑 (200ms 轮询 StatWatcher, 失败不退出, 与 rollup -w/webpack -w 配合)。
+   stdin 管道被安全软件拒绝 (EBUSY) 时 runner 自动降级临时文件, 协议语义不变。
+3. **`--inspect` CDP 调试**: deno_core inspector 会话, Chrome DevTools 断点进 bot 代码,
    配合 `--ticks N --break-at T` —— bot 开发回路的质变;
-2. **时间旅行**: 每 N tick 落盘 World 快照 (World 已可序列化), `screeps-sim replay --at T`
-   恢复世界并 dump/续跑/单步 —— 定位"哪个 tick 开始坏的";
-3. **A/B 对比**: 同场景两个 bundle, 报告 diff (RCL 时间线/CPU 曲线/能量流);
-4. **watch 模式**: bundle 变更 → 自动重建重跑最近场景;
 5. **可视化**: 逐 tick 房间 ASCII/HTML 渲染 (已有 terrain.render 雏形), Prometheus 指标导出;
-6. **发布工程**: GitHub Releases 预编译二进制 + npm `optionalDependencies` 按平台分发
+6. **A/B 对比**: 同场景两个 bundle, 报告 diff (RCL 时间线/CPU 曲线/能量流);
+   (意图录制已支持手工 diff: 两版本各录意图流, `--replay` 重放到第一个分歧 tick)
+7. **发布工程**: GitHub Releases 预编译二进制 + npm `optionalDependencies` 按平台分发
    (esbuild 模式, 消费者免 Rust 工具链), CI 跑 `cargo test + npm test + criterion 预算`。
 
 ---
@@ -229,9 +234,11 @@ isolate 创建从「编译 540KB 源码」变为「反序列化字节码」。�
 
 ## 优先级矩阵
 
-> 已交付: ✅ `.sim.ts` 测试 runner + npm 包 (`screeps-sim test/check`, 见 README) ·
+> 已交付: ✅ `.sim.ts` 测试 runner + npm 包 (`screeps-sim test/check/watch`, 见 README) ·
 > ✅ 模拟前静态检查 (场景语义 + bot bundle 常量拼写/参数顺序/node 泄漏/覆盖度, `runner/check.mjs` + `runner/bundle-check.mjs`) ·
-> ✅ stdin/stdout 管道协议 (`--scenario -` / `--json-report -`, 报告内嵌断言结果)
+> ✅ stdin/stdout 管道协议 (`--scenario -` / `--json-report -`, 报告内嵌断言结果) ·
+> ✅ 时间旅行 (`--checkpoint-every/--checkpoint-dir` + `--at/--steps/--dump-state/--resume`, 哈希对拍锁定) ·
+> ✅ watch 模式 (bundle/用例变更自动重跑) · ✅ P0/P1 批次性能优化 (见文首基准)
 
 | 项 | 影响 | 成本 | 建议批次 |
 |---|---|---|---|
@@ -244,6 +251,6 @@ isolate 创建从「编译 540KB 源码」变为「反序列化字节码」。�
 | P1-4 runner 并行 | 中 (套件吞吐) | 低 | 第二批 |
 | boost/lab + market | 高 (经济保真) | 高 | 第三批 |
 | 官方对拍 harness | 极高 (正确性闭环) | 高 | 第三批 |
-| CDP 调试 / 时间旅行 | 高 (DX 质变) | 中-高 | 第四批 |
+| CDP 调试 (`--inspect`) | 高 (DX 质变) | 中-高 | 第四批 |
 | NPC / nuke / power | 中 | 中 | 第四批 |
 | 预编译二进制分发 | 中 (普及) | 中 | 第四批 |

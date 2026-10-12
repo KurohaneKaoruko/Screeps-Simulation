@@ -143,6 +143,10 @@ screeps-sim test 'sim/**/*.sim.ts'    # 通配符
 screeps-sim test --list
 screeps-sim test --bundle dist/main.js --ticks 500
 screeps-sim test -v
+
+# watch: 首跑一次, 之后 bundle/用例变更自动重跑 (与 rollup -w 等外部构建配合)
+screeps-sim watch
+screeps-sim watch sim/ -t 500
 ```
 
 输出形如:
@@ -288,6 +292,52 @@ CLI 选项：
 | `--render-terrain <room>` | 打印指定房间的 ASCII 地形与墙/沼泽占比 |
 | `--deterministic-cpu` | 确定性 CPU (等价场景 `cpu.deterministic: true`): bot 读到的 CPU 只由调用次数和意图数决定, 两次运行状态哈希一致 |
 | `--no-seed-random` | 关闭 `Math.random` 播种（默认播种，seed 取自场景 `seed`） |
+| `--checkpoint-every <n>` | 每 n tick 落盘世界检查点 (时间旅行原料, 见下) |
+| `--checkpoint-dir <dir>` | 检查点目录 |
+| `--at <tick>` | 恢复到 tick T 落点并 dump 世界状态 (需配 `--replay` 或 `--checkpoint-dir`) |
+| `--steps <n>` | `--at` 落点后按录制意图流再单步观察 n tick (每 tick 一行状态摘要) |
+| `--dump-state <path>` | `--at` 落点的完整世界状态落盘 JSON (可 diff / 喂其他工具) |
+| `--resume` | `--at` 落点后把世界交给 bundle 续跑 (时间旅行返回点继续开发) |
+
+### 时间旅行 (回到任意 tick 现场)
+
+正常跑时同时录制意图流和检查点，之后可**秒级**恢复到任意 tick 观察世界：
+
+```bash
+# 1. 记录阶段 (正常跑, 同时落两路原料)
+screeps-sim --scenario scenarios/boot-from-scratch.json --bundle dist/main.js \
+    --ticks 20000 --record-intents /tmp/intents.jsonl \
+    --checkpoint-every 1000 --checkpoint-dir /tmp/cps
+
+# 2. 时间旅行: 恢复到 tick 13750 观察 (检查点 ≤T + 重放其后的意图, 精确重建)
+screeps-sim --scenario scenarios/boot-from-scratch.json --replay /tmp/intents.jsonl \
+    --checkpoint-dir /tmp/cps --at 13750 --steps 5 --dump-state /tmp/world-13750.json
+```
+
+落点输出：重建方式、世界状态哈希、逐房间摘要 (RCL/进度/单位/能量)、单步期间每 tick 的
+哈希序列。**检查点 + 录制回放与连续运行逐位一致** (`--at T` 的哈希 == 直接跑 T tick 的
+报告哈希，有 `tests/checkpoint_time_travel.rs` 对拍锁定)。
+
+`--resume` 从落点继续跑 bot (Memory/CPU bucket 随检查点恢复)，适合「定位到出问题的
+tick → 当场改 bot 重跑」。检查点每 tick 都有完整 World (~KB 级)，默认频率 1000 tick
+对长跑 (<0.1% 开销)；调小频率可更精细地跳跃。
+
+### watch 模式 (改完即跑)
+
+```bash
+screeps-sim watch                       # 首跑 + 之后 bundle/用例变更自动重跑
+screeps-sim watch sim/ -t 500           # 只盯 sim/ 目录, 每轮 500 tick 冒烟
+```
+
+与外部构建 (`rollup -w` / `webpack -w` / `tsc -w`) 配合：bundle 被重新写出即触发重跑；
+`.sim.ts` 用例文件自身变更同样触发。失败不退出 (开发回路)，Ctrl+C 结束。
+
+### stdin 管道不可用时 (自动降级)
+
+少数 Windows 环境的安全软件会 hook `CreatePipe`，导致 stdin 匿名管道不可用
+(`EBUSY` / "All pipe instances are busy")。此时 runner 与 CLI 测试会**自动降级**：
+场景 JSON 改写临时文件、走 `--scenario <file>` (stdout 管道协议不变，语义完全一致)。
+无需任何配置，真实管道可用的环境仍优先走 stdin。
 
 ### V8 预编译库下载失败时
 
@@ -379,6 +429,7 @@ cargo test --release   # 推荐: 同时覆盖 release 优化后的代码生成 (
 | `tests/memory_segments.rs` | `RawMemory` 段跨 tick 持久、需每 tick 重新激活、ID/数量/类型/长度校验、`RawMemory.set` 语义 |
 | `tests/framework.rs` | 全局重置（全局变量丢失、Memory 与段保留）、场景加载校验的正/反用例、同场景同 seed 重放一致性（确定性） |
 | `tests/cli_cpu_bucket.rs` | CLI 级集成：bucket 耗尽跳过（官方 "CPU bucket is empty"）与 `noErrors` 失败退出码、正常场景退出码 0、tickLimit 公式与场景覆盖值 |
+| `tests/checkpoint_time_travel.rs` | 时间旅行：检查点序列化往返、落盘/发现/加载语义、"检查点 + 意图重放 == 连续运行" 每 tick 哈希对拍 |
 
 ### 复现基准
 
@@ -400,15 +451,16 @@ src/
     snapshot.rs  可见世界 → JSON 快照
     scenario.rs  场景定义与加载
     metrics.rs   指标与断言
+    checkpoint.rs 时间旅行: 世界检查点落盘/恢复 (与 --record-intents 配套)
   js/screeps.js  Screeps API shim (bot 的直接运行环境)
   js/lodash.js   lodash 3.10.1 (MIT), 由宿主注入为全局 `_`
   runtime.rs     deno_core 宿主 (op 边界 + CPU 看门狗 + 内存段/全局重置)
-  main.rs        CLI (含 stdin 场景 / stdout JSON 报告的管道协议)
-bin/             screeps-sim 命令入口 (test 子命令 → runner, 其余透传引擎)
-runner/          .sim.ts 测试 runner (发现/加载/运行/汇总, 零依赖)
+  main.rs        CLI (含 stdin 场景 / stdout JSON 报告的管道协议 + 时间旅行)
+bin/             screeps-sim 命令入口 (test/watch/check 子命令, 其余透传引擎)
+runner/          .sim.ts 测试 runner (发现/加载/运行/汇总/watch, 零依赖)
 index.mjs        编程 API (defineSim / runSim)
 index.d.ts       .sim.ts 用例的完整类型定义
 examples/        示例用例 (smoke 自包含可跑) + fixtures/min-bot.js 陪跑 bundle
 scenarios/       wire JSON 场景 (--scenario 直跑用)
-tests/           回归测试 (engine_rules / shim_apis / cpu_watchdog / memory_segments / framework)
+tests/           回归测试 (engine_rules / shim_apis / cpu_watchdog / memory_segments / framework / checkpoint_time_travel)
 ```

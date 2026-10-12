@@ -2,7 +2,7 @@
 //
 // 管道协议: 场景 JSON 走引擎 stdin, 结构化报告 (含断言结果) 从引擎 stdout 收,
 // 人类可读输出与 bot 错误在引擎 stderr (失败时按需展示)。
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, unwatchFile, watchFile } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { ensureBinary, runBinaryCapture, runBinaryAsync } from './binary.mjs'
@@ -452,7 +452,8 @@ export async function runTests(opts) {
 			(skipped ? `${c.dim(`, ${skipped} 跳过`)}` : '') +
 			`  ·  总用时 ${totalSeconds.toFixed(1)}s`
 	)
-	if (failures.length) process.exit(1)
+	// 不在这里 exit: 调用方 (CLI / watch) 自己决定失败语义
+	return { passed, ran, skipped, failures }
 }
 
 /// 对所有用例将用到的 bundle 做一次静态预检 (按路径去重)。
@@ -537,4 +538,110 @@ export async function runChecks(opts) {
 			(opts.strict ? c.dim('  (--strict: 警告计为失败)') : '')
 	)
 	if (failed) process.exit(1)
+}
+
+// ── watch 模式 ──────────────────────────────────────────
+
+
+// ── watch 模式 ──────────────────────────────────────────
+
+/// watch 模式: 首跑一次, 之后 bundle / .sim.ts 用例文件变更即自动重跑 (开发回路)。
+/// 与外部构建 (rollup --watch / webpack -w / tsc) 配合: bundle 被重新写出 → 自动重跑用例。
+/// 用法: screeps-sim watch [patterns...] [--bundle p] [--ticks n]
+/// 说明: 失败不退出 (开发回路), Ctrl+C 结束; 用例文件增删每轮重新发现。
+export async function runWatch(opts) {
+	const cwd = process.cwd()
+	const cfg = readProjectConfig(cwd)
+	const patterns = opts.patterns.length ? opts.patterns : (cfg.include ?? ['.'])
+	// watch 恒串行: 去抖一次只跑一个轮次, 并行会互相争抢还可能套娃重跑
+	if (opts.jobs > 1) console.log(c.yellow(`⚠ watch 强制 -j 1 (忽略 --jobs ${opts.jobs})`))
+	opts = { ...opts, jobs: 1 }
+	if (opts.list) {
+		console.log(c.yellow('⚠ watch 忽略 --list (watch 需要运行用例才能观察变更)'))
+		opts = { ...opts, list: false }
+	}
+	let files = discoverSimFiles(patterns, cwd)
+	if (!files.length) {
+		throw new Error('未发现 .sim.ts 用例文件 (watch 需要至少一个用例: screeps-sim watch [文件|目录])')
+	}
+
+	// 监听目标: 全部 .sim.ts + 每个用例解析出的 bundle (含尚不存在的 —— 被创建时同样触发)
+	const watched = new Set()
+	const removeWatch = (p) => {
+		if (!watched.delete(p)) return
+		unwatchFile(p)
+	}
+	const onChange = (path, curr, prev) => {
+		// mtime 未变 (StatWatcher 偶发) 或轮询噪音则忽略; 文件从无到有 (prev.mtimeMs=0) 必须触发
+		if (curr.mtimeMs === prev.mtimeMs && curr.mtimeMs !== 0) return
+		changed.add(path)
+		if (debounce) clearTimeout(debounce)
+		debounce = setTimeout(rerun, 120) // 构建可能连续写多个文件, 静默后只重跑一次
+	}
+	const addWatch = (p) => {
+		if (watched.has(p)) return
+		watched.add(p)
+		watchFile(p, { interval: 200 }, (curr, prev) => onChange(p, curr, prev))
+	}
+
+	async function refreshWatchTargets() {
+		try {
+			files = discoverSimFiles(patterns, cwd)
+		} catch {
+			// 模式路径暂不可见 (如目录还没建): 保留上次的文件列表
+		}
+		const targets = new Set(files)
+		for (const file of files) {
+			try {
+				for (const simCase of await loadCases(file)) {
+					const b = resolveBundle({ ...opts, bundle: opts.bundle ?? cfg.bundle }, simCase, cfg)
+					if (b) targets.add(b)
+				}
+			} catch {
+				// 加载失败的用例由重跑路径报告
+			}
+		}
+		for (const p of [...watched]) if (!targets.has(p)) removeWatch(p)
+		for (const p of targets) addWatch(p)
+		return watched.size
+	}
+
+	let debounce = null
+	let running = false
+	let queued = false
+	const changed = new Set()
+	const runOnce = async () => {
+		running = true
+		try {
+			const label = changed.size
+				? c.dim(`变更: ${[...changed].map((p) => relative(cwd, p) || p).join(', ')}`)
+				: ''
+			changed.clear()
+			const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+			console.log(`\n${c.bold('── watch 重跑')} ${c.dim(stamp)}${label ? '  ' + label : ''}`)
+			await refreshWatchTargets()
+			await runTests({ ...opts, patterns: files.map((f) => relative(cwd, f)) })
+		} finally {
+			running = false
+		}
+	}
+	async function rerun() {
+		debounce = null
+		if (running) {
+			queued = true // 上一轮还在跑: 排队, 结束后自动补一次
+			return
+		}
+		await runOnce()
+		if (queued) {
+			queued = false
+			await rerun()
+		}
+	}
+
+	// 首跑
+	const count = await refreshWatchTargets()
+	console.log(c.bold('screeps-sim watch') + c.dim(`  ·  ${count} 个监听目标  ·  Ctrl+C 退出`))
+	await runOnce()
+
+	await new Promise(() => {}) // 常驻: 仅靠 SIGINT 退出
 }

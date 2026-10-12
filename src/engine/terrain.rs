@@ -2,6 +2,7 @@
 //! 支持场景显式给定 (每行字符串) 或种子生成 (简单噪声, 不追求复刻官方地图生成算法)。
 
 use crate::engine::constants::{TERRAIN_MASK_SWAMP, TERRAIN_MASK_WALL};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub const ROOM_SIZE: usize = 50;
 pub const TILES: usize = ROOM_SIZE * ROOM_SIZE;
@@ -9,6 +10,22 @@ pub const TILES: usize = ROOM_SIZE * ROOM_SIZE;
 #[derive(Clone)]
 pub struct Terrain {
     pub data: [u8; TILES],
+}
+
+impl Serialize for Terrain {
+    /// 检查点用 2500 字符串 (与快照格式一致, 比 2500 元素数组紧凑得多)
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Terrain {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Terrain::parse(&s).ok_or_else(|| {
+            serde::de::Error::custom(format!("terrain 字符串长度应为 {TILES}, 实际 {}", s.len()))
+        })
+    }
 }
 
 impl Terrain {

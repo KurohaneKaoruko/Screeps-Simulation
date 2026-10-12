@@ -10,7 +10,7 @@ pub fn store_sum(store: &Store) -> u32 {
     store.values().sum()
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BodyPart {
     pub part_type: String,
     pub hits: u32,
@@ -25,7 +25,7 @@ impl BodyPart {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Obj {
     pub id: u64,
     /// creep / source / controller / energy(掉落) / constructionSite / tombstone / 结构类型名
@@ -96,7 +96,7 @@ pub struct Obj {
 }
 
 /// 孵化任务: name=目标单位名, need_time=总时长, spawn_time=完成 tick
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SpawnJob {
     pub name: String,
     pub need_time: u64,

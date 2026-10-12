@@ -76,6 +76,13 @@ async fn async_main() {
     // 意图录制/回放 (P1-3): 录制 = 每 tick 意图落盘 JSONL; 回放 = 纯引擎重放, 零 JS
     let mut record_intents_path: Option<String> = None;
     let mut replay_path: Option<String> = None;
+    // 时间旅行: 检查点 (每 N tick 落盘 World) + --at 恢复到指定 tick 观察世界
+    let mut checkpoint_dir: Option<String> = None;
+    let mut checkpoint_every: u64 = 0;
+    let mut at_tick: Option<u64> = None;
+    let mut steps: u64 = 0;
+    let mut dump_state_path: Option<String> = None;
+    let mut resume = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -132,6 +139,30 @@ async fn async_main() {
                 replay_path = args.get(i + 1).cloned();
                 i += 2;
             }
+            "--checkpoint-dir" => {
+                checkpoint_dir = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--checkpoint-every" => {
+                checkpoint_every = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                i += 2;
+            }
+            "--at" => {
+                at_tick = args.get(i + 1).and_then(|v| v.parse().ok());
+                i += 2;
+            }
+            "--steps" => {
+                steps = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                i += 2;
+            }
+            "--dump-state" => {
+                dump_state_path = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--resume" => {
+                resume = true;
+                i += 1;
+            }
             _ => {
                 eprintln!("未知参数: {} (支持 --scenario --bundle --ticks --csv --json-report --quiet)", args[i]);
                 std::process::exit(2);
@@ -142,6 +173,11 @@ async fn async_main() {
         eprintln!("用法: screeps-sim --scenario <scenario.json|-> [--bundle dist/main.js] [--ticks N] [--csv out.csv] [--json-report out.json|-] [--quiet]");
         eprintln!("      --scenario -      场景 JSON 从 stdin 读入 (npm runner 的管道协议)");
         eprintln!("      --json-report -   JSON 报告写 stdout, 人类可读报告转 stderr");
+        eprintln!("      --record-intents x.jsonl / --replay x.jsonl   意图录制 / 纯引擎回放");
+        eprintln!("      --checkpoint-every N --checkpoint-dir DIR    时间旅行: 每 N tick 落盘 World 检查点");
+        eprintln!("      --at T [--steps N] [--dump-state p] [--dump-memory p] [--resume]");
+        eprintln!("                         恢复到 tick T 观察世界 (--steps 单步观察, --dump-state 落盘状态,");
+        eprintln!("                         --resume 落点后交给 bundle 续跑; --at 需配 --replay 或 --checkpoint-dir)");
         std::process::exit(2);
     }
 
@@ -176,10 +212,30 @@ async fn async_main() {
         eprintln!("--record-intents 与 --replay 不能同时使用");
         std::process::exit(2);
     }
-    // 回放模式: 意图流来自录制文件, 不需要 bot bundle 与 V8
+    // ── 时间旅行参数校验 ──
+    // --at T: 到达 tick T 时停下并 dump 世界 (定位"哪个 tick 开始坏的")
+    // --steps N: --at 到达后再按录制意图流单步观察 N tick
+    // --resume: --at 到达后把世界交给 bot bundle 续跑 (时间旅行落点继续开发)
+    if at_tick.is_some() && replay_path.is_none() && checkpoint_dir.is_none() {
+        eprintln!("--at 需要配合 --replay (重放意图流) 或 --checkpoint-dir (从检查点恢复)");
+        std::process::exit(2);
+    }
+    if steps > 0 && at_tick.is_none() {
+        eprintln!("--steps 需要配合 --at 使用");
+        std::process::exit(2);
+    }
+    if resume && at_tick.is_none() {
+        eprintln!("--resume 需要配合 --at 使用 (先恢复到指定 tick 再续跑)");
+        std::process::exit(2);
+    }
+    if resume && checkpoint_dir.is_none() {
+        eprintln!("--resume 需要 --checkpoint-dir (检查点携带 World + Memory; 可选 --replay 精确重建到 tick T)");
+        std::process::exit(2);
+    }
+    // 回放模式不需要 V8; 但 --resume 续跑需要 bot bundle
     let replaying = replay_path.is_some();
 
-    let bundle = if replaying {
+    let bundle = if replaying && !resume {
         String::new()
     } else {
         std::fs::read_to_string(&bundle_path)
@@ -226,7 +282,7 @@ async fn async_main() {
         0
     };
     // 回放模式不需要 V8; 录制文件逐行读取 (tick → intents)
-    let mut bot = if replaying {
+    let mut bot = if replaying && !resume {
         None
     } else {
         let mut rt = BotRuntime::new(&bundle, seed).unwrap_or_else(|e| panic!("{e}"));
@@ -253,6 +309,50 @@ async fn async_main() {
     let cpu_limit = scenario.cpu_limit();
     // 官方 bucket 语义 (driver make.js/data.js): 可为负、负数时跳过执行、显示值 max(0, raw)
     let mut cpu = CpuState::new(cpu_limit, scenario.cpu_bucket());
+
+    // ── 时间旅行: 从检查点恢复世界 (快进到 --at 目标) ──
+    // 检查点 tick = world.tick = "已处理 tick 数 / 下一条待应用意图的 tick 号";
+    // 取 ≤ at_tick 的最近检查点, 配合 --replay 重放其后的意图到达目标准确状态;
+    // --resume 不带 --replay 时则直接从检查点 tick 续跑 (丢失到 T 之间的录制意图)。
+    let mut resumed_from_checkpoint: Option<(u64, std::path::PathBuf)> = None;
+    if let Some(dir) = &checkpoint_dir {
+        let target = at_tick.unwrap_or(u64::MAX);
+        if let Some(path) = screeps_sim::engine::checkpoint::latest_checkpoint(
+            std::path::Path::new(dir),
+            target,
+        ) {
+            let cp = screeps_sim::engine::checkpoint::load(&path)
+                .unwrap_or_else(|e| panic!("读取检查点失败 {}: {e}", path.display()));
+            let mut restored_world = cp.world;
+            for room in restored_world.rooms.values_mut() {
+                room.ensure_terrain_cache();
+            }
+            let cp_tick = restored_world.tick;
+            let (cp_bucket, cp_limit) = (cp.cpu_bucket, cp.cpu_limit);
+            if !quiet {
+                println!(
+                    "⏱ 检查点恢复: {} (tick {}, Memory {} 字节, bucket {:.0})",
+                    path.display(),
+                    cp_tick,
+                    cp.memory.len(),
+                    cp_bucket
+                );
+            }
+            world = restored_world;
+            memory_json = cp.memory;
+            cpu = screeps_sim::engine::cpu::CpuState::new(cp_limit, cp_bucket);
+            resumed_from_checkpoint = Some((cp_tick, path));
+        } else if at_tick.is_some() {
+            eprintln!(
+                "⏱ 检查点目录 {} 中没有 tick ≤ {} 的检查点, 改为从 tick 0 开始{}",
+                dir,
+                target,
+                if replay_path.is_some() { "重放" } else { "运行" }
+            );
+        }
+    }
+    // 回放流中 tick < 此值的行已包含在检查点状态里, 读取时跳过
+    let replay_skip_before = resumed_from_checkpoint.as_ref().map(|(t, _)| *t).unwrap_or(0);
     // 显式覆盖 tickLimit 时不随 bucket 逐 tick 变化
     let tick_limit_override = scenario.cpu_tick_limit_override();
     // CPU 强制中断: 官方 tickLimit 到期即终止脚本 ("Script execution timed out ungracefully")
@@ -281,8 +381,32 @@ async fn async_main() {
     let mut fatal_error = false;
     // 分相耗时 (微秒累计): 定位模拟器自身开销 (P0 优化基线)
     let mut phases = PhaseTiming::default();
-    while run < total_ticks {
-        // 0. 全局重置 (isolate 重建; 全局变量丢失、Memory/内存段保留)
+    // ── 时间旅行阶段划分 (循环以 world.tick 为基准, 支持从检查点恢复的 mid-run 起步) ──
+    // 阶段 A: 从当前 world.tick 重放意图到 at_tick (+ --steps 的附加观察 tick)
+    // 阶段 B: --resume 时把执行权移交给 bot, 再跑 total_ticks 个 tick
+    let start_tick = world.tick;
+    let replay_stop_tick = match at_tick {
+        Some(t) => t.saturating_add(steps),
+        None => start_tick + total_ticks,
+    };
+    let final_stop_tick = if resume {
+        replay_stop_tick + total_ticks
+    } else {
+        replay_stop_tick
+    };
+    let mut replaying_now = replaying;
+    while world.tick < final_stop_tick {
+        // 0. 时间旅行阶段切换: replay 终点到达后, --resume 把执行权交给 bot bundle
+        if resume && replaying_now && world.tick >= replay_stop_tick {
+            replaying_now = false;
+            if !quiet {
+                println!(
+                    "⏱ t{:<7} 时间旅行落点到达 (--at {:?}), 移交 bot 续跑",
+                    world.tick, at_tick
+                );
+            }
+        }
+        // 0.1. 全局重置 (isolate 重建; 全局变量丢失、Memory/内存段保留)
         if let (Some(every), Some(bot)) = (global_reset_every, bot.as_mut()) {
             if world.tick > 0 && world.tick % every == 0 {
                 if let Err(e) = bot.reset_global() {
@@ -298,7 +422,7 @@ async fn async_main() {
         // 0.5. bucket 耗尽 → 跳过本 tick 的用户执行 (官方 make.js:72-83)。
         //     游戏世界照常推进 (只有 bot 的意图缺席), 跳过期间每 tick 回能。
         //     (回放模式无 CPU 消耗, 永不触发)
-        if !replaying && cpu.should_skip() {
+        if !replaying_now && cpu.should_skip() {
             eprintln!(
                 "[t{}] Script execution has been terminated: CPU bucket is empty ({:.0})",
                 world.tick, cpu.raw_bucket
@@ -339,10 +463,10 @@ async fn async_main() {
         // 1. 快照 + bot 执行 (回放模式跳过: 意图流直接来自录制文件)
         let tick_limit = tick_limit_override.unwrap_or_else(|| cpu.tick_limit());
         let (cpu_used, tick_result);
-        if replaying {
+        if replaying_now {
             cpu_used = 0.0;
             tick_result = screeps_sim::runtime::TickResult {
-                intents: read_replay_intents(&mut replay_reader),
+                intents: read_replay_intents(&mut replay_reader, replay_skip_before),
                 memory: memory_json.clone(),
                 cpu_used: 0.0,
                 errors: Vec::new(),
@@ -494,7 +618,39 @@ async fn async_main() {
             );
         }
 
-        if !quiet && (world.tick) % (total_ticks / 20).max(1) == 0 {
+        // 7. 时间旅行原料: 每 N tick 落盘检查点 (World + Memory + CPU bucket)。
+        //    世界状态确定性演化, 检查点 + 意图录制可在任意落点精确重建。
+        if checkpoint_every > 0 && world.tick % checkpoint_every == 0 {
+            if let Some(dir) = &checkpoint_dir {
+                let cp = screeps_sim::engine::checkpoint::Checkpoint::capture(
+                    &world,
+                    &memory_json,
+                    cpu.raw_bucket,
+                    cpu.limit,
+                );
+                if let Err(e) = screeps_sim::engine::checkpoint::save(
+                    std::path::Path::new(dir),
+                    world.tick,
+                    &cp,
+                ) {
+                    eprintln!("检查点落盘失败 (tick {}): {e}", world.tick);
+                }
+            }
+        }
+
+        // --at 之后的单步观察: 每个 tick 一行状态摘要 (替代常规进度行)
+        let in_steps_phase = at_tick.is_some_and(|t| world.tick > t);
+        if !quiet && in_steps_phase {
+            say(format!(
+                "  t{:<7} RCL{} 进度{:<8} 单位{:<3} 可用能量{:<6} hash 0x{:016x}",
+                world.tick,
+                rcl,
+                progress,
+                creeps,
+                energy_available,
+                world.state_hash()
+            ));
+        } else if !quiet && (world.tick) % (total_ticks / 20).max(1) == 0 {
             println!(
                 "  t{:<7} RCL{} 进度{:<8} 单位{:<3} 可用能量{:<6} cpu均值{:.2}ms",
                 world.tick,
@@ -517,6 +673,27 @@ async fn async_main() {
     // tps 按实际运行的 tick 数计 (致命错误/提前退出时不再假装跑满)
     let actual_ticks = run;
     let tps = actual_ticks as f64 / elapsed.as_secs_f64().max(1e-9);
+
+    // ── 时间旅行 dump (--at 落点): 观察世界状态后直接退出, 不进标准报告 ──
+    // (--resume 模式落点之后继续跑了 bot, 走标准报告)
+    if let Some(at) = at_tick {
+        if !resume {
+            for line in dump_time_travel(
+                &world,
+                at,
+                steps,
+                &resumed_from_checkpoint,
+                replay_path.is_some(),
+                dump_state_path.as_deref(),
+                dump_memory_path.as_deref(),
+                &memory_json,
+            ) {
+                say(line);
+            }
+            std::io::stdout().flush().ok();
+            std::process::exit(0);
+        }
+    }
 
     // ── 断言先结算 (结果并入 JSON 报告, 供上层 runner 消费) ──
     let assert_results = evaluate_asserts(&world, &metrics, &scenario.asserts);
@@ -629,15 +806,107 @@ async fn async_main() {
 /// 回放文件的行格式: {"tick":T,"intents":[{o,n,d},...]}
 #[derive(serde::Deserialize)]
 struct ReplayLine {
-    #[allow(dead_code)]
     tick: u64,
     #[serde(default)]
     intents: Vec<screeps_sim::engine::intents::IntentEntry>,
 }
 
-/// 读取回放文件的下一行意图 (EOF / 空行 / 坏行 → 空意图, 世界照常推进)
-fn read_replay_intents(
+/// `--at` 落点的世界状态 dump (时间旅行的观察点)。
+/// 返回供调用方打印的行; 同时落盘完整世界状态 / Memory (请求时)。
+fn dump_time_travel(
+    world: &World,
+    at: u64,
+    steps: u64,
+    resumed: &Option<(u64, std::path::PathBuf)>,
+    had_replay: bool,
+    dump_state_path: Option<&str>,
+    dump_memory_path: Option<&str>,
+    memory_json: &str,
+) -> Vec<String> {
+    use screeps_sim::engine::constants::CONTROLLER_LEVELS;
+    let mut lines = Vec::new();
+    let reached = world.tick;
+    let method = match resumed {
+        Some((cp_tick, path)) => format!(
+            "检查点 {} (tick {}) + 意图重放 {} tick",
+            path.display(),
+            cp_tick,
+            reached.saturating_sub(*cp_tick)
+        ),
+        None => {
+            if had_replay {
+                "从 tick 0 意图重放".to_string()
+            } else {
+                "检查点直接恢复".to_string()
+            }
+        }
+    };
+    lines.push(format!(
+        "\n── 时间旅行: 落点 tick {reached} (--at {at}, --steps {steps}) ──"
+    ));
+    lines.push(format!("重建方式: {method}"));
+    lines.push(format!("世界状态哈希: 0x{:016x}", world.state_hash()));
+    for room in world.rooms.values() {
+        let (rcl, progress, total) = match room.controller() {
+            Some(c) if c.mine => (
+                c.level,
+                c.progress,
+                CONTROLLER_LEVELS
+                    .iter()
+                    .find(|(l, _)| *l == c.level)
+                    .map(|(_, p)| *p)
+                    .unwrap_or(0),
+            ),
+            _ => (0, 0, 0),
+        };
+        let creeps = room
+            .objects
+            .values()
+            .filter(|o| o.obj_type == "creep" && !o.spawning)
+            .count();
+        let spawning = room
+            .objects
+            .values()
+            .filter(|o| o.obj_type == "creep" && o.spawning)
+            .count();
+        lines.push(format!(
+            "房间 {}: RCL{rcl} 进度 {progress}/{total} 单位 {creeps} (孵化中 {spawning}) 可用能量 {} 可见 {}",
+            room.name,
+            room.energy_available(),
+            room.visible()
+        ));
+    }
+    lines.push(format!(
+        "单位: 生产 {} 死亡 {} | GCL {} 级 | Memory {} 字节",
+        world.creeps_produced,
+        world.creeps_lost,
+        world.gcl_level(),
+        memory_json.len()
+    ));
+    if let Some(path) = dump_state_path {
+        match serde_json::to_string_pretty(world) {
+            Ok(text) => match std::fs::write(path, text) {
+                Ok(()) => lines.push(format!("世界状态已写入 {path}")),
+                Err(e) => eprintln!("写入 dump-state 失败 {path}: {e}"),
+            },
+            Err(e) => eprintln!("世界状态序列化失败: {e}"),
+        }
+    }
+    if let Some(path) = dump_memory_path {
+        if let Err(e) = std::fs::write(path, memory_json) {
+            eprintln!("写入 dump-memory 失败 {path}: {e}");
+        } else {
+            lines.push(format!("Memory 已写入 {path}"));
+        }
+    }
+    lines
+}
+
+/// 读取回放文件的下一行意图 (EOF / 空行 / 坏行 → 空意图, 世界照常推进)。
+/// `skip_before`: 跳过录制 tick 号 < 此值的行 —— 检查点恢复时, 早于检查点的意图已应用过。
+pub fn read_replay_intents(
     reader: &mut Option<std::io::BufReader<std::fs::File>>,
+    skip_before: u64,
 ) -> screeps_sim::engine::intents::IntentList {
     use std::io::BufRead as _;
     let Some(r) = reader else {
@@ -655,7 +924,12 @@ fn read_replay_intents(
             continue;
         }
         match serde_json::from_str::<ReplayLine>(&line) {
-            Ok(l) => return screeps_sim::engine::intents::IntentList::from_entries(l.intents),
+            Ok(l) => {
+                if l.tick < skip_before {
+                    continue; // 已包含在恢复的检查点状态里
+                }
+                return screeps_sim::engine::intents::IntentList::from_entries(l.intents);
+            }
             Err(_) => continue,
         }
     }

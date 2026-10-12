@@ -3,7 +3,7 @@
 //   screeps-sim test [patterns...] [options]   .sim.ts 用例测试 runner
 //   screeps-sim build                           构建底层 Rust 引擎 (cargo build --release)
 //   screeps-sim <其他参数>                       透传给 Rust 二进制 (场景直跑, 见 --help)
-import { runTests, runChecks, parseTestArgs } from '../runner/main.mjs'
+import { runTests, runChecks, runWatch, parseTestArgs } from '../runner/main.mjs'
 import { buildBinary, ensureBinary, forwardToBinary } from '../runner/binary.mjs'
 
 const args = process.argv.slice(2)
@@ -12,7 +12,15 @@ try {
 	switch (args[0]) {
 		case 'test': {
 			const opts = parseTestArgs(args.slice(1))
-			await runTests(opts)
+			const r = await runTests(opts)
+			// 失败语义: watch 不退出 (开发回路), 其余由 CLI 决定退出码
+			if (r && r.failures && r.failures.length) process.exit(1)
+			break
+		}
+		case 'watch': {
+			// watch [patterns...] [--bundle p] [--ticks n]: 首跑 + 变更自动重跑
+			const opts = parseTestArgs(args.slice(1))
+			await runWatch(opts)
 			break
 		}
 		case 'check': {
@@ -46,6 +54,7 @@ function printHelp() {
 
 用法:
   screeps-sim test [patterns...] [options]    运行 .sim.ts 模拟用例 (类单元测试)
+  screeps-sim watch [patterns...] [options]   首跑一次, 之后 bundle/用例文件变更自动重跑
   screeps-sim check [patterns...] [--strict]  静态检查场景定义 (不跑模拟, 编译器式诊断)
   screeps-sim build                           构建底层 Rust 引擎
   screeps-sim --scenario <json|-> [选项]       直跑单个场景 JSON (透传给引擎)
@@ -55,11 +64,11 @@ check 检查项 (模拟启动前):
   可疑写法警告: RCL 超限结构(将被 off)、同格多结构、墙上的对象、房间不连通、
   不可能达成的断言、seed=0 不可复现、alwaysVisible 调试残留等
 
-test 选项:
+test / watch 选项:
   [patterns...]     文件 / 目录 / 通配符, 缺省扫描当前目录 (**/*.sim.ts, 跳过 node_modules/target 等)
   --bundle, -b <p>  bot bundle 路径 (默认: 用例内 bundle 字段, 再退回 ./dist/main.js)
   --ticks, -t <n>   覆盖所有用例的 tick 数 (快速冒烟)
-  --jobs, -j <n>    并行运行 n 个引擎进程 (含 cpu*Below 断言时建议 -j 1)
+  --jobs, -j <n>    并行运行 n 个引擎进程 (watch 恒串行; 含 cpu*Below 断言时建议 -j 1)
   --list, -l        只列出发现的用例, 不运行
   --verbose, -v     显示 bot console 输出与引擎 stderr
   --no-bundle-check bundle 预检错误只提示, 不判失败 (也可在 package.json "screeps-sim".bundleCheck: false)

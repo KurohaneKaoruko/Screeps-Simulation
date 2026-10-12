@@ -6,17 +6,20 @@ use crate::engine::terrain::Terrain;
 use std::collections::BTreeMap;
 
 /// 房间事件日志条目 (官方 Room.getEventLog 的结构: {event, objectId, data})
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GameEvent {
     pub event: u32,
     pub object_id: u64,
     pub data: serde_json::Value,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Room {
     pub name: String,
     pub terrain: Terrain,
     /// terrain 的快照序列化缓存 (tick 期间地形不可变, 世界构建后刷新一次)
+    /// 检查点不落盘此字段, 反序列化后由 `ensure_terrain_cache` 刷新
+    #[serde(skip)]
     pub terrain_json: String,
     pub objects: BTreeMap<u64, Obj>,
     /// 本 tick 发生的事件 (每 tick 开始时清空, 经快照传给 bot)
@@ -38,6 +41,13 @@ impl Room {
     /// 世界构建期地形定稿后刷新缓存 (terrain 在 tick 期间不可变)
     pub fn refresh_terrain_cache(&mut self) {
         self.terrain_json = self.terrain.to_string();
+    }
+
+    /// 反序列化后确保 terrain_json 缓存与 terrain 一致 (检查点恢复用)
+    pub fn ensure_terrain_cache(&mut self) {
+        if self.terrain_json.is_empty() {
+            self.refresh_terrain_cache();
+        }
     }
 
     /// 记录一条事件 (引擎结算期间调用)
@@ -187,6 +197,7 @@ impl Room {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct World {
     pub tick: u64,
     pub rooms: BTreeMap<String, Room>,
@@ -212,7 +223,7 @@ pub struct World {
 }
 
 /// 终端转账记录 (官方 transactions 集合的字段子集)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Transaction {
     pub id: u64,
     pub time: u64,
