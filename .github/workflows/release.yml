@@ -51,7 +51,9 @@ jobs:
       matrix:
         include:
           - { key: linux-x64-gnu, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { key: linux-arm64-gnu, os: ubuntu-latest, target: aarch64-unknown-linux-gnu, cross: true }
+          # arm64 用原生 ARM runner (公开仓库免费): cross 的 docker 镜像 glibc 太老,
+          # 链接新 V8 (WasmMemoryMapDescriptor 用 memfd_create, 需 glibc ≥ 2.27) 会 undefined reference
+          - { key: linux-arm64-gnu, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { key: linux-x64-musl, os: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: true, experimental: true }
           - { key: linux-arm64-musl, os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: true, experimental: true }
           - { key: darwin-arm64, os: macos-latest, target: aarch64-apple-darwin }
