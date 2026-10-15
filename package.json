@@ -1,6 +1,6 @@
 {
 	"name": "screeps-sim",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Screeps 本地高速模拟器: Rust 结算引擎 + 内嵌 V8, .sim.ts 用例驱动 (零运行时依赖, 免 Rust 工具链)",
 	"type": "module",
 	"license": "ISC",
