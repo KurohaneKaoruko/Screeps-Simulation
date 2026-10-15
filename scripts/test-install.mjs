@@ -139,9 +139,17 @@ if (typeof binaryInfo().platform.platform !== 'string') throw new Error('binaryI
 		'bin 链接已建立 (npx screeps-sim)'
 	)
 
-	const binPath = join(proj, 'node_modules', '.bin', process.platform === 'win32' ? 'screeps-sim.cmd' : 'screeps-sim')
-	const runCli = (args, env = {}) =>
-		spawnSync(process.execPath, [binPath, ...args], { cwd: proj, encoding: 'utf8', env: { ...process.env, ...env } })
+	const binName = process.platform === 'win32' ? 'screeps-sim.cmd' : 'screeps-sim'
+	const binPath = join(proj, 'node_modules', '.bin', binName)
+	// Windows: .bin 是 CMD 垫片, shell:true 时第一参数必须是字符串 (cmd.exe /c "命令 参数...")
+	// 非 Windows: 用 node 直接跑入口 .mjs
+	const runCli = (args, env = {}) => {
+		if (process.platform === 'win32') {
+			const cmd = `"${binPath}" ${args.map(a => `"${a}"`).join(' ')}`
+			return spawnSync(cmd, { cwd: proj, encoding: 'utf8', env: { ...process.env, ...env }, shell: true })
+		}
+		return spawnSync(process.execPath, [binPath, ...args], { cwd: proj, encoding: 'utf8', env: { ...process.env, ...env } })
+	}
 
 	const ver = runCli(['version'], { SCREEPS_SIM_BIN: repoBin })
 	step(ver.status === 0 && ver.stdout.includes(pkg.version), 'screeps-sim version', `${ver.stdout}${ver.stderr}`)
@@ -172,12 +180,14 @@ if (typeof binaryInfo().platform.platform !== 'string') throw new Error('binaryI
 		console.log(`\n3. 跳过平台包验证${plat.supported ? ' (--skip-platform)' : ` (当前平台 ${plat.platform}/${plat.arch} 无预编译包)`}`)
 	} else {
 		console.log(`\n3. 平台包安装 (${plat.packageName})`)
-		let platformTgz = join(root, 'dist', 'platform', `${plat.key}.tgz`)
-		const manifest = join(root, 'dist', 'platform', `${plat.key}.json`)
-		if (existsSync(manifest)) {
-			const m = JSON.parse(readFileSync(manifest, 'utf8'))
-			platformTgz = join(root, m.tgz)
-		} else {
+		const manifestPath = join(root, 'dist', 'platform', `${plat.key}.json`)
+		let platformTgz = null
+		if (existsSync(manifestPath)) {
+			const m = JSON.parse(readFileSync(manifestPath, 'utf8'))
+			// 清单是旧版本 (改过 package.json 后没重新打包) 或 tgz 丢失就当没有, 走下面的重建
+			if (m.version === pkg.version && existsSync(join(root, m.tgz))) platformTgz = join(root, m.tgz)
+		}
+		if (!platformTgz) {
 			const built = spawnSync(
 				process.execPath,
 				[join(root, 'scripts', 'build-platform-pkg.mjs'), '--skip-build'],
@@ -185,11 +195,11 @@ if (typeof binaryInfo().platform.platform !== 'string') throw new Error('binaryI
 			)
 			step(built.status === 0, `构建平台包 ${plat.key}`, `${built.stdout}${built.stderr}`)
 			if (built.status === 0) {
-				const m = JSON.parse(readFileSync(join(root, 'dist', 'platform', `${plat.key}.json`), 'utf8'))
+				const m = JSON.parse(readFileSync(manifestPath, 'utf8'))
 				platformTgz = join(root, m.tgz)
 			}
 		}
-		step(existsSync(platformTgz), `平台包 tgz 就绪 (${platformTgz})`)
+		step(platformTgz !== null && existsSync(platformTgz), `平台包 tgz 就绪 (${platformTgz})`)
 
 		if (existsSync(platformTgz)) {
 			// 直接装成顶层依赖 (模拟 npm 把 optionalDependencies 提升到项目 node_modules 的形态)
