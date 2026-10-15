@@ -72,15 +72,19 @@ jobs:
       - uses: taiki-e/install-action@cross # 交叉编译工具链 (仅 linux 交叉目标用得到)
         if: ${{ matrix.cross == true }}
       - name: 构建平台包 (strip 后打包 + 清单)
+        id: build
         shell: bash
-        run: node scripts/build-platform-pkg.mjs --key "${{ matrix.key }}" --rust-target "${{ matrix.target }}" ${{ matrix.cross == true && '--cross' || '' }}
+        run: |
+          node scripts/build-platform-pkg.mjs --key "${{ matrix.key }}" --rust-target "${{ matrix.target }}" ${{ matrix.cross == true && '--cross' || '' }}
+          echo "success=true" >> $GITHUB_OUTPUT
+        continue-on-error: ${{ matrix.experimental == true }}
       - uses: actions/upload-artifact@v4
+        if: steps.build.outputs.success == 'true'
         with:
           name: pkg-${{ matrix.key }}
           path: |
             dist/platform/*.tgz
             dist/platform/*.json
-          if-no-files-found: error
 
   release:
     name: GitHub Release + npm
