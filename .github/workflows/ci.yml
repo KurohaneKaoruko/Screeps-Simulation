@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: 引擎回归 (cargo test --release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # 注: 不加 cargo fmt --check —— 仓库历史代码尚未 rustfmt 化, 一旦加上 CI 会立刻全红
+      # release 下的代码生成已知有 rustc 优化 bug (README「rustc 已知问题」), 必须跑 release
+      - name: 回归测试
+        run: cargo test --release
+
+  npm:
+    name: npm 包 (runner 自测 + 安装冒烟)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Windows 冒烟会额外验证平台包解析 (当前平台打出来的 tgz), 故不跳过
+      - name: 版本/依赖一致性
+        run: node scripts/version-check.mjs
+      - name: 构建引擎
+        run: cargo build --release
+      - name: runner 自测 + 冒烟用例
+        run: node runner/selftest.mjs && node bin/screeps-sim.mjs test examples/smoke.sim.ts --bundle examples/fixtures/min-bot.js
+      - name: 安装冒烟 (打包 → 装进临时项目 → 跑用例, 含平台包)
+        run: node scripts/test-install.mjs
+      - name: doctor 冒烟
+        run: node bin/screeps-sim.mjs doctor

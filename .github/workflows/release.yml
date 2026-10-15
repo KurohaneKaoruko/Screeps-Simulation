@@ -1,0 +1,150 @@
+name: Release
+
+# 打 tag 发布: git tag v0.1.0 && git push --tags
+# 流程: 校验版本 → 各平台构建二进制 (矩阵) → 汇总上传 GitHub Release → 依次发布平台包与主包到 npm。
+# 必需 secret: NPM_TOKEN (npm 发布用); 平台 scope 见 runner/platform.mjs 的 SCOPE。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本 (需与 package.json / Cargo.toml 一致)'
+        required: true
+        type: string
+
+permissions:
+  contents: write # 建 Release / 传产物
+  id-token: write # npm provenance
+
+jobs:
+  verify:
+    name: 版本校验
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: check
+        run: |
+          node scripts/version-check.mjs
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            test "$GITHUB_REF_NAME" = "v$VERSION" || { echo "tag $GITHUB_REF_NAME 与版本 $VERSION 不一致"; exit 1; }
+          elif [ -n "${{ inputs.version }}" ] && [ "${{ inputs.version }}" != "$VERSION" ]; then
+            echo "输入版本 ${{ inputs.version }} 与仓库版本 $VERSION 不一致"; exit 1
+          fi
+          echo "版本 $VERSION ✓"
+
+  platforms:
+    name: 平台包 ${{ matrix.key }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    # musl / win-arm64 依赖对应平台的 V8 预编译库, 缺失时跳过该目标而不拖垮整体发布
+    continue-on-error: ${{ matrix.experimental == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { key: linux-x64-gnu, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { key: linux-arm64-gnu, os: ubuntu-latest, target: aarch64-unknown-linux-gnu, cross: true }
+          - { key: linux-x64-musl, os: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: true, experimental: true }
+          - { key: linux-arm64-musl, os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: true, experimental: true }
+          - { key: darwin-arm64, os: macos-latest, target: aarch64-apple-darwin }
+          - { key: darwin-x64, os: macos-13, target: x86_64-apple-darwin }
+          - { key: win32-x64, os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { key: win32-arm64, os: windows-latest, target: aarch64-pc-windows-msvc, experimental: true }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.key }}
+      - uses: taiki-e/install-action@cross # 交叉编译工具链 (仅 linux 交叉目标用得到)
+        if: ${{ matrix.cross == true }}
+      - name: 构建平台包 (strip 后打包 + 清单)
+        shell: bash
+        run: node scripts/build-platform-pkg.mjs --key "${{ matrix.key }}" --rust-target "${{ matrix.target }}" ${{ matrix.cross == true && '--cross' || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.key }}
+          path: |
+            dist/platform/*.tgz
+            dist/platform/*.json
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release + npm
+    needs: [verify, platforms]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/platform
+          pattern: pkg-*
+          merge-multiple: true
+
+      - name: 校验产物
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          node scripts/version-check.mjs
+          ls -lh dist/platform/*.tgz
+          for m in dist/platform/*.json; do
+            node -e "const m=require('./$m'); console.log('  ·', m.key, m.version, m.sizeBytes, m.tgz)"
+          done
+
+      # Release 资产: 从平台包 tarball 里抽出裸二进制 (不用装 npm 也能下载即用)
+      - name: 抽出二进制
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          mkdir -p release-assets work
+          for m in dist/platform/*.json; do
+            key=$(node -p "require('./$m').key")
+            tgz=$(node -p "require('./$m').tgz")
+            rm -rf work/* && tar -xzf "$tgz" -C work
+            bin=$(find work/package/bin -maxdepth 1 -type f | head -1)
+            mv "$bin" "release-assets/screeps-sim-${key}-${VERSION}"
+            chmod +x "release-assets/screeps-sim-${key}-${VERSION}"
+          done
+          rm -rf work
+          (cd release-assets && sha256sum * > SHA256SUMS)
+          ls -lh release-assets
+
+      - name: 上传 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.verify.outputs.version }}
+          name: screeps-sim ${{ needs.verify.outputs.version }}
+          generate_release_notes: true
+          files: release-assets/*
+
+      # 顺序要紧: 平台包先发布, 主包的 optionalDependencies 才解析得到
+      - name: 发布平台包
+        run: |
+          for f in dist/platform/*.tgz; do
+            echo "▸ npm publish $f"
+            npm publish "$f" --provenance --access public
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 发布主包
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,10 +1,15 @@
 // runner 自测 (npm test 第一环): 不启动引擎, 直接验证 check 规则。
-// 覆盖: 场景静态检查 (check.mjs) / bundle 静态检查 (bundle-check.mjs) / 常量表同步。
+// 覆盖: 场景静态检查 (check.mjs) / bundle 静态检查 (bundle-check.mjs) / 常量表同步 / 平台探测与二进制定位。
 import { checkScenario } from './check.mjs'
 import { checkBundle } from './bundle-check.mjs'
 import { SCREEPS_CONSTANTS } from './screeps-constants.mjs'
 import { extractShimConstants } from './gen-constants.mjs'
-import { readFileSync } from 'node:fs'
+import { TARGETS, TARGET_KEYS, detectPlatform, packageNameFor } from './platform.mjs'
+import { binaryInfo, candidateBinaries, ensureBinary, pkgRoot } from './binary.mjs'
+import { doctorReport } from './doctor.mjs'
+import { existsSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 let failed = 0
 function expect(cond, label) {
@@ -234,6 +239,78 @@ console.log('常量表同步 (screeps-constants.mjs ↔ src/js/screeps.js)')
 			[...extracted].every((n) => SCREEPS_CONSTANTS.has(n)),
 		`常量表同步 (${SCREEPS_CONSTANTS.size} 个; shim 变化后跑 node runner/gen-constants.mjs)`
 	)
+}
+
+console.log('平台探测与二进制定位 (platform.mjs / binary.mjs)')
+{
+	const glibcX64 = detectPlatform({ platform: 'linux', arch: 'x64', libc: 'glibc' })
+	expect(glibcX64.key === 'linux-x64-gnu', `linux+x64+glibc → linux-x64-gnu (实际 ${glibcX64.key})`)
+	expect(
+		detectPlatform({ platform: 'linux', arch: 'arm64', libc: 'musl' }).packageName === packageNameFor('linux-arm64-musl'),
+		'linux+arm64+musl → @screeps-sim/linux-arm64-musl'
+	)
+	expect(detectPlatform({ platform: 'darwin', arch: 'arm64', libc: null }).key === 'darwin-arm64', 'darwin+arm64 → darwin-arm64')
+	expect(detectPlatform({ platform: 'darwin', arch: 'x64', libc: null }).libc === null, '非 linux 平台 libc 为 null')
+	// 未发布平台要能明确识别 (而不是错配到某个包)
+	expect(detectPlatform({ platform: 'freebsd', arch: 'x64', libc: null }).supported === false, 'freebsd → 不支持')
+	expect(detectPlatform({ platform: 'linux', arch: 'riscv64', libc: 'glibc' }).supported === false, 'linux+riscv64 → 不支持')
+	// 目标表自身: key 唯一、字段齐全
+	expect(
+		new Set(TARGET_KEYS).size === TARGET_KEYS.length &&
+			TARGETS.every((t) => t.key && t.os && t.cpu && t.rustTarget && packageNameFor(t.key).endsWith(t.key)),
+		`发布目标表自洽 (${TARGET_KEYS.length} 个: ${TARGET_KEYS.join(', ')})`
+	)
+	// 当前开发机必须在已发布列表里, 否则平台包缺失 → 消费端必然要 Rust
+	const cur = detectPlatform()
+	expect(cur.supported, `当前平台 ${cur.platform}/${cur.arch}${cur.libc ? ` (${cur.libc})` : ''} 在已发布目标内`)
+	expect(cur.supported && cur.packageName.startsWith('@screeps-sim/'), '当前平台有对应平台包名')
+
+	// 候选顺序: SCREEPS_SIM_BIN 最高优先, 其余来源都带说明
+	const saved = process.env.SCREEPS_SIM_BIN
+	try {
+		process.env.SCREEPS_SIM_BIN = join(tmpdir(), 'fake-screeps-sim')
+		expect(candidateBinaries()[0].source === '环境变量 SCREEPS_SIM_BIN', 'SCREEPS_SIM_BIN 优先级最高')
+	} finally {
+		if (saved === undefined) delete process.env.SCREEPS_SIM_BIN
+		else process.env.SCREEPS_SIM_BIN = saved
+	}
+	expect(
+		candidateBinaries().every((c) => c.path && c.source),
+		'每个候选都带路径与来源说明'
+	)
+	const info = binaryInfo()
+	expect(typeof info.ok === 'boolean' && !!info.platform.key === info.platform.supported, 'binaryInfo() 结构自洽')
+	expect(info.sourceTree === existsSync(join(pkgRoot, 'Cargo.toml')), 'binaryInfo().sourceTree 与 Cargo.toml 一致')
+
+	// doctor 报告: 不启动引擎就能说清 node/平台/二进制来源, 且引擎取不到时给出可执行提示
+	const report = doctorReport(pkgRoot)
+	expect(
+		report.package.version === JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8')).version &&
+			report.node.version === process.version &&
+			report.node.ok !== false,
+		`doctor 报告自洽 (node ${report.node.version} ${report.node.ok === false ? '不满足 engines' : '满足 engines'})`
+	)
+	expect(report.platform.published.length === TARGET_KEYS.length, 'doctor 列出全部已发布平台')
+	expect(report.binary.ok === !!report.binary.path, 'doctor 的 binary.ok 与 path 一致')
+	expect(report.binary.ok ? report.hint === null : /SCREEPS_SIM_BIN|cargo build/.test(report.hint), 'doctor 的 hint 只在缺二进制时给出')
+
+	// SCREEPS_SIM_BIN 指错: 立刻报配置错误, 不静默回退 (否则一次误配要等几分钟编译)
+	const badBin = join(tmpdir(), 'no-such-screeps-sim-binary')
+	try {
+		process.env.SCREEPS_SIM_BIN = badBin
+		expect(!binaryInfo().ok && binaryInfo().invalidEnvPath === badBin, '无效 SCREEPS_SIM_BIN → 立即判失败')
+		expect(doctorReport(pkgRoot).hint.includes('SCREEPS_SIM_BIN 指向的二进制不可用'), 'doctor 直指无效的 SCREEPS_SIM_BIN')
+		let code = null
+		try {
+			ensureBinary({ build: false })
+		} catch (err) {
+			code = err.code
+		}
+		expect(code === 'ERR_SIM_NO_BINARY', 'ensureBinary 对无效 env 抛可识别错误 (CLI 只打消息)')
+	} finally {
+		if (saved === undefined) delete process.env.SCREEPS_SIM_BIN
+		else process.env.SCREEPS_SIM_BIN = saved
+	}
 }
 
 if (failed) {

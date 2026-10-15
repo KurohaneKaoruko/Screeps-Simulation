@@ -1925,9 +1925,11 @@ class Room {
 		this.name = name;
 		this.__raw = raw;
 		this.mode = "world";
-		this.controller = null;
-		this.storage = null;
-		this.terminal = null;
+		// 官方 API: 缺席的 controller/storage/terminal 是 undefined (不是 null),
+		// `!== undefined` 判空与 `??` 链在 null 下会被击穿 —— 保真优先
+		this.controller = undefined;
+		this.storage = undefined;
+		this.terminal = undefined;
 		// 分类索引: 结构桶按需创建; collectFind 直接访问的 6 个非结构桶预建 (空房也安全)
 		this.__objects = [];
 		this.__byType = { creep: [], source: [], energy: [], constructionSite: [], tombstone: [], spawn: [] };

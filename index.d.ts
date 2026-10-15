@@ -228,3 +228,63 @@ export function runSim(
 	sim: SimScenario,
 	opts?: { bundle?: string; ticks?: number; verbose?: boolean }
 ): SimReport
+
+/** 当前平台探测结果 (对应 runner/platform.mjs 的 TARGETS) */
+export interface PlatformInfo {
+	platform: NodeJS.Platform
+	arch: string
+	/** linux 才有: 'glibc' | 'musl' */
+	libc: 'glibc' | 'musl' | null
+	/** 平台包 key (如 linux-x64-gnu); 官方无预编译包时为 null */
+	key: string | null
+	/** 平台包名 (如 @screeps-sim/linux-x64-gnu) */
+	packageName: string | null
+	rustTarget: string | null
+	supported: boolean
+}
+
+/** 引擎二进制的定位结果 (纯查询, 不启动引擎也不触发构建) */
+export interface BinaryInfo {
+	ok: boolean
+	path: string | null
+	/** 命中来源: 环境变量 / 源码构建 / 平台包 */
+	source: string | null
+	platform: PlatformInfo
+	platformPackageInstalled: boolean
+	/** 包内是否带 Rust 源码 (决定能否 cargo build) */
+	sourceTree: boolean
+}
+
+/** 查引擎二进制与环境 (排障用; 等价 `screeps-sim doctor`, 但返回结构化数据) */
+export function binaryInfo(): BinaryInfo
+
+/** 二进制的候选路径 (按优先级: SCREEPS_SIM_BIN → target/release → 平台包) */
+export function candidateBinaryPaths(): string[]
+
+/** `screeps-sim doctor` 的结构化版本 */
+export interface DoctorReport {
+	package: { name: string; version: string; license: string | null }
+	node: { version: string; required: string | null; ok: boolean | null }
+	platform: PlatformInfo & { published: string[] }
+	binary: {
+		ok: boolean
+		path: string | null
+		source: string | null
+		/** 引擎自报版本 (二进制过老时为 null) */
+		version: string | null
+		sizeBytes: number | null
+		platformPackageInstalled: boolean
+		sourceTree: boolean
+	}
+	project: {
+		cwd: string
+		config: boolean
+		bundle: string | null
+		bundleExists: boolean | null
+		tsSupport: boolean
+	}
+	/** 二进制不可用时的排障步骤 */
+	hint: string | null
+}
+
+export function doctorReport(cwd?: string): DoctorReport

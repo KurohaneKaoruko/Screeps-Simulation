@@ -1,6 +1,9 @@
-// 编程 API: defineSim 标记用例 (供 runner 识别 + TS 类型), runSim 单用例直跑。
+// 编程 API: defineSim 标记用例 (供 runner 识别 + TS 类型), runSim 单用例直跑,
+// binaryInfo/doctorReport 查引擎二进制与安装环境。
 import { ensureBinary, runBinaryCapture } from './runner/binary.mjs'
 import { toWireScenario } from './runner/wire.mjs'
+export { binaryInfo, candidateBinaryPaths } from './runner/binary.mjs'
+export { doctorReport } from './runner/doctor.mjs'
 
 /// 在 .sim.ts 中声明一个模拟用例 (返回值只做标记, 字段原样保留)
 export function defineSim(scenario) {

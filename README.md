@@ -1,7 +1,18 @@
 # Screeps-Simulation
 
+[![CI](https://github.com/KurohaneKaoruko/Screeps-Simulation/actions/workflows/ci.yml/badge.svg)](https://github.com/KurohaneKaoruko/Screeps-Simulation/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/screeps-sim)](https://www.npmjs.com/package/screeps-sim)
+[![license](https://img.shields.io/badge/license-ISC-blue)](./LICENSE)
+
 本地高速模拟器：Rust 结算引擎 + 内嵌 V8（deno_core）运行 bot 的真实 bundle。
 用于在开发期以数千 tick/秒的速度验证 bot 行为，替代"上传到服务器等 4 万 tick"的验证回路。
+
+作为 npm 包安装后**免 Rust 工具链**（各平台预编译引擎随包分发）：
+
+```bash
+npm i -D screeps-sim
+npx screeps-sim doctor        # 看平台 / 引擎二进制 / 项目配置
+```
 
 ## 架构
 
@@ -78,14 +89,12 @@
 |---|---|
 | PathFinder 跨房计价 | 出口格与对侧入口格按两步计价（官方为同节点），宏观行为一致 |
 | 有限世界 | 场景未定义相邻房间时，出口格上的 creep 停留原地（官方无限世界必穿越） |
-| 市场（部分完成） | 订单 `createOrder`/`deal`/`cancelOrder`/`changeOrderPrice`/`extendOrder`、`getAllOrders`/`getOrderById`/`getHistory`、`credits` 已对齐官方：下单收「总价 × 5%」手续费、成交运输能量费**由接单方终端出**、资源卖方→买方 / credits 买方→卖方、资源或 credits 不足则订单未激活。差异：单玩家模拟器里对手方是场景给定的「外部订单」（`market.orders`），成交在 tick 末统一结算（同 tick 内多笔成交互不可见）；`getHistory` 的 `date` 用 tick（官方为 UTC 日）、订单 `createdTimestamp` 由 tick×1000 近似 |
-| Power Creep | 未实现：`Game.powerCreeps` 恒空（`PWR_*` 效果、有等级的工厂商品均不可用） |
+| 市场订单 / Power Creep / Nuker | 未实现：`Game.market` 的订单/`deal`/`credits` 为 no-op 桩（`terminal.send`、`calcTransactionCost`、转账记录已实现），`Game.powerCreeps` 恒空，`launchNuke` 缺失（bundle 预检会报错） |
 | 工业的 Power 效果 | 不模拟任何 `PWR_*` 效果（`PWR_OPERATE_LAB/TERMINAL/FACTORY/POWER`、`PWR_REGEN_MINERAL` 等）；因此**有等级的工厂商品**（`COMMODITIES[x].level > 0`）恒失败（API 返回 `ERR_BUSY`/`ERR_INVALID_TARGET`，与官方无效果时一致），只有 0 级商品可生产；工厂等级只能由场景 `structures[].level` 给定 |
 | 矿物换密度的随机数 | 官方处理器用 `Math.random`；这里用场景 `seed` 播种的引擎随机数（splitmix64），概率分布一致、序列不同，同 seed 可复现 |
 | 转账记录 | 单玩家：发往自己终端的转账同时出现在 `incomingTransactions` 与 `outgoingTransactions`；只保留最近 100 条，`sender/recipient` 的 username 固定为 `Nexus`（敌方终端无 recipient） |
 | 敌方结构的激活 | 结构 `isActive()`（RCL 名额）只对我方结构计算，场景放置的敌方结构恒为激活 |
-| 战斗（近似完成） | 近战/远程/群体攻击、治疗、拆除、claim/reserve/sign/attackController 已对齐官方语义（含 hit-back、rampart 重定向、部件从头损坏、伤害 tick 末统一应用、意图互斥表）；安全模式（`activateSafeMode`：消耗激活次数、20000 tick 持续、50000 tick 间隔、一个 shard 同时一房、非房主攻击拦截、控制器升级 +1 次）与核弹（`launchNuke`：满仓 energy+ghodium、100000 tick 冷却、50000 tick 飞行、落地清空 creep/工地/掉落/墓碑/废墟并造成 1e7 / 5e6 结构伤害、取消安全模式、`upgradeBlocked` 200 tick）已实现；未覆盖：Power 效果（`PWR_FORTIFY` 等护盾） |
-| NPC（部分完成） | invader 定期侵袭波、source keeper（lair 每 300 tick 生成、守卫 source、仅打仇恨圈内目标）、power bank（2M hits、`POWER_BANK_HIT_BACK=0.5` 伤害反弹、5000 tick 线性衰减、归零销毁掉落 power）已对齐官方主流程；keeper/invader 身体部件数、侵袭周期（`npcs.invaders.every/first/lifetime/squad`）为社区近似；Power Creeps 仍未实现 |
+| 战斗（近似完成） | 近战/远程/群体攻击、治疗、拆除、claim/reserve/sign/attackController 已对齐官方语义（含 hit-back、rampart 重定向、部件从头损坏、伤害 tick 末统一应用、意图互斥表）；未覆盖：Power 效果（`PWR_FORTIFY` 等护盾）、safeMode 拦截、nuker |
 | 地形生成 | `generated` 为噪声近似，不复刻官方地形算法；可用 `rows`/`raw` 显式给定真实地形 |
 | 事件日志结构 | 已实现 `EVENT_HARVEST/BUILD/REPAIR/UPGRADE_CONTROLLER/TRANSFER/OBJECT_DESTROYED/EXIT/ATTACK/HEAL/ATTACK_CONTROLLER/RESERVE_CONTROLLER`；`objectId` 取发起动作的对象，目标 id 放在 `data.targetId`/`data.sourceId`（采能量用 `sourceId`，采矿按官方用 `targetId`、`amount` 为未截断的采集功率）；lab/terminal/factory/observer/powerSpawn 不产生事件（官方只写 actionLog） |
 | CPU 墙钟耗时 | `usedTime` 只计 `loop()` 墙钟 + 意图计价，不含 Memory 解析/序列化；跨机器不可复现（P95 断言请留足余量）。bot 按 `getUsed()` 做决策时每次运行结果会不同，需要逐位复现（A/B 对比）时打开 `cpu.deterministic` |
@@ -145,10 +154,6 @@ screeps-sim test 'sim/**/*.sim.ts'    # 通配符
 screeps-sim test --list
 screeps-sim test --bundle dist/main.js --ticks 500
 screeps-sim test -v
-
-# watch: 首跑一次, 之后 bundle/用例变更自动重跑 (与 rollup -w 等外部构建配合)
-screeps-sim watch
-screeps-sim watch sim/ -t 500
 ```
 
 输出形如:
@@ -197,9 +202,10 @@ screeps-sim check --strict             # 警告也计为失败 (CI 用)
 
 - 错误: **常量拼写错误** (`ERR_NOT_IN_RANG` → 运行时 undefined, 比较永远失败)、
   **参数顺序颠倒** (`transfer(RESOURCE_ENERGY, target)` / `spawnCreep('name', body)`)、
-  **node 泄漏** (`process.` / `require(` / `Buffer.` —— 官方同样会炸)
+  **node 泄漏** (`process.` / `require(` / `Buffer.` —— 官方同样会炸)、
+  调用模拟器未实现的方法 (`launchNuke` → TypeError)
 - 警告: `setTimeout` 等运行时缺失的 API、`WebAssembly.instantiate` 跨 tick 异步必死、
-  **模拟覆盖度** (`Game.powerCreeps` 恒空 —— 提示哪些行为不会被模拟)
+  **模拟覆盖度** (`Game.market` 订单/deal no-op、powerCreeps 恒空 —— 提示哪些行为不会被模拟)
 
 常量表从 `src/js/screeps.js` 自动提取 (`node runner/gen-constants.mjs`), `npm test` 校验同步。
 `test` 运行时自动做两层预检: 场景错误 → 用例秒失败; bundle 错误 → 使用该 bundle 的用例全部秒失败,
@@ -218,12 +224,51 @@ console.log(report.rclTimeline, report.asserts)
 本仓库本身就是一个 npm 包 (`screeps-sim`, 零运行时依赖), 在任意 bot 项目里:
 
 ```bash
-# 本地路径安装 (开发期推荐, 源码改动即时生效)
+# 从 npm 注册表安装 (推荐): 自动带上当前平台的预编译引擎, 不需要 Rust 工具链
+npm i -D screeps-sim
+
+# 本地路径安装 (开发期: 源码改动即时生效, 需要 Rust 工具链)
 npm i -D path/to/Screeps-Simulation
 
-# 或 git 安装
+# 或 git 安装 (需要 Rust 工具链, 首次运行自动 cargo build)
 npm i -D github.com:KurohaneKaoruko/Screeps-Simulation
 ```
+
+### 平台支持
+
+预编译引擎按平台拆成独立的 npm 包, 作为 `optionalDependencies` 随主包自动安装,
+npm 按每个包的 `os`/`cpu`/`libc` 字段只安装当前平台, 其余静默跳过:
+
+| 平台 | 平台包 |
+|---|---|
+| Linux x64 (glibc) | `@screeps-sim/linux-x64-gnu` |
+| Linux x64 (Alpine 等 musl) | `@screeps-sim/linux-x64-musl` |
+| Linux arm64 (glibc) | `@screeps-sim/linux-arm64-gnu` |
+| Linux arm64 (musl) | `@screeps-sim/linux-arm64-musl` |
+| macOS Intel | `@screeps-sim/darwin-x64` |
+| macOS Apple Silicon | `@screeps-sim/darwin-arm64` |
+| Windows x64 | `@screeps-sim/win32-x64` |
+| Windows arm64 | `@screeps-sim/win32-arm64` |
+
+节点 ≥ 22.6 (`.sim.ts` 需要原生 TS 加载)。其他平台 (如 FreeBSD) 没有预编译包,
+装完后首次运行会回退到本地 `cargo build --release`。
+
+### 排查: doctor
+
+装不上、或者报「找不到 screeps-sim 引擎二进制」时, 先跑 doctor ——
+它会打印 node 版本、当前平台、二进制的实际来源和可执行的修复步骤:
+
+```bash
+npx screeps-sim doctor
+npx screeps-sim version   # npm 包版本 + 引擎版本
+```
+
+二进制解析顺序 (`runner/binary.mjs`, 与 doctor 输出一致):
+
+1. `SCREEPS_SIM_BIN` 环境变量 (显式指定, 优先级最高)
+2. 本仓库源码树的 `target/release/screeps-sim` (源码安装时的本地构建)
+3. 平台包 `@screeps-sim/<平台>` 里的二进制 ← 从 npm 安装走这条
+4. 自动 `cargo build --release` (需要 Rust 工具链; 仅源码安装可用)
 
 bot 项目一次性配置 (`package.json`):
 
@@ -257,8 +302,46 @@ export const myCase = { name: 'boot', rooms: [/* ... */] }
   用 TS 表达式共享房间模板/断言组合, 这是比 JSON 场景强得多的地方。
 - 需要 Node ≥ 22.6 (原生 TS 加载); CommonJS 项目也可用 —— Node 22+ 会按语法自动把
   含 `import/export` 的 `.ts` 识别为 ESM (极旧环境可改 `.sim.mts`)。
-- 首次运行会自动 `cargo build --release` (需要 Rust 工具链); 已构建好的二进制可用
-  `SCREEPS_SIM_BIN` 环境变量指定。
+- 编程 API 同在主入口: `binaryInfo()` / `doctorReport()` 查安装环境, 便于在测试脚本里断言。
+
+## 从源码安装 / 开发
+
+需要 Rust 工具链 (https://rustup.rs)。克隆后:
+
+```bash
+npm install
+npm run build            # cargo build --release
+npm test                 # runner 自测 + 版本校验 + smoke 用例 (需引擎已构建)
+npm run test:install     # 安装冒烟: 打包 → 装进临时项目 → 跑用例 (含平台包路径)
+npm run doctor           # 诊断
+```
+
+- git / 路径安装不含预编译二进制, 首次运行会 `cargo build --release` (约 1 分钟);
+  想跳过编译就把已构建的二进制用 `SCREEPS_SIM_BIN` 指过去。
+- 改了 Rust 代码后 `npm run build` 即可 —— 源码树的 `target/release` 优先于平台包 (见上面的解析顺序)。
+
+### 发布
+
+版本号在 `package.json` 与 `Cargo.toml` 各一份, 必须一致:
+
+```bash
+npm version 0.2.0                  # 自动同步 Cargo.toml (scripts/version-check.mjs --write)
+node scripts/version-check.mjs     # 校验: 版本一致 + optionalDependencies 覆盖全部平台
+git tag v0.2.0 && git push --tags  # 触发 .github/workflows/release.yml
+```
+
+release 工作流: 8 个平台矩阵构建 (strip 后约 30 MB/包) → 上传 GitHub Release (裸二进制 + SHA256SUMS)
+→ 依次 `npm publish` 平台包与主包 (带 provenance)。需要仓库 secret `NPM_TOKEN`;
+平台 scope 定义在 `runner/platform.mjs` 的 `SCOPE` (发布前改成自己拥有的 scope)。
+
+本地单独构建某个平台的包:
+
+```bash
+node scripts/build-platform-pkg.mjs                                  # 当前平台
+node scripts/build-platform-pkg.mjs --skip-build                     # 复用已有 target/ 产物
+node scripts/build-platform-pkg.mjs --key linux-arm64-gnu --cross    # 交叉编译 (需 cross)
+# → dist/platform/*.tgz + dist/platform/<key>.json 清单
+```
 
 ## 直跑单个场景 (CLI)
 
@@ -293,52 +376,6 @@ CLI 选项：
 | `--render-terrain <room>` | 打印指定房间的 ASCII 地形与墙/沼泽占比 |
 | `--deterministic-cpu` | 确定性 CPU (等价场景 `cpu.deterministic: true`): bot 读到的 CPU 只由调用次数和意图数决定, 两次运行状态哈希一致 |
 | `--no-seed-random` | 关闭 `Math.random` 播种（默认播种，seed 取自场景 `seed`） |
-| `--checkpoint-every <n>` | 每 n tick 落盘世界检查点 (时间旅行原料, 见下) |
-| `--checkpoint-dir <dir>` | 检查点目录 |
-| `--at <tick>` | 恢复到 tick T 落点并 dump 世界状态 (需配 `--replay` 或 `--checkpoint-dir`) |
-| `--steps <n>` | `--at` 落点后按录制意图流再单步观察 n tick (每 tick 一行状态摘要) |
-| `--dump-state <path>` | `--at` 落点的完整世界状态落盘 JSON (可 diff / 喂其他工具) |
-| `--resume` | `--at` 落点后把世界交给 bundle 续跑 (时间旅行返回点继续开发) |
-
-### 时间旅行 (回到任意 tick 现场)
-
-正常跑时同时录制意图流和检查点，之后可**秒级**恢复到任意 tick 观察世界：
-
-```bash
-# 1. 记录阶段 (正常跑, 同时落两路原料)
-screeps-sim --scenario scenarios/boot-from-scratch.json --bundle dist/main.js \
-    --ticks 20000 --record-intents /tmp/intents.jsonl \
-    --checkpoint-every 1000 --checkpoint-dir /tmp/cps
-
-# 2. 时间旅行: 恢复到 tick 13750 观察 (检查点 ≤T + 重放其后的意图, 精确重建)
-screeps-sim --scenario scenarios/boot-from-scratch.json --replay /tmp/intents.jsonl \
-    --checkpoint-dir /tmp/cps --at 13750 --steps 5 --dump-state /tmp/world-13750.json
-```
-
-落点输出：重建方式、世界状态哈希、逐房间摘要 (RCL/进度/单位/能量)、单步期间每 tick 的
-哈希序列。**检查点 + 录制回放与连续运行逐位一致** (`--at T` 的哈希 == 直接跑 T tick 的
-报告哈希，有 `tests/checkpoint_time_travel.rs` 对拍锁定)。
-
-`--resume` 从落点继续跑 bot (Memory/CPU bucket 随检查点恢复)，适合「定位到出问题的
-tick → 当场改 bot 重跑」。检查点每 tick 都有完整 World (~KB 级)，默认频率 1000 tick
-对长跑 (<0.1% 开销)；调小频率可更精细地跳跃。
-
-### watch 模式 (改完即跑)
-
-```bash
-screeps-sim watch                       # 首跑 + 之后 bundle/用例变更自动重跑
-screeps-sim watch sim/ -t 500           # 只盯 sim/ 目录, 每轮 500 tick 冒烟
-```
-
-与外部构建 (`rollup -w` / `webpack -w` / `tsc -w`) 配合：bundle 被重新写出即触发重跑；
-`.sim.ts` 用例文件自身变更同样触发。失败不退出 (开发回路)，Ctrl+C 结束。
-
-### stdin 管道不可用时 (自动降级)
-
-少数 Windows 环境的安全软件会 hook `CreatePipe`，导致 stdin 匿名管道不可用
-(`EBUSY` / "All pipe instances are busy")。此时 runner 与 CLI 测试会**自动降级**：
-场景 JSON 改写临时文件、走 `--scenario <file>` (stdout 管道协议不变，语义完全一致)。
-无需任何配置，真实管道可用的环境仍优先走 stdin。
 
 ### V8 预编译库下载失败时
 
@@ -430,10 +467,6 @@ cargo test --release   # 推荐: 同时覆盖 release 优化后的代码生成 (
 | `tests/memory_segments.rs` | `RawMemory` 段跨 tick 持久、需每 tick 重新激活、ID/数量/类型/长度校验、`RawMemory.set` 语义 |
 | `tests/framework.rs` | 全局重置（全局变量丢失、Memory 与段保留）、场景加载校验的正/反用例、同场景同 seed 重放一致性（确定性） |
 | `tests/cli_cpu_bucket.rs` | CLI 级集成：bucket 耗尽跳过（官方 "CPU bucket is empty"）与 `noErrors` 失败退出码、正常场景退出码 0、tickLimit 公式与场景覆盖值 |
-| `tests/checkpoint_time_travel.rs` | 时间旅行：检查点序列化往返、落盘/发现/加载语义、"检查点 + 意图重放 == 连续运行" 每 tick 哈希对拍 |
-| `tests/npc.rs` | NPC：invader 侵袭波（按 `every/first/lifetime/squad` 周期性从房间边缘进入、攻击玩家目标、到期撤离不留痕）、source keeper（每个 lair 独立周期生成/更替自身 keeper、无仇恨时回防 source 守卫圈、仅攻击仇恨圈内玩家、贴脸近战）、lair 受损重置生成倒计时、power bank 线性衰减至归零销毁、`POWER_BANK_HIT_BACK` 半伤害反弹与掉落 power、快照字段（`ticksToSpawn`/`power`/`ticksToDecay`） |
-| `tests/market.rs` | 市场：下单 5% 手续费（买卖一致）、买入/卖出外部订单的资源与 credits 流向、运输能量费由接单方终端扣除（含卖出能量时 amount+cost 同扣）、credits 不足拒成交、撤单/改价/追加数量仅对自己订单生效、订单激活判定、`getHistory` 按 tick 聚合、快照市场字段（`marketCredits`/`marketOrders`/`marketHistory`）与快路径/Value 路径一致 |
-| `tests/combat.rs` | 战斗：安全模式（消耗激活次数与 20000/50000 计时、无次数拒绝、冷却期拒绝、一 shard 一房、拦截敌方攻击但不拦房主、控制器升级 +1 次）、核弹（发射消耗满仓 energy+ghodium 并进入冷却、越界/资源不足拒绝、落地清空 creep/掉落并造成 1e7 / 5e6 结构伤害、取消安全模式 + `upgradeBlocked` 200）、快照安全模式字段与在飞核弹（`nukes`）快路径/Value 一致 |
 
 ### 复现基准
 
@@ -451,23 +484,24 @@ src/
     terrain.rs   地形解析与生成
     movement.rs  移动仲裁与疲劳 (movement.js 移植)
     intents.rs   意图结算 (creep/spawn/room intents 移植)
-    npc.rs       NPC: invader 侵袭波 / source keeper / power bank
-    market.rs    市场: 订单 / 成交 / credits / 终端跨房交易
-    combat.rs    战斗: 安全模式 (activateSafeMode) / 核弹 (launchNuke + 落地)
     tick.rs      Tick 推进顺序 (processor.js 对齐)
     snapshot.rs  可见世界 → JSON 快照
     scenario.rs  场景定义与加载
     metrics.rs   指标与断言
-    checkpoint.rs 时间旅行: 世界检查点落盘/恢复 (与 --record-intents 配套)
   js/screeps.js  Screeps API shim (bot 的直接运行环境)
   js/lodash.js   lodash 3.10.1 (MIT), 由宿主注入为全局 `_`
   runtime.rs     deno_core 宿主 (op 边界 + CPU 看门狗 + 内存段/全局重置)
-  main.rs        CLI (含 stdin 场景 / stdout JSON 报告的管道协议 + 时间旅行)
-bin/             screeps-sim 命令入口 (test/watch/check 子命令, 其余透传引擎)
-runner/          .sim.ts 测试 runner (发现/加载/运行/汇总/watch, 零依赖)
-index.mjs        编程 API (defineSim / runSim)
+  main.rs        CLI (含 stdin 场景 / stdout JSON 报告的管道协议)
+bin/             screeps-sim 命令入口 (test 子命令 → runner, 其余透传引擎)
+runner/          .sim.ts 测试 runner (发现/加载/运行/汇总, 零依赖)
+  platform.mjs   平台探测: (os, cpu, libc) → 平台包名 (二进制定位与发布共用)
+  binary.mjs     引擎二进制解析 (env → 源码构建 → 平台包 → cargo build)
+  doctor.mjs     诊断输出 (doctor 子命令 / doctorReport API)
+index.mjs        编程 API (defineSim / runSim / binaryInfo / doctorReport)
 index.d.ts       .sim.ts 用例的完整类型定义
-examples/        示例用例 (smoke 自包含可跑; npc 展示侵袭波/keeper/powerBank; market 展示下单/成交; combat 展示安全模式/核弹) + fixtures/*.js 陪跑 bundle
+examples/        示例用例 (smoke 自包含可跑) + fixtures/min-bot.js 陪跑 bundle
 scenarios/       wire JSON 场景 (--scenario 直跑用)
-tests/           回归测试 (engine_rules / shim_apis / cpu_watchdog / memory_segments / framework / checkpoint_time_travel / npc / market / combat)
+scripts/         打包发布工具 (version-check / build-platform-pkg / test-install)
+tests/           回归测试 (engine_rules / shim_apis / cpu_watchdog / memory_segments / framework)
+.github/workflows/  ci.yml (三平台回归 + 安装冒烟) · release.yml (平台包矩阵 + npm 发布)
 ```
