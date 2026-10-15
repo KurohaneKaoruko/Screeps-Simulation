@@ -5,7 +5,7 @@
 import { existsSync } from 'node:fs'
 
 /// npm scope: 发布前必须改成自己拥有的 scope (与主包 screeps-sim 无关, 需单独注册)
-export const SCOPE = '@screeps-sim'
+export const SCOPE = ''
 
 /// 全部发布目标 (CI 矩阵 / 平台包 optionalDependencies 的唯一真相源)
 export const TARGETS = [
@@ -26,7 +26,7 @@ export function targetByKey(key) {
 }
 
 export function packageNameFor(key) {
-	return `${SCOPE}/${key}`
+	return 'screeps-sim-' + key
 }
 
 /// linux 的 libc 判定: Node 自报 glibc 版本即 glibc; 否则查 musl 加载器 (Alpine 等)

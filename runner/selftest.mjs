@@ -263,7 +263,7 @@ console.log('平台探测与二进制定位 (platform.mjs / binary.mjs)')
 	// 当前开发机必须在已发布列表里, 否则平台包缺失 → 消费端必然要 Rust
 	const cur = detectPlatform()
 	expect(cur.supported, `当前平台 ${cur.platform}/${cur.arch}${cur.libc ? ` (${cur.libc})` : ''} 在已发布目标内`)
-	expect(cur.supported && cur.packageName.startsWith('@screeps-sim/'), '当前平台有对应平台包名')
+	expect(cur.supported && cur.packageName.startsWith('screeps-sim-'), '当前平台有对应平台包名')
 
 	// 候选顺序: SCREEPS_SIM_BIN 最高优先, 其余来源都带说明
 	const saved = process.env.SCREEPS_SIM_BIN
