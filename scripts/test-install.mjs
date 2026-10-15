@@ -7,7 +7,7 @@
 //   B. 平台包: 再把当前平台的 `@screeps-sim/<key>` tgz 装进同一项目, 且**不设** SCREEPS_SIM_BIN
 //      → 验证 optionalDependencies 的解析路径 (注册表安装时的真实形态)
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -48,8 +48,12 @@ try {
 	// ── 打包主包 ──────────────────────────────────────────
 	console.log('\n1. npm pack')
 	const packed = npm(['pack', '--pack-destination', tmp], root)
-	// npm 会把 prepack 脚本输出混进 stdout, 直接按文件名正则取 (notice 走 stderr)
-	const tgz = new RegExp(`${pkg.name.replace(/[/@]/g, '')}-\\d+\\.\\d+\\.\\d+\\.tgz`).exec(packed.stdout || '')?.[0]
+	// npm 会把 prepack 脚本输出混进 stdout/stderr, 直接扫描 tmp 目录找 tgz 更可靠
+	let tgz = null
+	try {
+		const files = readdirSync(tmp)
+		tgz = files.find(f => f.startsWith(`${pkg.name.replace(/[/@]/g, '')}-`) && f.endsWith('.tgz'))
+	} catch {}
 	if (!step(packed.status === 0 && !!tgz && existsSync(join(tmp, tgz)), '主包打包成功', packed.out)) process.exit(1)
 	console.log(`  tgz: ${tgz}`)
 
