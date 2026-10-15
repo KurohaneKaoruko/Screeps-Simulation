@@ -115,10 +115,14 @@ writeFileSync(
 )
 
 // ── 4. 打包 + 清单 ──────────────────────────────────────
-const packed = spawnSync('npm', ['pack', '--pack-destination', outDir], { cwd: stageDir, encoding: 'utf8' })
+const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+console.log(`  ▸ ${npmCmd} pack --pack-destination ${outDir} (in ${stageDir})`)
+const packed = spawnSync(npmCmd, ['pack', '--pack-destination', outDir], { cwd: stageDir, encoding: 'utf8', shell: true })
 if (packed.status !== 0) {
-	console.error(`npm pack 失败:\n${packed.stderr || packed.stdout}`)
-	process.exit(packed.status ?? 1)
+	console.error('npm pack 失败 (status=' + packed.status + '):')
+	console.error('  stdout:', packed.stdout)
+	console.error('  stderr:', packed.stderr)
+	process.exit(1)
 }
 const tgzName = (packed.stdout || '').trim().split('\n').pop().trim()
 const tgz = join(outDir, tgzName)
