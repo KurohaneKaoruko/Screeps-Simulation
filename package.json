@@ -57,14 +57,14 @@
 		"prepack": "node scripts/version-check.mjs"
 	},
 	"optionalDependencies": {
-		"screeps-sim-linux-x64-gnu": "0.1.0",
-		"screeps-sim-linux-x64-musl": "0.1.0",
-		"screeps-sim-linux-arm64-gnu": "0.1.0",
-		"screeps-sim-linux-arm64-musl": "0.1.0",
-		"screeps-sim-darwin-x64": "0.1.0",
-		"screeps-sim-darwin-arm64": "0.1.0",
-		"screeps-sim-win32-x64": "0.1.0",
-		"screeps-sim-win32-arm64": "0.1.0"
+		"screeps-sim-linux-x64-gnu": "0.2.0",
+		"screeps-sim-linux-x64-musl": "0.2.0",
+		"screeps-sim-linux-arm64-gnu": "0.2.0",
+		"screeps-sim-linux-arm64-musl": "0.2.0",
+		"screeps-sim-darwin-x64": "0.2.0",
+		"screeps-sim-darwin-arm64": "0.2.0",
+		"screeps-sim-win32-x64": "0.2.0",
+		"screeps-sim-win32-arm64": "0.2.0"
 	},
 	"engines": {
 		"node": ">=22.6"
