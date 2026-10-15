@@ -31,10 +31,12 @@ const step = (ok, label, detail = '') => {
 }
 
 function npm(args, cwd, extraEnv = {}) {
-	const r = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, {
+	const cmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+	const r = spawnSync(cmd, args, {
 		cwd,
 		encoding: 'utf8',
 		env: { ...process.env, ...extraEnv },
+		shell: true,
 	})
 	return { ...r, out: `${r.stdout || ''}${r.stderr || ''}` }
 }
@@ -47,14 +49,19 @@ console.log(`安装冒烟: ${pkg.name}@${pkg.version} → ${tmp}`)
 try {
 	// ── 打包主包 ──────────────────────────────────────────
 	console.log('\n1. npm pack')
-	const packed = npm(['pack', '--pack-destination', tmp], root)
+	const packed = npm(['pack', '--ignore-scripts', '--pack-destination', tmp], root)
 	// npm 会把 prepack 脚本输出混进 stdout/stderr, 直接扫描 tmp 目录找 tgz 更可靠
 	let tgz = null
 	try {
 		const files = readdirSync(tmp)
 		tgz = files.find(f => f.startsWith(`${pkg.name.replace(/[/@]/g, '')}-`) && f.endsWith('.tgz'))
 	} catch {}
-	if (!step(packed.status === 0 && !!tgz && existsSync(join(tmp, tgz)), '主包打包成功', packed.out)) process.exit(1)
+	if (!step(packed.status === 0 && !!tgz && existsSync(join(tmp, tgz)), '主包打包成功', packed.out)) {
+		console.error('=== npm pack 完整输出 ===')
+		console.error(packed.out)
+		console.error('============================')
+		process.exit(1)
+	}
 	console.log(`  tgz: ${tgz}`)
 
 	// ── 临时 bot 项目 ─────────────────────────────────────
@@ -119,7 +126,7 @@ if (typeof binaryInfo().platform.platform !== 'string') throw new Error('binaryI
 	// ── A. 只装主包 (SCREEPS_SIM_BIN 指本仓库二进制) ──────
 	console.log('\n2. 只装主包 (源码安装形态: SCREEPS_SIM_BIN)')
 	const install = npm(
-		['install', '--no-audit', '--no-fund', '--omit=optional', join(tmp, tgz)],
+		['install', '--ignore-scripts', '--no-audit', '--no-fund', '--omit=optional', join(tmp, tgz)],
 		proj,
 		{ SCREEPS_SIM_BIN: repoBin }
 	)
@@ -186,7 +193,7 @@ if (typeof binaryInfo().platform.platform !== 'string') throw new Error('binaryI
 
 		if (existsSync(platformTgz)) {
 			// 直接装成顶层依赖 (模拟 npm 把 optionalDependencies 提升到项目 node_modules 的形态)
-			const pinstall = npm(['install', '--no-audit', '--no-fund', platformTgz], proj, {})
+			const pinstall = npm(['install', '--ignore-scripts', '--no-audit', '--no-fund', platformTgz], proj, {})
 			step(pinstall.status === 0, 'npm install 平台包', pinstall.out)
 
 			const doc2 = runCli(['doctor'], { SCREEPS_SIM_BIN: '' })
