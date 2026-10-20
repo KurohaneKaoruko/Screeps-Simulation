@@ -53,7 +53,7 @@ fn memory_segments_persist_and_deactivate() {
 				RawMemory.setActiveSegments([0, 1]);
 			};
 		"#;
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 
 		// tick1: 段未激活 → 读不到, 写入 "t1", 激活 [0,1]
 		let r1 = bot.run_tick(snap.clone(), "{}".to_string()).unwrap();
@@ -91,7 +91,7 @@ fn segments_require_reactivation_each_tick() {
 				console.log(JSON.stringify({ n: globalThis.__n, seg3: before === undefined ? null : before }));
 			};
 		"#;
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 		let r1 = bot.run_tick(snap.clone(), "{}".to_string()).unwrap();
 		assert!(r1.console[0].contains("\"seg3\":null"), "tick1 未激活: {:?}", r1.console);
 		let r2 = bot.run_tick(snap.clone(), "{}".to_string()).unwrap();
@@ -132,7 +132,7 @@ fn raw_memory_validation_matches_official() {
 				console.log(JSON.stringify(out));
 			};
 		"#;
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 		let r = bot.run_tick(snap.clone(), "{}".to_string()).unwrap();
 		let info: serde_json::Value =
 			serde_json::from_str(r.console.first().map(String::as_str).unwrap_or("{}")).unwrap();
@@ -172,7 +172,7 @@ fn memory_is_configurable_and_survives_delete() {
 			};
 		"#;
 		let snap = snapshot(&world);
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 		let memory = String::from("{}");
 
 		let r1 = bot.run_tick(snap.clone(), memory.clone()).unwrap();

@@ -55,7 +55,7 @@ fn global_reset_clears_globals_but_keeps_memory_and_segments() {
 				console.log(JSON.stringify({ g: globalThis.__g, mem: Memory.runs }));
 			};
 		"#;
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 		let snap = snapshot(&world);
 		let mut memory = String::from("{}");
 
@@ -170,7 +170,7 @@ fn same_scenario_rerun_is_deterministic() {
 		let run_once = |seed: u64| -> (String, String, u64, u64) {
 			let scenario = Scenario::from_json(ROOM).unwrap();
 			let mut world = build_world(&scenario).unwrap();
-			let mut bot = BotRuntime::new(bundle, seed).unwrap();
+			let mut bot = BotRuntime::new(bundle, seed, "{}", "{}").unwrap();
 			let mut movement = screeps_sim::engine::movement::Movement::default();
 			let mut memory = String::from("{}");
 			for _ in 0..8 {

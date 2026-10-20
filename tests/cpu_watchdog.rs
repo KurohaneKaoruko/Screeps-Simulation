@@ -55,7 +55,7 @@ fn cpu_timeout_aborts_tick_and_recovers() {
 				if (globalThis.__n === 1) { for (;;) {} }
 			};
 		"#;
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 		let snap = snapshot(&world);
 
 		let r1 = bot.run_tick_limited(snap.clone(), "{}".to_string(), Some(150.0)).unwrap();
@@ -97,7 +97,7 @@ fn cpu_no_timeout_when_under_limit() {
 				Game.rooms["W5N8"].createConstructionSite(11, 11, "road");
 			};
 		"#;
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 		let r = bot.run_tick_limited(snapshot(&world), "{}".to_string(), Some(5_000.0)).unwrap();
 		assert!(!r.timed_out, "轻量 tick 不应超时");
 		assert!(r.errors.is_empty(), "不应产生错误: {:?}", r.errors);
@@ -115,7 +115,7 @@ fn cpu_measure_only_without_timeout() {
 		let scenario = Scenario::from_json(ROOM).unwrap();
 		let world = build_world(&scenario).unwrap();
 		let bundle = r#"exports.loop = function() { Memory.a = 1; };"#;
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 		let r = bot.run_tick(snapshot(&world), "{}".to_string()).unwrap();
 		assert!(!r.timed_out);
 		assert!(r.memory.contains("\"a\":1"), "Memory 应落盘: {}", r.memory);
@@ -134,7 +134,7 @@ fn intent_cpu_is_charged() {
 				for (const c of Object.values(Game.creeps)) { c.move(1); c.move(3); }
 			};
 		"#;
-		let r = BotRuntime::new(bundle, 1).unwrap().run_tick(snapshot(&world), "{}".to_string()).unwrap();
+		let r = BotRuntime::new(bundle, 1, "{}", "{}").unwrap().run_tick(snapshot(&world), "{}".to_string()).unwrap();
 		assert_eq!(r.intents.entries.len(), 80, "应提交 80 条 move 意图");
 		assert!(
 			r.cpu_used >= 8.0,

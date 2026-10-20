@@ -237,6 +237,10 @@ pub struct World {
     /// 订单 id 序号 (确定性分配)
     #[serde(default)]
     pub market_order_seq: u64,
+    /// 升级需求表覆盖 (私服冲级 mod): 索引 0=升到 L1 需求, 1=升到 L2 ... 7=升到 L8。
+    /// None = 官服常量表。
+    #[serde(default)]
+    pub controller_levels_override: Option<Vec<u32>>,
     /// 成交记录 (新→旧), 供 Game.market.getHistory
     #[serde(default)]
     pub market_deals: Vec<crate::engine::market::MarketDeal>,
@@ -263,6 +267,18 @@ pub struct Transaction {
 pub const TRANSACTIONS_KEEP: usize = 100;
 
 impl World {
+    /// 升到 `level` 级的累计需求量 (官方表, 或场景覆盖的私服冲级表)
+    pub fn controller_levels(&self, level: u8) -> u32 {
+        if let Some(ov) = &self.controller_levels_override {
+            return ov.get(level as usize - 1).copied().unwrap_or(u32::MAX);
+        }
+        constants::CONTROLLER_LEVELS
+            .iter()
+            .find(|(l, _)| *l == level)
+            .map(|(_, p)| *p)
+            .unwrap_or(u32::MAX)
+    }
+
     pub fn new() -> World {
         World {
             tick: 0,
@@ -284,6 +300,7 @@ impl World {
             market_credits: 0.0,
             market_orders: BTreeMap::new(),
             market_order_seq: 0,
+            controller_levels_override: None,
             market_deals: Vec::new(),
             nukes: Vec::new(),
         }

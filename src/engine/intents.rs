@@ -164,6 +164,8 @@ pub struct TerminalSend {
 }
 
 pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
+    // 升级需求表副本: 循环体内 world 被 &mut 借用, 无法再不可变借用取表
+    let level_costs_cl: [u32; 8] = std::array::from_fn(|i| world.controller_levels((i + 1) as u8));
     let mut effects = TickEffects {
         moves: vec![],
         pulls: vec![],
@@ -217,7 +219,7 @@ pub fn apply_intents(world: &mut World, intents: &IntentList) -> TickEffects {
                 deduped.push((n.clone(), d.clone()));
             }
         }
-        apply_object_intents(world, id, &deduped, &mut effects);
+        apply_object_intents(world, id, &deduped, &mut effects, &level_costs_cl);
         i = j;
     }
 
@@ -273,7 +275,7 @@ fn apply_market_intent(name: &str, data: &Value, effects: &mut TickEffects) {
     }
 }
 
-fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)], effects: &mut TickEffects) {
+fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)], effects: &mut TickEffects, level_costs: &[u32; 8]) {
     // 先判定对象所在房间与类型
     let Some(room_name) = world
         .rooms
@@ -663,6 +665,9 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 };
                 let controller_id = target_id;
                 let now = world.tick;
+                // 升级需求在可变借用 room 之前取出
+                let ctrl_level = room.objects.get(&controller_id).map(|c| c.level).unwrap_or(0);
+                let next_req = level_costs.get(ctrl_level as usize - 1).copied().unwrap_or(u32::MAX);
                 let room = world.rooms.get_mut(&room_name).unwrap();
                 let (level, ctrl_pos) = match room.objects.get(&controller_id) {
                     // 官方 upgradeController.js:23: 被 attackController 封锁期间不能升级
@@ -691,7 +696,6 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                 let bonus = room.objects[&id].boosted_work_bonus("upgradeController", 1.0, effect);
                 let boosted = (effect as f64 + bonus).floor() as u32;
                 // 升级时间窗检查: 近期未升级的控制器不能跳级进度 (官方规则)
-                let next_req = controller_levels(level);
                 let down = downgrade_for(level);
                 let can_level = downgrade_time
                     .map(|dt| dt + constants::CONTROLLER_DOWNGRADE_RESTORE >= world.tick + down)
@@ -1145,6 +1149,27 @@ fn apply_object_intents(world: &mut World, id: u64, intents: &[(String, Value)],
                             job.directions = Some(directions);
                         }
                     }
+                }
+            }
+            ("spawn", "cancelSpawning") => {
+                // 官方 Spawning.cancel(): 移除孵化中的 creep 对象 (能量已消耗, 不返还)
+                let job_name = match room.objects.get(&id) {
+                    Some(spawn) => match &spawn.spawn_job {
+                        Some(job) => job.name.clone(),
+                        None => continue,
+                    },
+                    None => continue,
+                };
+                let dying_id = room
+                    .objects
+                    .iter()
+                    .find(|(_, o)| o.obj_type == "creep" && o.name.as_deref() == Some(job_name.as_str()))
+                    .map(|(oid, _)| *oid);
+                if let Some(creep_id) = dying_id {
+                    room.objects.remove(&creep_id);
+                }
+                if let Some(spawn) = room.objects.get_mut(&id) {
+                    spawn.spawn_job = None;
                 }
             }
             ("spawn", "renewCreep") => {
@@ -1801,13 +1826,6 @@ fn id_of(data: &Value, key: &str) -> Option<u64> {
     data.get(key)?.as_str().and_then(|s| u64::from_str_radix(s, 16).ok())
 }
 
-fn controller_levels(level: u8) -> u32 {
-    constants::CONTROLLER_LEVELS
-        .iter()
-        .find(|(l, _)| *l == level)
-        .map(|(_, p)| *p)
-        .unwrap_or(u32::MAX)
-}
 
 fn downgrade_for(level: u8) -> u64 {
     constants::CONTROLLER_DOWNGRADE

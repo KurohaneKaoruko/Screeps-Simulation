@@ -1,0 +1,121 @@
+{
+  "name": "race-flat-9",
+  "description": "9 个平坦双矿房间极限冲级: 中央主房 + 8 邻居 (双 source 外矿), 40kt 停跑并输出各级 RCL 总耗时",
+  "seed": 7,
+  "ticks": 40000,
+  "cpu": {
+    "limit": 100,
+    "bucket": 10000
+  },
+  "deterministic_random": true,
+  "always_visible": false,
+  "controllerLevels": [200, 45000, 135000, 405000, 607500, 3645000, 10935000, 0],
+  "rooms": [
+    {
+      "name": "W5N8",
+      "terrain": {
+        "kind": "flat"
+      },
+      "sources": {
+        "count": 2,
+        "energy": 3000
+      },
+      "controller": {
+        "level": 1,
+        "pos": [28, 27],
+        "safeModeAvailable": 1,
+        "safeModeUntil": 20000
+      },
+      "mineral": {
+        "pos": [10, 40],
+        "mineralType": "O",
+        "amount": 30000
+      },
+      "structures": [
+        {
+          "type": "spawn",
+          "pos": [25, 25],
+          "energy": 300
+        }
+      ],
+      "creeps": []
+    },
+    {
+      "name": "W4N7",
+      "terrain": { "kind": "flat" },
+      "sources": { "count": 2, "energy": 3000 },
+      "controller": { "level": 0, "mine": false },
+      "mineral": { "pos": [40, 40], "mineralType": "H", "amount": 30000 },
+      "structures": [],
+      "creeps": []
+    },
+    {
+      "name": "W4N8",
+      "terrain": { "kind": "flat" },
+      "sources": { "count": 2, "energy": 3000 },
+      "controller": { "level": 0, "mine": false },
+      "mineral": { "pos": [40, 10], "mineralType": "Z", "amount": 30000 },
+      "structures": [],
+      "creeps": []
+    },
+    {
+      "name": "W4N9",
+      "terrain": { "kind": "flat" },
+      "sources": { "count": 2, "energy": 3000 },
+      "controller": { "level": 0, "mine": false },
+      "mineral": { "pos": [10, 10], "mineralType": "K", "amount": 30000 },
+      "structures": [],
+      "creeps": []
+    },
+    {
+      "name": "W5N7",
+      "terrain": { "kind": "flat" },
+      "sources": { "count": 2, "energy": 3000 },
+      "controller": { "level": 0, "mine": false },
+      "mineral": { "pos": [25, 38], "mineralType": "U", "amount": 30000 },
+      "structures": [],
+      "creeps": []
+    },
+    {
+      "name": "W5N9",
+      "terrain": { "kind": "flat" },
+      "sources": { "count": 2, "energy": 3000 },
+      "controller": { "level": 0, "mine": false },
+      "mineral": { "pos": [25, 12], "mineralType": "L", "amount": 30000 },
+      "structures": [],
+      "creeps": []
+    },
+    {
+      "name": "W6N7",
+      "terrain": { "kind": "flat" },
+      "sources": { "count": 2, "energy": 3000 },
+      "controller": { "level": 0, "mine": false },
+      "mineral": { "pos": [10, 40], "mineralType": "X", "amount": 30000 },
+      "structures": [],
+      "creeps": []
+    },
+    {
+      "name": "W6N8",
+      "terrain": { "kind": "flat" },
+      "sources": { "count": 2, "energy": 3000 },
+      "controller": { "level": 0, "mine": false },
+      "mineral": { "pos": [40, 40], "mineralType": "F", "amount": 30000 },
+      "structures": [],
+      "creeps": []
+    },
+    {
+      "name": "W6N9",
+      "terrain": { "kind": "flat" },
+      "sources": { "count": 2, "energy": 3000 },
+      "controller": { "level": 0, "mine": false },
+      "mineral": { "pos": [10, 10], "mineralType": "O", "amount": 30000 },
+      "structures": [],
+      "creeps": []
+    }
+  ],
+  "asserts": [
+    { "kind": "rclReachedBy", "value": 6, "tick": 38000 },
+    { "kind": "cpuP95Below", "value": 25 },
+    { "kind": "noErrors" }
+  ]
+}

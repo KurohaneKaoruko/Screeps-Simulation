@@ -1435,11 +1435,27 @@ class OwnedStructure extends Structure {
 		this.owner = this.my ? { username: "Nexus" } : undefined;
 	}
 }
+/** 官方 E/game/structures.js Spawning: 正在孵化单位的信息视图 */
+class Spawning {
+	constructor(spawn, raw) {
+		this.__spawn = spawn;
+		this.name = raw.name;
+		this.needTime = raw.needTime;
+		this.remainingTime = raw.remainingTime;
+		this.directions = raw.directions;
+	}
+	/** 官方 Spawning.cancel(): 取消孵化, 已扣能量不返还 */
+	cancel() {
+		intent(this.__spawn.id, "cancelSpawning", {});
+		return C.OK;
+	}
+}
 class StructureSpawn extends OwnedStructure {
 	constructor(raw) {
 		super(raw);
 		this.name = raw.name;
-		this.spawning = raw.spawning || null;
+		// 官方 spawning 是 Spawning 实例 (带 cancel); 无孵化为 null
+		this.spawning = raw.spawning ? new Spawning(this, raw.spawning) : null;
 		this.energy = raw.store ? raw.store.energy || 0 : 0;
 		this.energyCapacity = raw.energyCapacity;
 	}
@@ -3209,6 +3225,25 @@ function installBootstrapGlobals() {
 	}
 }
 
+/** 装载 bundle 前的世界状态预注: 只重建 Game/RawMemory 等全局, 不执行 loop。
+ * 官方 runtime 先构建当 tick 的 globals 再装载用户代码 (E/runtime/user-vm.js),
+ * 模块顶层的 Game 读取 (如 MY_NAME IIFE) 依赖这一点。
+ * 预注只是最佳努力: 快照不完整时回退到引导桩, 不阻塞装载。 */
+function __primeTickState() {
+	try {
+		__W = JSON.parse(__ops.op_sim_get_snapshot());
+		cacheSnapshotTerrain();
+		buildGame();
+		rawMemoryData = __ops.op_sim_get_memory();
+		__installLazyMemory();
+		RawMemory.segments = {};
+		__activeSegments = [];
+		globalThis.Game = Game;
+	} catch (e) {
+		__W = null;
+	}
+}
+
 function __bootstrapBundle(bundleCode) {
 	installBootstrapGlobals();
 	const module = { exports: {} };
@@ -3219,7 +3254,9 @@ function __bootstrapBundle(bundleCode) {
 		throw new Error(`Unknown module: ${name}`);
 	};
 	try {
-		const fn = new Function("module", "exports", "require", `"use strict";\n${bundleCode}\n`);
+		// 官方 runtime 不给用户代码套 strict (E/runtime/user-vm.js 直接 vm 包装),
+		// memhack 的 `Memory = memory` 等隐式全局赋值在官服合法; 这里保持 sloppy 模式。
+		const fn = new Function("module", "exports", "require", `${bundleCode}\n`);
 		fn(module, exports, globalThis.__require);
 	} catch (e) {
 		return `bundle 加载失败: ${e && e.stack ? e.stack : e}`;

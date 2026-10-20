@@ -427,6 +427,8 @@ fn tick_controllers(world: &mut World, room_name: &str) {
     else {
         return;
     };
+    // 升级需求表副本 (world 已被可变借用)
+    let level_costs: Vec<u32> = (1..=8u8).map(|l| world.controller_levels(l)).collect();
     let controller = world.rooms.get_mut(room_name).unwrap().objects.get_mut(&controller_id).unwrap();
     // 官方 controllers/tick.js:10: 保留到期 (gameTime >= endTime-1) 或房间已有主人 → 清除保留
     if let Some(end) = controller.reservation_end_time {
@@ -449,6 +451,7 @@ fn tick_controllers(world: &mut World, room_name: &str) {
         );
         return;
     }
+    // 升级需求表在可变借用 controller 之前取出
     while tick >= controller.downgrade_time.unwrap_or(u64::MAX).saturating_sub(1) && controller.level > 0 {
         controller.level -= 1;
         let new_level = controller.level;
@@ -460,7 +463,7 @@ fn tick_controllers(world: &mut World, room_name: &str) {
             controller.downgrade_time =
                 Some(controller.downgrade_time.unwrap_or(tick) + downgrade(new_level) / 2 + 1);
             // 降级后进度 += 新等级需求的 90% (官方: progress += round(LEVELS[level]*0.9))
-            let keep = ((controller_levels(new_level) as f64) * 0.9).round() as u32;
+            let keep = ((level_costs[new_level as usize - 1] as f64) * 0.9).round() as u32;
             controller.progress += keep;
         }
     }
@@ -474,13 +477,6 @@ fn downgrade(level: u8) -> u64 {
         .unwrap_or(20_000)
 }
 
-fn controller_levels(level: u8) -> u32 {
-    constants::CONTROLLER_LEVELS
-        .iter()
-        .find(|(l, _)| *l == level)
-        .map(|(_, p)| *p)
-        .unwrap_or(u32::MAX)
-}
 
 /// 道路/容器/rampart 衰减
 fn tick_decay_structures(world: &mut World, room_name: &str) {

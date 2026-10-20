@@ -284,7 +284,21 @@ async fn async_main() {
     let mut bot = if replaying {
         None
     } else {
-        let mut rt = BotRuntime::new(&bundle, seed).unwrap_or_else(|e| panic!("{e}"));
+        // 首 tick 世界状态预注: 官方在装载用户模块前已构建当 tick globals,
+        // 模块顶层的 Game 读取 (如 MY_NAME IIFE) 依赖真实的 Game.rooms
+        let prime_opts = SnapshotOptions {
+            cpu: screeps_sim::engine::snapshot::CpuView {
+                limit: scenario.cpu_limit(),
+                tick_limit: scenario.cpu_tick_limit_override().unwrap_or(500.0),
+                bucket: scenario.cpu_bucket(),
+            },
+            always_visible: scenario.always_visible,
+            include_terrain: true,
+        };
+        let prime_snapshot = build_snapshot(&world, &prime_opts);
+        let prime_memory = scenario.memory.clone().unwrap_or_else(|| "{}".into());
+        let mut rt =
+            BotRuntime::new(&bundle, seed, &prime_snapshot, &prime_memory).unwrap_or_else(|e| panic!("{e}"));
         // 确定性 CPU: 场景 cpu.deterministic 或 --deterministic-cpu
         let step =
             scenario
@@ -677,6 +691,14 @@ async fn async_main() {
         timeline.push_str(&format!("L{level}@{t} "));
     }
     say(timeline);
+    // 各级 RCL 总耗时: L n 从 (n-1 达成 tick 或 0) 到 n 达成 tick 的耗时
+    let mut durations = String::from("RCL 各级耗时: ");
+    let mut prev: u64 = 0;
+    for (level, t) in &world.rcl_timeline {
+        durations.push_str(&format!("L{level}={}t ({}→{})  ", t - prev, prev, t));
+        prev = *t;
+    }
+    say(durations);
     say(format!("Memory 峰值: {} 字节", metrics.memory_peak));
     say(format!("意图分布: {:?}", intent_histogram));
     say(format!(

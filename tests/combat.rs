@@ -392,6 +392,6 @@ fn snapshot_exposes_safe_mode_and_inflight_nukes() {
 		.find(|o| o["type"] == json!("controller"))
 		.unwrap();
 	assert_eq!(controller["safeModeAvailable"], json!(0), "激活后已消耗");
-	assert_eq!(controller["safeMode"], json!(t0 + 20_000), "绝对到期 tick");
-	assert_eq!(controller["safeModeCooldown"], json!(t0 + 50_000), "冷却到期 tick");
+	assert_eq!(controller["safeMode"], json!(20_000 - 1), "剩余 tick (官方语义: 到期 tick - 当前 tick)");
+	assert_eq!(controller["safeModeCooldown"], json!(50_000 - 1), "冷却剩余 tick");
 }

@@ -176,6 +176,8 @@ export interface SimScenario {
 	npcs?: NpcSpec
 	/** 市场: 初始 credits + 外部订单 (下单 5% 手续费 / 接单方付运输能量费) */
 	market?: MarketSpec
+	/** 升级需求表覆盖 (私服冲级 mod), 长度 8: 索引 0 = L1→L2 需求 ... 索引 6 = L7→L8; 缺省官服表 */
+	controllerLevels?: number[]
 	rooms: RoomSpec[]
 	asserts?: AssertSpec[]
 	/** 本用例专用 bundle 路径 (相对 .sim.ts 文件); 缺省: --bundle → ./dist/main.js */

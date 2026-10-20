@@ -37,7 +37,7 @@ fn run_once(bundle: &str, world: &mut screeps_sim::engine::world::World) -> (Vec
 			include_terrain: true,
 		},
 	);
-	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 	let result = bot.run_tick(snapshot, "{}".to_string()).unwrap();
 	(result.intents.entries, result.console)
 }
@@ -140,7 +140,7 @@ fn moveto_end_to_end_inner() {
 		};
 	"#;
 	// 单个 BotRuntime 贯穿整个场景: 覆盖 Memory 往返、跨 tick 全局持久化与 _move 复用缓存
-	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 	let mut memory = String::from("{}");
 	let mut pos = (25u8, 25u8);
 	for _ in 0..12 {
@@ -403,7 +403,7 @@ fn loop_exception_keeps_intents_and_memory_inner() {
 			include_terrain: true,
 		},
 	);
-	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 	let result = bot
 		.run_tick(snapshot, "{}".to_string())
 		.unwrap();
@@ -475,7 +475,7 @@ fn transfer_into_busy_spawn_inner() {
 			}));
 		};
 	"#;
-	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 	let mut memory = String::from("{}");
 	let mut infos = Vec::new();
 	for _ in 0..2 {
@@ -612,7 +612,7 @@ fn industry_apis_via_js_inner() {
 			console.log(JSON.stringify(r));
 		};
 	"#;
-	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 	let mut memory = String::from("{}");
 	let mut infos = Vec::new();
 	for i in 0..3 {
@@ -744,7 +744,7 @@ fn market_apis_via_js_inner() {
 			console.log(JSON.stringify(r));
 		};
 	"#;
-	let mut bot = BotRuntime::new(bundle, 1).unwrap();
+	let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 	let mut memory = String::from("{}");
 	let mut infos = Vec::new();
 	for _ in 0..2 {
@@ -817,7 +817,7 @@ fn reserve_controller_renews_own_reservation() {
 			const c = Game.creeps.R; const ctrl = c.room.controller;
 			console.log(JSON.stringify({ code: c.reserveController(ctrl), res: ctrl.reservation === undefined ? "none" : ctrl.reservation }));
 		};"#;
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 		let mut memory = String::from("{}");
 		let mut out = Vec::new();
 		for _ in 0..3 {
@@ -874,7 +874,7 @@ fn creep_api_return_codes_match_official() {
 			};
 			console.log(JSON.stringify(r));
 		};"#;
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 		let snapshot = build_snapshot(&world, &SnapshotOptions { cpu: CpuView { limit: 100.0, tick_limit: 500.0, bucket: 10_000.0 }, always_visible: false, include_terrain: true });
 		let res = bot.run_tick(snapshot, "{}".to_string()).unwrap();
 		let r: serde_json::Value = serde_json::from_str(res.console.first().map(String::as_str).unwrap_or("{}")).unwrap_or_else(|_| panic!("{:?} {:?}", res.console, res.errors));
@@ -907,7 +907,7 @@ fn terrain_read_after_first_tick_is_correct() {
 			if (Game.time < 1) return;
 			console.log(JSON.stringify({ wall: Game.map.getRoomTerrain("W5N8").get(10, 10), plain: Game.map.getRoomTerrain("W5N8").get(11, 10) }));
 		};"#;
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 		let mut world = world;
 		let mut memory = String::from("{}");
 		let mut last = String::new();
@@ -975,7 +975,7 @@ fn combat_apis_via_js() {
 				console.log(JSON.stringify(r));
 			};
 		"#;
-		let mut bot = BotRuntime::new(bundle, 1).unwrap();
+		let mut bot = BotRuntime::new(bundle, 1, "{}", "{}").unwrap();
 		let mut memory = String::from("{}");
 		let mut infos = Vec::new();
 		for _ in 0..2 {
@@ -1012,9 +1012,9 @@ fn combat_apis_via_js() {
 		let t1 = &infos[1];
 		assert_eq!(t1["nukerE"], 0, "发射已扣光 energy: {t1}");
 		assert_eq!(t1["nukerG"], 0, "发射已扣光 ghodium: {t1}");
-		assert_eq!(t1["safeMode"], 20000, "SAFE_MODE_DURATION 绝对到期 tick: {t1}");
+		assert_eq!(t1["safeMode"], 19999, "SAFE_MODE_DURATION 剩余 tick (官方: 到期 - 当前): {t1}");
 		assert_eq!(t1["available"], 0, "已消耗: {t1}");
-		assert_eq!(t1["cooldown"], 50000, "SAFE_MODE_COOLDOWN 到期 tick: {t1}");
+		assert_eq!(t1["cooldown"], 49999, "SAFE_MODE_COOLDOWN 剩余 tick: {t1}");
 		assert_eq!(t1["nukes"], 1, "{t1}");
 		assert_eq!(t1["nukeInfo"], serde_json::json!([49999, "W5N8", 10, 10]), "{t1}");
 		assert_eq!(t1["nukerCooldown"], 99999, "NUKER_COOLDOWN − 1 tick: {t1}");

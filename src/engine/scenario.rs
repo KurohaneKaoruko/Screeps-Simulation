@@ -78,6 +78,9 @@ pub struct ControllerSpec {
     /// 预置可用的安全模式激活次数 (官方 safeModeAvailable; 短场景下免去先升级控制器)
     #[serde(default, rename = "safeModeAvailable")]
     pub safe_mode_available: u32,
+    /// 预置已激活的安全模式到期 tick (官方 respawn 后控制器自带 20000t 安全模式)
+    #[serde(default, rename = "safeModeUntil")]
+    pub safe_mode_until: Option<u64>,
 }
 
 fn default_mineral_type() -> String {
@@ -273,6 +276,10 @@ pub struct Scenario {
     /// 市场配置: 初始 credits + 外部订单
     #[serde(default)]
     pub market: Option<MarketSpec>,
+    /// 升级需求表覆盖 (私服冲级 mod): 长度 8, 索引 0=升到 L1 的累计需求 ...
+    /// 缺省 = 官服常量表 (200/45k/135k/405k/1215k/3645k/10935k)
+    #[serde(default, rename = "controllerLevels")]
+    pub controller_levels: Option<Vec<u32>>,
 }
 
 fn default_true() -> bool {
@@ -538,6 +545,9 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
             }
             obj.progress = ctrl.progress.unwrap_or(0);
             obj.safe_mode_available = ctrl.safe_mode_available;
+            if let Some(until) = ctrl.safe_mode_until {
+                obj.safe_mode_until = until;
+            }
             room.objects.insert(id, obj);
         }
 
@@ -662,6 +672,12 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
         .npcs
         .as_ref()
         .and_then(|n| n.invaders.clone());
+    // 私服冲级 mod 的升级需求表覆盖 (缺省 = 官服常量)
+    if let Some(levels) = &scenario.controller_levels {
+        if !levels.is_empty() && levels.len() <= 8 {
+            world.controller_levels_override = Some(levels.clone());
+        }
+    }
     // 市场: 初始 credits 与外部订单 (seq 先分给外部订单, 本玩家订单从其后开始)
     if let Some(m) = &scenario.market {
         world.market_credits = m.credits.unwrap_or(0.0);

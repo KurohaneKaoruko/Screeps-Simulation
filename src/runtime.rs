@@ -139,6 +139,9 @@ pub struct BotRuntime {
     /// 重建 isolate 所需 (全局重置)
     bundle_code: String,
     seed: u64,
+    /// 重置时用于预注世界状态的首 tick 快照/内存 (官方: 装载用户模块前 globals 已构建)
+    prime_snapshot: String,
+    prime_memory: String,
     /// isolate 新建/重置后需要携带 terrain (shim 的 terrainCache 常驻, 之后不再重发)
     terrain_pending: bool,
     /// 确定性 CPU: >0 时 shim 不读墙钟, 每次取时间推进这么多毫秒 (Game.cpu.getUsed 可复现)
@@ -188,9 +191,10 @@ impl Watchdog {
 }
 
 impl BotRuntime {
-    /// 创建 V8 运行时: 先注入 lodash, 再装 shim, 最后以 CJS 方式装载 bundle。
+    /// 创建 V8 运行时: 先注入 lodash, 再装 shim, 预注首 tick 世界状态, 最后以 CJS 方式装载 bundle。
     /// `seed == 0` 表示不播种 (Math.random 保持 V8 原生随机)。
-    pub fn new(bundle_code: &str, seed: u64) -> Result<BotRuntime, String> {
+    /// `snapshot_json` / `memory_json`: 首 tick 状态 (官方在装载用户模块前已构建当 tick globals)。
+    pub fn new(bundle_code: &str, seed: u64, snapshot_json: &str, memory_json: &str) -> Result<BotRuntime, String> {
         let mut runtime = JsRuntime::new(RuntimeOptions {
             extensions: vec![screeps_sim::init()],
             ..Default::default()
@@ -208,6 +212,20 @@ impl BotRuntime {
         runtime
             .execute_script("screeps.js", shim)
             .map_err(|e| format!("shim 装载失败: {e}"))?;
+        // 预注首 tick 世界状态 (Game.rooms 等): 模块顶层的 Game 读取在装载期就要生效
+        {
+            let snapshot = snapshot_json.to_string();
+            let memory = memory_json.to_string();
+            TICK_IO.with(|t| {
+                let mut io = t.borrow_mut();
+                io.snapshot = snapshot;
+                io.memory = memory;
+                io.runtime_data = String::from("{}");
+            });
+            runtime
+                .execute_script("prime.js", "__primeTickState()")
+                .map_err(|e| format!("世界状态预注失败: {e}"))?;
+        }
         // 播种必须在 bundle 之前: 模块顶层的 Math.random 也要确定性 (官方先建沙箱再跑 bundle)
         let seed_call = if seed == 0 {
             String::new()
@@ -229,6 +247,8 @@ impl BotRuntime {
             active_segments: vec![],
             bundle_code: bundle_code.to_string(),
             seed,
+            prime_snapshot: snapshot_json.to_string(),
+            prime_memory: memory_json.to_string(),
             terrain_pending: true,
             virtual_cpu_step: 0.0,
         })
@@ -240,11 +260,13 @@ impl BotRuntime {
     pub fn reset_global(&mut self) -> Result<(), String> {
         let bundle_code = self.bundle_code.clone();
         let seed = self.seed;
+        let prime_snapshot = self.prime_snapshot.clone();
+        let prime_memory = self.prime_memory.clone();
         let segments = std::mem::take(&mut self.segments);
         let active_segments = std::mem::take(&mut self.active_segments);
         // 先彻底销毁旧 isolate, 再创建新的
         self.runtime = None;
-        let mut fresh = BotRuntime::new(&bundle_code, seed)?;
+        let mut fresh = BotRuntime::new(&bundle_code, seed, &prime_snapshot, &prime_memory)?;
         fresh.segments = segments;
         fresh.active_segments = active_segments;
         fresh.terrain_pending = true;

@@ -348,11 +348,7 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             let _ = write!(out, "{}", obj.level);
             out.push_str(",\"progress\":");
             let _ = write!(out, "{}", obj.progress);
-            let total = constants::CONTROLLER_LEVELS
-                .iter()
-                .find(|(l, _)| *l == obj.level)
-                .map(|(_, p)| *p)
-                .unwrap_or(0);
+            let total = world.controller_levels(obj.level);
             out.push_str(",\"progressTotal\":");
             let _ = write!(out, "{}", total);
             out.push_str(",\"ticksToDowngrade\":");
@@ -364,16 +360,16 @@ fn write_object(out: &mut String, obj: &Obj, world: &World) {
             }
             out.push_str(",\"safeModeAvailable\":");
             let _ = write!(out, "{}", obj.safe_mode_available);
-            // 官方 StructureController.safeMode: 绝对到期 tick (未激活为 null)
+            // 官方 StructureController.safeMode: 剩余 tick 数 (engine structures.js: o.safeMode - runtimeData.time)
             out.push_str(",\"safeMode\":");
             if obj.safe_mode_until > world.tick {
-                let _ = write!(out, "{}", obj.safe_mode_until);
+                let _ = write!(out, "{}", obj.safe_mode_until - world.tick);
             } else {
                 out.push_str("null");
             }
             out.push_str(",\"safeModeCooldown\":");
             if obj.safe_mode_cooldown_until > world.tick {
-                let _ = write!(out, "{}", obj.safe_mode_cooldown_until);
+                let _ = write!(out, "{}", obj.safe_mode_cooldown_until - world.tick);
             } else {
                 out.push_str("null");
             }
@@ -707,21 +703,18 @@ fn object_json(obj: &Obj, world: &World) -> Value {
             extra.insert("my".into(), json!(obj.mine));
             extra.insert("level".into(), json!(obj.level));
             extra.insert("progress".into(), json!(obj.progress));
-            let total = constants::CONTROLLER_LEVELS
-                .iter()
-                .find(|(l, _)| *l == obj.level)
-                .map(|(_, p)| *p)
-                .unwrap_or(0);
+            let total = world.controller_levels(obj.level);
             extra.insert("progressTotal".into(), json!(total));
             extra.insert(
                 "ticksToDowngrade".into(),
                 json!(obj.downgrade_time.map(|t| t.saturating_sub(world.tick))),
             );
             extra.insert("safeModeAvailable".into(), json!(obj.safe_mode_available));
+            // 官方语义: safeMode / safeModeCooldown 为剩余 tick 数
             extra.insert(
                 "safeMode".into(),
                 if obj.safe_mode_until > world.tick {
-                    json!(obj.safe_mode_until)
+                    json!(obj.safe_mode_until - world.tick)
                 } else {
                     Value::Null
                 },
@@ -729,7 +722,7 @@ fn object_json(obj: &Obj, world: &World) -> Value {
             extra.insert(
                 "safeModeCooldown".into(),
                 if obj.safe_mode_cooldown_until > world.tick {
-                    json!(obj.safe_mode_cooldown_until)
+                    json!(obj.safe_mode_cooldown_until - world.tick)
                 } else {
                     Value::Null
                 },
