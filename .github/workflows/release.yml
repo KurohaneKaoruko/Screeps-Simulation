@@ -147,7 +147,9 @@ jobs:
         run: |
           for f in dist/platform/*.tgz; do
             echo "▸ npm publish $f"
-            npm publish "$f" --provenance --access public
+            # tarball 发布不带 --provenance (部分 npm 版本对 tarball+provenance 直接 EUSAGE 拒绝;
+            # provenance 由下方主包的目录发布提供即可)
+            npm publish "$f" --access public
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
