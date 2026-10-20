@@ -325,9 +325,9 @@ npm run doctor           # 诊断
 版本号在 `package.json` 与 `Cargo.toml` 各一份, 必须一致:
 
 ```bash
-npm version 0.2.0                  # 自动同步 Cargo.toml (scripts/version-check.mjs --write)
+npm version 0.1.0                  # 自动同步 Cargo.toml (scripts/version-check.mjs --write)
 node scripts/version-check.mjs     # 校验: 版本一致 + optionalDependencies 覆盖全部平台
-git tag v0.2.0 && git push --tags  # 触发 .github/workflows/release.yml
+git tag v0.1.0 && git push --tags  # 触发 .github/workflows/release.yml
 ```
 
 release 工作流: 8 个平台矩阵构建 (strip 后约 30 MB/包) → 上传 GitHub Release (裸二进制 + SHA256SUMS)
