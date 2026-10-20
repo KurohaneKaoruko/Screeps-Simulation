@@ -57,7 +57,9 @@ jobs:
           - { key: linux-x64-musl, os: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: true, experimental: true }
           - { key: linux-arm64-musl, os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: true, experimental: true }
           - { key: darwin-arm64, os: macos-latest, target: aarch64-apple-darwin }
-          - { key: darwin-x64, os: macos-13, target: x86_64-apple-darwin }
+          # Intel macOS runner (macos-13) 已被 GitHub 退役, 队列永远无机器 (等 runner 24h 超时);
+          # 改在 ARM runner 上交叉编译 x86_64: Apple 工具链原生支持, rustc 只需装目标 std
+          - { key: darwin-x64, os: macos-latest, target: x86_64-apple-darwin }
           - { key: win32-x64, os: windows-latest, target: x86_64-pc-windows-msvc }
           - { key: win32-arm64, os: windows-latest, target: aarch64-pc-windows-msvc, experimental: true }
     steps:
