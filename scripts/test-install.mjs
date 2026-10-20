@@ -1,13 +1,12 @@
 // 安装冒烟测试 (发布就绪的最后一道关): 把主包真的 npm pack → 装进临时项目 → 跑用例。
 //
-//   node scripts/test-install.mjs [--keep] [--skip-platform]
+//   node scripts/test-install.mjs [--keep] [--skip-download]
 //
 // 两轮:
-//   A. 源码/无平台包: 只装主包 tgz, 用 SCREEPS_SIM_BIN 指向本仓库二进制 → 验证 CLI + runner + 类型文件可用
-//   B. 平台包: 再把当前平台的 `@screeps-sim/<key>` tgz 装进同一项目, 且**不设** SCREEPS_SIM_BIN
-//      → 验证 optionalDependencies 的解析路径 (注册表安装时的真实形态)
+//   A. 源码形态: 用 SCREEPS_SIM_BIN 指向本仓库二进制 → 验证 CLI + runner + 类型文件可用
+//   B. 安装形态: **不设** SCREEPS_SIM_BIN → 验证自动从 GitHub Release 下载引擎 (SHA256 校验)
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,7 +15,7 @@ import { detectPlatform } from '../runner/platform.mjs'
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..')
 const argv = process.argv.slice(2)
 const keep = argv.includes('--keep')
-const skipPlatform = argv.includes('--skip-platform')
+const skipDownload = argv.includes('--skip-download')
 const exeName = process.platform === 'win32' ? 'screeps-sim.exe' : 'screeps-sim'
 const repoBin = join(root, 'target', 'release', exeName)
 
@@ -47,16 +46,12 @@ const tmp = mkdtempSync(join(tmpdir(), 'screeps-sim-install-'))
 console.log(`安装冒烟: ${pkg.name}@${pkg.version} → ${tmp}`)
 
 try {
-	// ── 打包主包 ──────────────────────────────────────────
+	// ── 打包主包
 	console.log('\n1. npm pack')
-	const packed = npm(['pack', '--ignore-scripts', '--pack-destination', tmp], root)
-	// npm 会把 prepack 脚本输出混进 stdout/stderr, 直接扫描 tmp 目录找 tgz 更可靠
-	let tgz = null
-	try {
-		const files = readdirSync(tmp)
-		tgz = files.find(f => f.startsWith(`${pkg.name.replace(/[/@]/g, '')}-`) && f.endsWith('.tgz'))
-	} catch {}
-	if (!step(packed.status === 0 && !!tgz && existsSync(join(tmp, tgz)), '主包打包成功', packed.out)) {
+	const packed = npm(['pack', '--pack-destination', tmp], root)
+	const tgzName = (packed.stdout || '').trim().split('\n').filter(Boolean).pop()?.trim()
+	const tgz = tgzName ? join(tmp, tgzName) : null
+	if (!step(packed.status === 0 && tgz && existsSync(tgz), 'npm pack 主包', packed.out)) {
 		console.error('=== npm pack 完整输出 ===')
 		console.error(packed.out)
 		console.error('============================')
@@ -123,21 +118,10 @@ if (typeof binaryInfo().platform.platform !== 'string') throw new Error('binaryI
 	step(existsSync(fixture), '陪跑 bundle 存在于 examples/fixtures/min-bot.js')
 	writeFileSync(join(proj, 'bot.js'), readFileSync(fixture, 'utf8'))
 
-	// ── A. 只装主包 (SCREEPS_SIM_BIN 指本仓库二进制) ──────
-	console.log('\n2. 只装主包 (源码安装形态: SCREEPS_SIM_BIN)')
-	const install = npm(
-		['install', '--ignore-scripts', '--no-audit', '--no-fund', '--omit=optional', join(tmp, tgz)],
-		proj,
-		{ SCREEPS_SIM_BIN: repoBin }
-	)
-	if (!step(install.status === 0, 'npm install 主包', install.out)) process.exit(1)
-	const installed = join(proj, 'node_modules', pkg.name)
-	step(existsSync(join(installed, 'index.mjs')) && existsSync(join(installed, 'index.d.ts')), '主入口与类型文件已安装')
-	step(
-		existsSync(join(proj, 'node_modules', '.bin', 'screeps-sim')) ||
-			existsSync(join(proj, 'node_modules', '.bin', 'screeps-sim.cmd')),
-		'bin 链接已建立 (npx screeps-sim)'
-	)
+	// ── A. 源码形态 (SCREEPS_SIM_BIN 指本仓库二进制) ──────
+	console.log('\n2. 安装主包 (源码形态: SCREEPS_SIM_BIN 指向本仓库二进制)')
+	const install = npm(['install', '--ignore-scripts', '--no-audit', '--no-fund', tgz], proj, {})
+	step(install.status === 0, 'npm install 主包 tgz', install.out)
 
 	const binName = process.platform === 'win32' ? 'screeps-sim.cmd' : 'screeps-sim'
 	const binPath = join(proj, 'node_modules', '.bin', binName)
@@ -160,7 +144,7 @@ if (typeof binaryInfo().platform.platform !== 'string') throw new Error('binaryI
 	const run1 = runCli(['test'], { SCREEPS_SIM_BIN: repoBin })
 	step(run1.status === 0, 'screeps-sim test (含 .sim.ts + 零依赖用例 + bot bundle)', `${run1.stdout}\n${run1.stderr}`)
 
-	// 缺二进制时的报错必须可执行 (含平台包名), 而不是裸栈
+	// 缺二进制时的报错必须可执行 (指向下载/环境变量), 而不是裸栈
 	// SCREEPS_SIM_BIN 指错 → 立刻报配置错误 (不能悄悄回退去编译几分钟)
 	const badEnv = runCli(['doctor'], { SCREEPS_SIM_BIN: join(proj, 'no-such-binary') })
 	step(
@@ -175,47 +159,23 @@ if (typeof binaryInfo().platform.platform !== 'string') throw new Error('binaryI
 		`${badRun.stdout}${badRun.stderr}`
 	)
 
-	// ── B. 装平台包, 不给 SCREEPS_SIM_BIN ─────────────────
-	if (skipPlatform || !plat.supported) {
-		console.log(`\n3. 跳过平台包验证${plat.supported ? ' (--skip-platform)' : ` (当前平台 ${plat.platform}/${plat.arch} 无预编译包)`}`)
+	// ── B. 安装形态: 不给 SCREEPS_SIM_BIN → 自动从 GitHub Release 下载 ──
+	if (skipDownload || !plat.supported) {
+		console.log(`\n3. 跳过 Release 下载验证${plat.supported ? ' (--skip-download)' : ` (当前平台 ${plat.platform}/${plat.arch} 无预编译引擎)`}`)
 	} else {
-		console.log(`\n3. 平台包安装 (${plat.packageName})`)
-		const manifestPath = join(root, 'dist', 'platform', `${plat.key}.json`)
-		let platformTgz = null
-		if (existsSync(manifestPath)) {
-			const m = JSON.parse(readFileSync(manifestPath, 'utf8'))
-			// 清单是旧版本 (改过 package.json 后没重新打包) 或 tgz 丢失就当没有, 走下面的重建
-			if (m.version === pkg.version && existsSync(join(root, m.tgz))) platformTgz = join(root, m.tgz)
-		}
-		if (!platformTgz) {
-			const built = spawnSync(
-				process.execPath,
-				[join(root, 'scripts', 'build-platform-pkg.mjs'), '--skip-build'],
-				{ cwd: root, encoding: 'utf8' }
-			)
-			step(built.status === 0, `构建平台包 ${plat.key}`, `${built.stdout}${built.stderr}`)
-			if (built.status === 0) {
-				const m = JSON.parse(readFileSync(manifestPath, 'utf8'))
-				platformTgz = join(root, m.tgz)
-			}
-		}
-		step(platformTgz !== null && existsSync(platformTgz), `平台包 tgz 就绪 (${platformTgz})`)
-
-		if (existsSync(platformTgz)) {
-			// 直接装成顶层依赖 (模拟 npm 把 optionalDependencies 提升到项目 node_modules 的形态)
-			const pinstall = npm(['install', '--ignore-scripts', '--no-audit', '--no-fund', platformTgz], proj, {})
-			step(pinstall.status === 0, 'npm install 平台包', pinstall.out)
-
-			const doc2 = runCli(['doctor'], { SCREEPS_SIM_BIN: '' })
-			step(
-				doc2.status === 0 && doc2.stdout.includes(plat.packageName) && !doc2.stdout.includes('环境变量'),
-				`doctor 命中平台包 ${plat.packageName} (未设 SCREEPS_SIM_BIN)`,
-				doc2.stdout
-			)
-
-			const run2 = runCli(['test'], { SCREEPS_SIM_BIN: '' })
-			step(run2.status === 0, 'screeps-sim test (平台包二进制)', `${run2.stdout}\n${run2.stderr}`)
-		}
+		console.log(`\n3. 安装形态: 无 SCREEPS_SIM_BIN, 自动从 GitHub Release 下载引擎 (${plat.key})`)
+		// doctor 是纯查询 (不下载不构建): 无二进制时应报「未找到」且修复提示指向 Release 下载
+		const dl = runCli(['doctor'], {
+			SCREEPS_SIM_BIN: '',
+			XDG_CACHE_HOME: join(tmp, 'cache'),
+		})
+		step(
+			dl.status === 1 && dl.stdout.includes('GitHub Release 下载'),
+			'doctor (纯查询) 报未找到且修复提示指向 Release 下载',
+			dl.stdout
+		)
+		const run2 = runCli(['test'], { SCREEPS_SIM_BIN: '', XDG_CACHE_HOME: join(tmp, 'cache') })
+		step(run2.status === 0, 'screeps-sim test (自动从 Release 下载引擎后运行)', `${run2.stdout}\n${run2.stderr}`)
 	}
 } finally {
 	if (keep) console.log(`\n(保留临时目录: ${tmp})`)

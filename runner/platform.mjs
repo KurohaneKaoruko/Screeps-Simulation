@@ -1,11 +1,8 @@
-// 平台探测: 把 (os, cpu, libc) 映射到平台包名, 供二进制定位 / 平台包构建共用。
+// 平台探测: 把 (os, cpu, libc) 映射到平台 key, 供二进制定位 / Release 资产构建共用。
 //
-// 平台包约定: `@screeps-sim/<key>` (key = `<os>-<cpu>[-<libc>]`), 每个包只含一个二进制,
-// 靠 package.json 的 os/cpu/libc 字段让 npm 自动只装当前平台 —— 安装主包时零 Rust 工具链。
+// 平台 key 约定: `<os>-<cpu>[-<libc>]`, 对应 GitHub Release 资产 `screeps-sim-<key>-<版本>`。
+// runner 首次运行时按当前平台 key 自动下载对应资产 (SHA256 校验) —— 安装主包时零 Rust 工具链。
 import { existsSync } from 'node:fs'
-
-/// npm scope: 发布前必须改成自己拥有的 scope (与主包 screeps-sim 无关, 需单独注册)
-export const SCOPE = ''
 
 /// 全部发布目标 (CI 矩阵 / 平台包 optionalDependencies 的唯一真相源)
 export const TARGETS = [

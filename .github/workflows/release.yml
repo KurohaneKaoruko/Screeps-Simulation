@@ -1,8 +1,9 @@
 name: Release
 
 # 打 tag 发布: git tag v0.1.0 && git push --tags
-# 流程: 校验版本 → 各平台构建二进制 (矩阵) → 汇总上传 GitHub Release → 依次发布平台包与主包到 npm。
-# 必需 secret: NPM_TOKEN (npm 发布用); 平台 scope 见 runner/platform.mjs 的 SCOPE。
+# 流程: 校验版本 → 各平台构建二进制 (矩阵) → 汇总上传 GitHub Release (含 SHA256SUMS)。
+# 分发只走 GitHub Release: JS runner (npm i screeps-sim 或 git 安装) 首次运行时自动下载
+# 当前平台的引擎二进制 (SHA256 校验), 不再发布 npm 平台包。
 on:
   push:
     tags: ['v*']
@@ -15,7 +16,6 @@ on:
 
 permissions:
   contents: write # 建 Release / 传产物
-  id-token: write # npm provenance
 
 jobs:
   verify:
@@ -34,14 +34,14 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "push" ]; then
-            test "$GITHUB_REF_NAME" = "v$VERSION" || { echo "tag $GITHUB_REF_NAME 与版本 $VERSION 不一致"; exit 1; }
+            test "$GITHUB_REF_NAME" = "v$VERSION"
           elif [ -n "${{ inputs.version }}" ] && [ "${{ inputs.version }}" != "$VERSION" ]; then
             echo "输入版本 ${{ inputs.version }} 与仓库版本 $VERSION 不一致"; exit 1
           fi
           echo "版本 $VERSION ✓"
 
   platforms:
-    name: 平台包 ${{ matrix.key }}
+    name: 平台构建 ${{ matrix.key }}
     needs: verify
     runs-on: ${{ matrix.os }}
     # musl / win-arm64 依赖对应平台的 V8 预编译库, 缺失时跳过该目标而不拖垮整体发布
@@ -75,7 +75,7 @@ jobs:
           key: release-${{ matrix.key }}
       - uses: taiki-e/install-action@cross # 交叉编译工具链 (仅 linux 交叉目标用得到)
         if: ${{ matrix.cross == true }}
-      - name: 构建平台包 (strip 后打包 + 清单)
+      - name: 构建引擎 (strip 后的裸二进制)
         id: build
         shell: bash
         run: |
@@ -85,13 +85,13 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: steps.build.outputs.success == 'true'
         with:
-          name: pkg-${{ matrix.key }}
+          name: bin-${{ matrix.key }}
           path: |
-            dist/platform/*.tgz
+            dist/platform/screeps-sim-*
             dist/platform/*.json
 
   release:
-    name: GitHub Release + npm
+    name: GitHub Release
     needs: [verify, platforms]
     runs-on: ubuntu-latest
     steps:
@@ -99,11 +99,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
       - uses: actions/download-artifact@v4
         with:
           path: dist/platform
-          pattern: pkg-*
+          pattern: bin-*
           merge-multiple: true
 
       - name: 校验产物
@@ -111,28 +110,21 @@ jobs:
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
           node scripts/version-check.mjs
-          ls -lh dist/platform/*.tgz
+          ls -lh dist/platform/screeps-sim-*
+          # 各平台清单齐全 (experimental 目标可能缺席, 按 .json 实际到位的算)
           for m in dist/platform/*.json; do
-            node -e "const m=require('./$m'); console.log('  ·', m.key, m.version, m.sizeBytes, m.tgz)"
+            node -e "const m=require('./$m'); console.log('  ·', m.key, m.version, m.sizeBytes, m.asset)"
           done
 
-      # Release 资产: 从平台包 tarball 里抽出裸二进制 (不用装 npm 也能下载即用)
-      - name: 抽出二进制
-        env:
-          VERSION: ${{ needs.verify.outputs.version }}
+      # SHA256SUMS 资产: runner 下载二进制后按它做完整性校验
+      - name: 生成 SHA256SUMS
+        working-directory: dist/platform
         run: |
-          mkdir -p release-assets work
-          for m in dist/platform/*.json; do
-            key=$(node -p "require('./$m').key")
-            tgz=$(node -p "require('./$m').tgz")
-            rm -rf work/* && tar -xzf "$tgz" -C work
-            bin=$(find work/package/bin -maxdepth 1 -type f | head -1)
-            mv "$bin" "release-assets/screeps-sim-${key}-${VERSION}"
-            chmod +x "release-assets/screeps-sim-${key}-${VERSION}"
-          done
-          rm -rf work
-          (cd release-assets && sha256sum * > SHA256SUMS)
-          ls -lh release-assets
+          for f in screeps-sim-*; do
+            # 去掉 windows 的 .exe 后缀统一资产名口径 (runner 下载时补回)
+            echo "$(sha256sum "$f")"
+          done > SHA256SUMS
+          cat SHA256SUMS
 
       - name: 上传 GitHub Release
         uses: softprops/action-gh-release@v2
@@ -140,22 +132,6 @@ jobs:
           tag_name: v${{ needs.verify.outputs.version }}
           name: screeps-sim ${{ needs.verify.outputs.version }}
           generate_release_notes: true
-          files: release-assets/*
-
-      # 顺序要紧: 平台包先发布, 主包的 optionalDependencies 才解析得到
-      # 单包失败不中断 (重跑时已发过的同版本会 E409, npm 垃圾检测误伤会 E403):
-      # 平台包缺一个只影响该平台 npm 安装 (GitHub Release 二进制兜底), 主包必须成功
-      - name: 发布平台包
-        run: |
-          for f in dist/platform/*.tgz; do
-            echo "▸ npm publish $f"
-            # tarball 发布不带 --provenance (部分 npm 版本对 tarball+provenance 直接 EUSAGE 拒绝)
-            npm publish "$f" --access public || echo "::warning::发布失败 (跳过): $f"
-          done
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: 发布主包
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          files: |
+            dist/platform/screeps-sim-*
+            dist/platform/SHA256SUMS

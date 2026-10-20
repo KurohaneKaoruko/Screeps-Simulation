@@ -1,7 +1,7 @@
 {
 	"name": "screeps-sim",
 	"version": "0.1.0",
-	"description": "Screeps 本地高速模拟器: Rust 结算引擎 + 内嵌 V8, .sim.ts 用例驱动 (零运行时依赖, 免 Rust 工具链)",
+	"description": "Screeps 本地高速模拟器: Rust 结算引擎 + 内嵌 V8, .sim.ts 用例驱动 (零运行时依赖, 引擎二进制从 GitHub Release 自动获取)",
 	"type": "module",
 	"license": "ISC",
 	"author": "KurohaneKaoruko <kurohanekaoruko@gmail.com>",
@@ -51,20 +51,9 @@
 	"scripts": {
 		"build": "cargo build --release",
 		"test": "node runner/selftest.mjs && node scripts/version-check.mjs && node bin/screeps-sim.mjs test examples/smoke.sim.ts --bundle examples/fixtures/min-bot.js",
-		"test:install": "node scripts/test-install.mjs",
 		"doctor": "node bin/screeps-sim.mjs doctor",
 		"check": "node bin/screeps-sim.mjs check",
 		"prepack": "node scripts/version-check.mjs"
-	},
-	"optionalDependencies": {
-		"screeps-sim-linux-x64-gnu": "0.1.0",
-		"screeps-sim-linux-x64-musl": "0.1.0",
-		"screeps-sim-linux-arm64-gnu": "0.1.0",
-		"screeps-sim-linux-arm64-musl": "0.1.0",
-		"screeps-sim-darwin-x64": "0.1.0",
-		"screeps-sim-darwin-arm64": "0.1.0",
-		"screeps-sim-win32-x64": "0.1.0",
-		"screeps-sim-win32-arm64": "0.1.0"
 	},
 	"engines": {
 		"node": ">=22.6"

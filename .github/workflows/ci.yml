@@ -39,14 +39,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # Windows 冒烟会额外验证平台包解析 (当前平台打出来的 tgz), 故不跳过
+      # Windows 冒烟走 CMD 垫片路径, 故不跳过
       - name: 版本/依赖一致性
         run: node scripts/version-check.mjs
       - name: 构建引擎
         run: cargo build --release
       - name: runner 自测 + 冒烟用例
         run: node runner/selftest.mjs && node bin/screeps-sim.mjs test examples/smoke.sim.ts --bundle examples/fixtures/min-bot.js
-      - name: 安装冒烟 (打包 → 装进临时项目 → 跑用例, 含平台包)
-        run: node scripts/test-install.mjs
+      # A 轮 (SCREEPS_SIM_BIN) 常驻; B 轮 (GitHub Release 自动下载) 仅发布分支跑, 避免每次 CI 打 Release API
+      - name: 安装冒烟 (打包 → 装进临时项目 → 跑用例, 源码形态)
+        run: node scripts/test-install.mjs --skip-download
       - name: doctor 冒烟
         run: node bin/screeps-sim.mjs doctor

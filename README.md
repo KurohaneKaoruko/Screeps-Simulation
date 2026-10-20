@@ -1,13 +1,13 @@
 # Screeps-Simulation
 
 [![CI](https://github.com/KurohaneKaoruko/Screeps-Simulation/actions/workflows/ci.yml/badge.svg)](https://github.com/KurohaneKaoruko/Screeps-Simulation/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/screeps-sim)](https://www.npmjs.com/package/screeps-sim)
+[![release](https://img.shields.io/github/v/release/KurohaneKaoruko/Screeps-Simulation)](https://github.com/KurohaneKaoruko/Screeps-Simulation/releases)
 [![license](https://img.shields.io/badge/license-ISC-blue)](./LICENSE)
 
 本地高速模拟器：Rust 结算引擎 + 内嵌 V8（deno_core）运行 bot 的真实 bundle。
 用于在开发期以数千 tick/秒的速度验证 bot 行为，替代"上传到服务器等 4 万 tick"的验证回路。
 
-作为 npm 包安装后**免 Rust 工具链**（各平台预编译引擎随包分发）：
+作为 npm 包安装后**免 Rust 工具链**（引擎二进制首次运行时自动从 GitHub Release 下载）:
 
 ```bash
 npm i -D screeps-sim
@@ -224,7 +224,7 @@ console.log(report.rclTimeline, report.asserts)
 本仓库本身就是一个 npm 包 (`screeps-sim`, 零运行时依赖), 在任意 bot 项目里:
 
 ```bash
-# 从 npm 注册表安装 (推荐): 自动带上当前平台的预编译引擎, 不需要 Rust 工具链
+# 从 npm 安装 runner (推荐): 引擎二进制首次运行时自动从 GitHub Release 下载 (带 SHA256 校验)
 npm i -D screeps-sim
 
 # 本地路径安装 (开发期: 源码改动即时生效, 需要 Rust 工具链)
@@ -234,24 +234,28 @@ npm i -D path/to/Screeps-Simulation
 npm i -D github.com:KurohaneKaoruko/Screeps-Simulation
 ```
 
+不用 npm 也可以: 直接从 [GitHub Releases](https://github.com/KurohaneKaoruko/Screeps-Simulation/releases)
+下载当前平台的裸二进制 (带 `SHA256SUMS`), 用 `SCREEPS_SIM_BIN` 指向它即可。
+
 ### 平台支持
 
-预编译引擎按平台拆成独立的 npm 包, 作为 `optionalDependencies` 随主包自动安装,
-npm 按每个包的 `os`/`cpu`/`libc` 字段只安装当前平台, 其余静默跳过:
+预编译引擎按平台作为 GitHub Release 资产分发 (`screeps-sim-<平台>-<版本>`,
+`SHA256SUMS` 供完整性校验)。runner 首次运行时自动下载当前平台的那份并缓存
+(`$XDG_CACHE_HOME/screeps-sim/`, 默认 `~/.cache/screeps-sim/`), 跨项目共享:
 
-| 平台 | 平台包 |
+| 平台 | Release 资产 |
 |---|---|
-| Linux x64 (glibc) | `@screeps-sim/linux-x64-gnu` |
-| Linux x64 (Alpine 等 musl) | `@screeps-sim/linux-x64-musl` |
-| Linux arm64 (glibc) | `@screeps-sim/linux-arm64-gnu` |
-| Linux arm64 (musl) | `@screeps-sim/linux-arm64-musl` |
-| macOS Intel | `@screeps-sim/darwin-x64` |
-| macOS Apple Silicon | `@screeps-sim/darwin-arm64` |
-| Windows x64 | `@screeps-sim/win32-x64` |
-| Windows arm64 | `@screeps-sim/win32-arm64` |
+| Linux x64 (glibc) | `screeps-sim-linux-x64-gnu-*` |
+| Linux x64 (Alpine 等 musl) | `screeps-sim-linux-x64-musl-*` |
+| Linux arm64 (glibc) | `screeps-sim-linux-arm64-gnu-*` |
+| Linux arm64 (musl) | `screeps-sim-linux-arm64-musl-*` (实验) |
+| macOS Intel | `screeps-sim-darwin-x64-*` |
+| macOS Apple Silicon | `screeps-sim-darwin-arm64-*` |
+| Windows x64 | `screeps-sim-win32-x64-*.exe` |
+| Windows arm64 | `screeps-sim-win32-arm64-*.exe` (实验) |
 
-节点 ≥ 22.6 (`.sim.ts` 需要原生 TS 加载)。其他平台 (如 FreeBSD) 没有预编译包,
-装完后首次运行会回退到本地 `cargo build --release`。
+节点 ≥ 22.6 (`.sim.ts` 需要原生 TS 加载)。其他平台 (如 FreeBSD) 没有预编译引擎,
+首次运行会回退到本地 `cargo build --release`。
 
 ### 排查: doctor
 
@@ -267,7 +271,7 @@ npx screeps-sim version   # npm 包版本 + 引擎版本
 
 1. `SCREEPS_SIM_BIN` 环境变量 (显式指定, 优先级最高)
 2. 本仓库源码树的 `target/release/screeps-sim` (源码安装时的本地构建)
-3. 平台包 `@screeps-sim/<平台>` 里的二进制 ← 从 npm 安装走这条
+3. 全局缓存 / 包内 `vendor/` ← 从 GitHub Release 自动下载走这条
 4. 自动 `cargo build --release` (需要 Rust 工具链; 仅源码安装可用)
 
 bot 项目一次性配置 (`package.json`):
@@ -312,13 +316,12 @@ export const myCase = { name: 'boot', rooms: [/* ... */] }
 npm install
 npm run build            # cargo build --release
 npm test                 # runner 自测 + 版本校验 + smoke 用例 (需引擎已构建)
-npm run test:install     # 安装冒烟: 打包 → 装进临时项目 → 跑用例 (含平台包路径)
 npm run doctor           # 诊断
 ```
 
 - git / 路径安装不含预编译二进制, 首次运行会 `cargo build --release` (约 1 分钟);
   想跳过编译就把已构建的二进制用 `SCREEPS_SIM_BIN` 指过去。
-- 改了 Rust 代码后 `npm run build` 即可 —— 源码树的 `target/release` 优先于平台包 (见上面的解析顺序)。
+- 改了 Rust 代码后 `npm run build` 即可 —— 源码树的 `target/release` 优先于下载缓存 (见上面的解析顺序)。
 
 ### 发布
 
@@ -326,21 +329,21 @@ npm run doctor           # 诊断
 
 ```bash
 npm version 0.1.0                  # 自动同步 Cargo.toml (scripts/version-check.mjs --write)
-node scripts/version-check.mjs     # 校验: 版本一致 + optionalDependencies 覆盖全部平台
+node scripts/version-check.mjs     # 校验: 版本一致
 git tag v0.1.0 && git push --tags  # 触发 .github/workflows/release.yml
 ```
 
-release 工作流: 8 个平台矩阵构建 (strip 后约 30 MB/包) → 上传 GitHub Release (裸二进制 + SHA256SUMS)
-→ 依次 `npm publish` 平台包与主包 (带 provenance)。需要仓库 secret `NPM_TOKEN`;
-平台 scope 定义在 `runner/platform.mjs` 的 `SCOPE` (发布前改成自己拥有的 scope)。
+release 工作流: 8 个平台矩阵构建 (strip 后约 30 MB/二进制) → 汇总上传 GitHub Release
+(裸二进制 + SHA256SUMS)。分发只走 GitHub Release, 不发布 npm —— runner 首次运行时
+按 `package.json` 版本从 Release 自动下载当前平台引擎。
 
-本地单独构建某个平台的包:
+本地单独构建某个平台的资产:
 
 ```bash
 node scripts/build-platform-pkg.mjs                                  # 当前平台
 node scripts/build-platform-pkg.mjs --skip-build                     # 复用已有 target/ 产物
 node scripts/build-platform-pkg.mjs --key linux-arm64-gnu --cross    # 交叉编译 (需 cross)
-# → dist/platform/*.tgz + dist/platform/<key>.json 清单
+# → dist/platform/screeps-sim-<key>-<版本> + dist/platform/<key>.json 清单
 ```
 
 ## 直跑单个场景 (CLI)
@@ -494,14 +497,14 @@ src/
   main.rs        CLI (含 stdin 场景 / stdout JSON 报告的管道协议)
 bin/             screeps-sim 命令入口 (test 子命令 → runner, 其余透传引擎)
 runner/          .sim.ts 测试 runner (发现/加载/运行/汇总, 零依赖)
-  platform.mjs   平台探测: (os, cpu, libc) → 平台包名 (二进制定位与发布共用)
-  binary.mjs     引擎二进制解析 (env → 源码构建 → 平台包 → cargo build)
+  platform.mjs   平台探测: (os, cpu, libc) → 平台 key (二进制定位与发布共用)
+  binary.mjs     引擎二进制解析 (env → 源码构建 → Release 下载缓存 → cargo build)
   doctor.mjs     诊断输出 (doctor 子命令 / doctorReport API)
 index.mjs        编程 API (defineSim / runSim / binaryInfo / doctorReport)
 index.d.ts       .sim.ts 用例的完整类型定义
 examples/        示例用例 (smoke 自包含可跑) + fixtures/min-bot.js 陪跑 bundle
 scenarios/       wire JSON 场景 (--scenario 直跑用)
-scripts/         打包发布工具 (version-check / build-platform-pkg / test-install)
+scripts/         发布工具 (version-check / build-platform-pkg / test-install)
 tests/           回归测试 (engine_rules / shim_apis / cpu_watchdog / memory_segments / framework)
-.github/workflows/  ci.yml (三平台回归 + 安装冒烟) · release.yml (平台包矩阵 + npm 发布)
+.github/workflows/  ci.yml (三平台回归) · release.yml (平台构建矩阵 + GitHub Release)
 ```
