@@ -7,7 +7,6 @@
 //! terrain 不可变: 只在 isolate 新建/重置后的首个快照携带 (`include_terrain`),
 //! shim 的 terrainCache 解析一次后常驻, 后续 tick 不再重发 20KB/房。
 
-use crate::engine::constants;
 use crate::engine::objects::{Obj, Store};
 use crate::engine::world::World;
 use serde_json::{json, Map, Value};
