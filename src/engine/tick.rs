@@ -624,19 +624,32 @@ fn apply_crossings(world: &mut World, crossings: &mut Vec<(String, u64)>) {
         let Some(room) = world.rooms.get(&room_name) else { continue };
         let Some(obj) = room.objects.get(&id) else { continue };
         let Some((rx, ry)) = room_xy(&room_name) else { continue };
-        let (nx, ny, nrx, nry) = if obj.x == 0 {
-            (49, obj.y, rx - 1, ry)
-        } else if obj.x == ROOM_SIZE as u8 - 1 {
-            (0, obj.y, rx + 1, ry)
-        } else if obj.y == 0 {
-            (obj.x, 49, rx, ry - 1)
-        } else {
-            (obj.x, 0, rx, ry + 1)
+        // 候选穿越: 边缘格可穿的每个方向 (角格有两个)。官方按 move 意图方向定向
+        // 穿越; 本引擎意图不携带出界方向, 以「目标房存在」消歧——角格两侧房都
+        // 存在时优先维持旧序 (x 优先), 只有一侧存在时穿存在的一侧, 与官方行为
+        // 对齐 (否则角格 creep 被锚定在不存在的邻房上永久卡死)。
+        let max = ROOM_SIZE as u8 - 1;
+        let mut candidates: Vec<(u8, u8, i64, i64)> = Vec::new();
+        if obj.x == 0 {
+            candidates.push((max, obj.y, rx - 1, ry));
+        }
+        if obj.x == max {
+            candidates.push((0, obj.y, rx + 1, ry));
+        }
+        if obj.y == 0 {
+            candidates.push((obj.x, max, rx, ry - 1));
+        }
+        if obj.y == max {
+            candidates.push((obj.x, 0, rx, ry + 1));
+        }
+        let chosen = candidates
+            .iter()
+            .find(|&&(_, _, nrx, nry)| world.rooms.contains_key(&xy_name(nrx, nry)))
+            .copied();
+        let Some((nx, ny, nrx, nry)) = chosen else {
+            continue; // 有限世界: 无相邻房间则停留在边缘格
         };
         let target_name = xy_name(nrx, nry);
-        if !world.rooms.contains_key(&target_name) {
-            continue; // 有限世界: 无相邻房间则停留在边缘格
-        }
         let mut obj = world.rooms.get_mut(&room_name).unwrap().objects.remove(&id).unwrap();
         obj.x = nx;
         obj.y = ny;
