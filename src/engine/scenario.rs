@@ -280,6 +280,9 @@ pub struct Scenario {
     /// 缺省 = 官服常量表 (200/45k/135k/405k/1215k/3645k/10935k)
     #[serde(default, rename = "controllerLevels")]
     pub controller_levels: Option<Vec<u32>>,
+    /// 初始 GCL 累计点数 (冲级 harness 模拟既有账号; 缺省 0 = 全新账号)
+    #[serde(default)]
+    pub gcl: u64,
 }
 
 fn default_true() -> bool {
@@ -677,6 +680,10 @@ pub fn build_world(scenario: &Scenario) -> Result<World, String> {
         if !levels.is_empty() && levels.len() <= 8 {
             world.controller_levels_override = Some(levels.clone());
         }
+    }
+    // 既有账号的初始 GCL 点数 (bot 按 Game.gcl.level 选择配置)
+    if scenario.gcl > 0 {
+        world.gcl_progress = scenario.gcl;
     }
     // 市场: 初始 credits 与外部订单 (seq 先分给外部订单, 本玩家订单从其后开始)
     if let Some(m) = &scenario.market {

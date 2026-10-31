@@ -328,7 +328,9 @@ export async function runTests(opts) {
 	const cwd = process.cwd()
 	const cfg = readProjectConfig(cwd)
 	const patterns = opts.patterns.length ? opts.patterns : (cfg.include ?? ['.'])
-	const bundleOpt = opts.bundle ?? cfg.bundle
+	const bundleOpt = opts.bundle
+	// (显示口径: 显式 --bundle; 用例级 bundle 字段由各用例解析, 兜底 cfg.bundle 只作提示)
+	const bundleDisplay = bundleOpt ?? cfg.bundle
 	const files = discoverSimFiles(patterns, cwd)
 	if (!files.length) {
 		throw new Error(
@@ -361,7 +363,9 @@ export async function runTests(opts) {
 	// --no-bundle-check 或 package.json "screeps-sim".bundleCheck = false: 预检错误降级为警告, 不再判用例失败
 	// (误报时的逃生口; 真炸的调用照样会在运行时以 noErrors 断言暴露)。
 	const bundleCheck = opts.bundleCheck !== false && cfg.bundleCheck !== false
-	const { perBundle, perCase } = preflightBundles(allCases, { ...opts, bundle: bundleOpt }, cfg)
+	// 预检/运行的 bundle 解析以 resolveBundle 为准 (--bundle > 用例 bundle 字段 > package.json
+	// 兜底)。这里只传显式 --bundle, cfg 兜底若混入 opts.bundle 会覆盖用例级 bundle 字段。
+	const { perBundle, perCase } = preflightBundles(allCases, opts, cfg)
 	if (!bundleCheck) perCase.clear()
 	for (const [bundle, diag] of perBundle) {
 		const shown = bundleCheck ? diag?.warnings ?? [] : [...(diag?.errors ?? []), ...(diag?.warnings ?? [])]
@@ -375,7 +379,7 @@ export async function runTests(opts) {
 
 	console.log(
 		c.bold(`screeps-sim test  ·  ${allCases.length} 个用例`) +
-			c.dim(`  ·  bundle: ${bundleOpt ?? '自动发现'}`)
+			c.dim(`  ·  bundle: ${bundleDisplay ?? '自动发现'}${!bundleOpt && cfg.bundle ? ' (兜底)' : ''}`)
 	)
 	let skipped = 0
 	for (const simCase of allCases) {
@@ -394,7 +398,8 @@ export async function runTests(opts) {
 	}
 	const activeCases = allCases.filter((cse) => !cse.sim.skip)
 	const results = new Map()
-	const runOpts = { ...opts, bundle: bundleOpt }
+	// 同上: opts.bundle 仅承载显式 --bundle, 不混入 cfg 兜底 (用例级 bundle 字段优先于兜底)
+	const runOpts = { ...opts }
 	if (opts.jobs <= 1) {
 		for (const simCase of activeCases) {
 			results.set(simCase, await runCase(bin, simCase, runOpts, cfg))
@@ -594,7 +599,7 @@ export async function runWatch(opts) {
 		for (const file of files) {
 			try {
 				for (const simCase of await loadCases(file)) {
-					const b = resolveBundle({ ...opts, bundle: opts.bundle ?? cfg.bundle }, simCase, cfg)
+					const b = resolveBundle(opts, simCase, cfg)
 					if (b) targets.add(b)
 				}
 			} catch {
