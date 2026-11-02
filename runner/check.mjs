@@ -96,6 +96,7 @@ const ASSERT_KINDS = new Set([
 	'cpuAvgBelow',
 	'cpuP95Below',
 	'noErrors',
+	'memoryPath',
 ])
 
 // ── 诊断结构 ──────────────────────────────────────────────
@@ -432,6 +433,12 @@ export function checkScenario(sim) {
 		}
 		if (a.kind === 'creepCountAtLeast' && (!Number.isInteger(a.value) || a.value < 1)) {
 			err(`${path}.value`, `必须 ≥ 1 (当前 ${a.value})`)
+		}
+		if (a.kind === 'memoryPath') {
+			if (!Array.isArray(a.path) || a.path.length === 0 || !a.path.every((k) => typeof k === 'string')) {
+				err(`${path}.path`, `必须为非空字符串数组`)
+			}
+			if (typeof a.exists !== 'boolean') err(`${path}.exists`, `必须为 boolean`)
 		}
 	}
 	if (!sim.skip && (!Array.isArray(sim.asserts) || sim.asserts.length === 0)) {

@@ -139,6 +139,7 @@ export type AssertSpec =
 	| { kind: 'cpuAvgBelow'; value: number }
 	| { kind: 'cpuP95Below'; value: number }
 	| { kind: 'noErrors' }
+	| { kind: 'memoryPath'; path: string[]; exists: boolean }
 
 export interface CpuSpec {
 	/** 每 tick CPU 上限 (ms), 默认 100 */

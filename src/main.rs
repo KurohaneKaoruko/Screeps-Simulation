@@ -9,7 +9,7 @@
 
 use screeps_sim::engine::cpu::CpuState;
 use screeps_sim::engine::intents::IntentList;
-use screeps_sim::engine::metrics::{evaluate_asserts, MetricsCollector, TickMetrics};
+use screeps_sim::engine::metrics::{evaluate_asserts_with_memory, MetricsCollector, TickMetrics};
 use screeps_sim::engine::movement::Movement;
 use screeps_sim::engine::scenario::Scenario;
 use screeps_sim::engine::snapshot::{build_snapshot, SnapshotOptions};
@@ -625,8 +625,10 @@ async fn async_main() {
     let actual_ticks = run;
     let tps = actual_ticks as f64 / elapsed.as_secs_f64().max(1e-9);
 
-    // ── 断言先结算 (结果并入 JSON 报告, 供上层 runner 消费) ──
-    let assert_results = evaluate_asserts(&world, &metrics, &scenario.asserts);
+    // ── 断言先结算 (结果并入 JSON 报告, 供上层 runner 消费;
+    //    memoryPath 断言需 Memory 终态) ──
+    let assert_results =
+        evaluate_asserts_with_memory(&world, &metrics, &scenario.asserts, Some(&memory_json));
 
     // ── 落盘输出 (先于人类报告; 失败时也能拿到数据) ──
     if let Some(path) = &dump_memory_path {
@@ -796,6 +798,7 @@ fn assert_kind(spec: &screeps_sim::engine::scenario::AssertSpec) -> &'static str
         AssertSpec::CpuAvgBelow { .. } => "cpuAvgBelow",
         AssertSpec::CpuP95Below { .. } => "cpuP95Below",
         AssertSpec::NoErrors => "noErrors",
+        AssertSpec::MemoryPath { .. } => "memoryPath",
     }
 }
 

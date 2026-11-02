@@ -560,7 +560,9 @@ pub fn prime_world(world: &mut World) {
         for o in room.objects.values_mut() {
             match o.obj_type.as_str() {
                 "creep" => {
-                    if !o.spawning {
+                    // 场景 ttl 已定的单位不覆盖 (enemy 注入需 >1500 寿命时被抹平,
+                    // 威胁窗口验证直接失真); 仅补全缺省寿命
+                    if !o.spawning && o.age_time.is_none() {
                         let life = if o.body.iter().any(|p| p.part_type == "claim") {
                             constants::CREEP_CLAIM_LIFE_TIME
                         } else {

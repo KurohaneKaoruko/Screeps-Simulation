@@ -68,11 +68,46 @@ pub fn evaluate_asserts(
     metrics: &MetricsCollector,
     asserts: &[AssertSpec],
 ) -> Vec<AssertResult> {
+    evaluate_asserts_with_memory(world, metrics, asserts, None)
+}
+
+/// 带 Memory 终态的断言结算 (memoryPath 断言消费; 主循环 dump 前调用)
+pub fn evaluate_asserts_with_memory(
+    world: &World,
+    metrics: &MetricsCollector,
+    asserts: &[AssertSpec],
+    memory_json: Option<&str>,
+) -> Vec<AssertResult> {
+    let memory_value: Option<serde_json::Value> =
+        memory_json.and_then(|s| serde_json::from_str(s).ok());
     let last = metrics.history.last();
     asserts
         .iter()
         .map(|spec| {
             let (passed, detail) = match spec {
+                AssertSpec::MemoryPath { path, exists } => {
+                    let Some(mem) = memory_value.as_ref() else {
+                        return AssertResult {
+                            spec: spec.clone(),
+                            passed: false,
+                            detail: "memoryPath 断言需要 Memory 终态 (--dump-memory 未提供)".into(),
+                        };
+                    };
+                    let mut cur = mem;
+                    let mut ok_path = true;
+                    for key in path {
+                        match cur.get(key) {
+                            Some(next) => cur = next,
+                            None => {
+                                ok_path = false;
+                                break;
+                            }
+                        }
+                    }
+                    let found = ok_path;
+                    let want = *exists;
+                    (found == want, format!("memory {}{} ({})", path.join("."), if want { " 存在" } else { " 不存在" }, if found { "命中" } else { "未命中" }))
+                }
                 AssertSpec::RclAtLeast { room, value } => {
                     let level: u8 = match room {
                         Some(name) => world

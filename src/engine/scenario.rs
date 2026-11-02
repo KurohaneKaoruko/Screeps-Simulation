@@ -214,6 +214,14 @@ pub enum AssertSpec {
     CpuP95Below { value: f64 },
     #[serde(rename = "noErrors")]
     NoErrors,
+    /// Memory 终态路径断言 (bot 侧簿记取证: 编队/任务/威胁记录等)
+    #[serde(rename = "memoryPath")]
+    MemoryPath {
+        /// 逐层键 (对象键或数组下标字符串)
+        path: Vec<String>,
+        /// true = 要求存在; false = 要求不存在
+        exists: bool,
+    },
 }
 
 /// 市场配置: 初始 credits + 外部订单 (NPC/他玩家)
